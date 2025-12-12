@@ -158,12 +158,17 @@ def main():
             break
 
     if nerdseq_port is None:
-        print("NerdSEQ not found!")
-        return
+        # NerdSEQ not found - create virtual MIDI port instead
+        print("⚠️  NerdSEQ not found - creating virtual MIDI port...")
+        midiout.open_virtual_port("DualSense_Controller")
+        port_name = "DualSense_Controller (Virtual)"
+    else:
+        # NerdSEQ found - use hardware port
+        midiout.open_port(nerdseq_port)
+        port_name = ports[nerdseq_port]
 
-    midiout.open_port(nerdseq_port)
-    print(f"✅ MIDI: {ports[nerdseq_port]}\n")
-    print("🎮 DualSense → 🎹 MIDI → 🎛️ NerdSEQ")
+    print(f"✅ MIDI Output: {port_name}\n")
+    print("🎮 DualSense → 🎹 MIDI → 🎛️ NerdSEQ/Virtual port")
     print("=" * 50)
     print("Controls:")
     print("  Buttons (✕○□△) → Notes")
