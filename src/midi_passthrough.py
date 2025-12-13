@@ -53,6 +53,11 @@ def main():
             print(f"⏭️  Skipping: {port} (output device - avoiding feedback)")
             continue
 
+        # Skip generic RtMidi outputs (self-created ports) but allow DualSense_Controller
+        if "RtMidi output" in port and "DualSense_Controller" not in port:
+            print(f"⏭️  Skipping: {port} (internal RtMidi port)")
+            continue
+
         # Add everything else to our listen list
         ports_to_listen.append((i, port))
         print(f"✅ Will listen to: {port}")
