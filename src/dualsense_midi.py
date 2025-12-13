@@ -205,11 +205,13 @@ def main():
                         if event.type == ecodes.EV_KEY:
                             if event.code == 310:  # BTN_TL (L1)
                                 controller_obj.l1_pressed = (event.value == 1)
+                                print(f"🔘 L1: {'PRESSED' if event.value == 1 else 'RELEASED'}")  # DEBUG
                                 if event.value == 1 and controller_obj.r1_pressed:
                                     controller_obj.check_motion_toggle()
 
                             elif event.code == 311:  # BTN_TR (R1)
                                 controller_obj.r1_pressed = (event.value == 1)
+                                print(f"🔘 R1: {'PRESSED' if event.value == 1 else 'RELEASED'}")  # DEBUG
                                 if event.value == 1 and controller_obj.l1_pressed:
                                     controller_obj.check_motion_toggle()
 
