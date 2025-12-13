@@ -1,0 +1,17 @@
+[Unit]
+Description=DualSense to MIDI Controller
+After=network.target sound.target
+
+[Service]
+Type=simple
+User=ahab
+WorkingDirectory=/home/ahab/dualsense-eurorack-midi
+ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/dualsense_midi.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

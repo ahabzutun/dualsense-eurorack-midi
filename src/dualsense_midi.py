@@ -4,6 +4,8 @@ from evdev import ecodes
 import rtmidi
 import time
 import select
+from pydualsense import pydualsense
+
 
 # MIDI CC Mapping Configuration
 CC_MAP = {
@@ -64,6 +66,13 @@ class MIDIController:
         self.l1_pressed = False
         self.r1_pressed = False
 
+        # Create pydualsense controller for LED control
+        self.ds = pydualsense()  # Make it self.ds not just ds!
+        self.ds.init()
+
+        # Set initial LED color
+        self.ds.light.setColorI(50, 50, 50)
+
     def scale_value(self, value, in_min, in_max, out_min=0, out_max=127):
         """Scale input value to MIDI range (0-127)"""
         value = max(in_min, min(in_max, value))  # Clamp
@@ -116,6 +125,13 @@ class MIDIController:
             self.motion_enabled = not self.motion_enabled
             status = "ENABLED ✅" if self.motion_enabled else "DISABLED ❌"
             print(f"\n🎛️  MOTION CONTROL {status} (L1+R1)\n")
+
+        # Set LED color based on motion state
+        if self.motion_enabled:
+            self.ds.light.setColorI(0, 100, 255)  # Bright cyan for motion active
+        else:
+            self.ds.light.setColorI(50, 50, 50)  # Dim white for normal mode
+
             return True
         return False
 
