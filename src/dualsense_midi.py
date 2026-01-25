@@ -179,6 +179,10 @@ class ChannelManager:
         self.freeze_states = [FreezeState() for _ in range(3)]
         self.loop_states = [LoopState() for _ in range(3)]  # NEW: Loop states
 
+            # D-pad step tracking (per channel)
+        self.dpad_vertical_steps = [0, 0, 0]     # Up/Down for each channel (0-7)
+        self.dpad_horizontal_steps = [0, 0, 0]   # Left/Right for each channel (0-7)
+
         # Track previous button states for edge detection
         self.prev_l3 = False
         self.prev_r3 = False
@@ -243,6 +247,37 @@ class ChannelManager:
         state = self.get_current_freeze_state()
         return state.l2_value if state.l2_frozen else current_value
 
+    def increment_vertical_step(self):
+        """Increment Up/Down step (max 7)"""
+        idx = self.current_channel - 1
+        self.dpad_vertical_steps[idx] = min(7, self.dpad_vertical_steps[idx] + 1)
+        return self.dpad_vertical_steps[idx]
+
+    def decrement_vertical_step(self):
+        """Decrement Up/Down step (min 0)"""
+        idx = self.current_channel - 1
+        self.dpad_vertical_steps[idx] = max(0, self.dpad_vertical_steps[idx] - 1)
+        return self.dpad_vertical_steps[idx]
+
+    def increment_horizontal_step(self):
+        """Increment Left/Right step (max 7)"""
+        idx = self.current_channel - 1
+        self.dpad_horizontal_steps[idx] = min(7, self.dpad_horizontal_steps[idx] + 1)
+        return self.dpad_horizontal_steps[idx]
+
+    def decrement_horizontal_step(self):
+        """Decrement Left/Right step (min 0)"""
+        idx = self.current_channel - 1
+        self.dpad_horizontal_steps[idx] = max(0, self.dpad_horizontal_steps[idx] - 1)
+        return self.dpad_horizontal_steps[idx]
+
+    def step_to_cc_value(self, step):
+            """Convert step (0-7) to CC value (0-127)"""
+            # 8 steps: 0, 18, 36, 54, 72, 90, 108, 127
+            if step == 7:
+                return 127
+            return step * 18
+
     def get_r2_value(self, current_value):
         """Get R2 value (frozen or live)"""
         self.current_r2 = current_value
@@ -305,6 +340,8 @@ CC_MAP = {
     'touchpad_y': 21,    # Touchpad Y
     'btn_south': 14,     # X button (✕) trigger (General Purpose)
     'btn_east': 15,      # O button (○) trigger (General Purpose)
+    'dpad_vertical': 11,   # D-pad Up/Down (Expression)
+    'dpad_horizontal': 13 # D-pad Left/Right (Effect Control 1)
 }
 
 # Note mapping for buttons
@@ -318,14 +355,6 @@ NOTE_MAP = {
     # 318: BTN_THUMBR (R3 - Right Stick Click) - Now used for FREEZE
     # 314: BTN_SELECT (Create/Share) - Used for channel switching
     # 315: BTN_START (Options) - Used for channel switching
-}
-
-# D-pad notes (handled separately as HAT axes)
-DPAD_NOTES = {
-    'up': 65,     # F4
-    'down': 63,   # D#4
-    'left': 61,   # C#4
-    'right': 66,  # F#4
 }
 
 # Configuration
@@ -735,7 +764,8 @@ def main():
         print("Controls:")
         print("  Button (□) → Note")
         print("  Buttons (✕○) → CC Triggers (14, 15) - with MIDI learn repeat")
-        print("  D-Pad (↑↓←→) → Notes")
+        print("  D-Pad (↑↓) → CC 11 (8 steps)")
+        print("  D-Pad (←→) → CC 13 (8 steps)")
         print("  Touchpad Click → Note")
         print("  L3 (Left Stick Click) → FREEZE L2/R2/Left Stick ❄️")
         print("  R3 (Right Stick Click) → FREEZE Right Stick ❄️")
@@ -1134,104 +1164,64 @@ def main():
 
                                         print(f"🎚️  R2     → CC{CC_MAP['r2_trigger']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
-                                # D-pad handling (HAT axes, not buttons!)
+                                # D-pad handling (HAT axes, now CC step controllers!)
                                 elif event.code == ecodes.ABS_HAT0X:  # D-pad Left/Right
-                                    if event.value == -1:  # Left
-                                        note = DPAD_NOTES['left']
-                                        note_on = [controller_obj.get_midi_channel_byte(0x90), note, 100]
-                                        midiout.send_message(note_on)
+                                    if event.value == -1:  # Left - decrement step
+                                        step = channel_manager.decrement_horizontal_step()
+                                        cc_val = channel_manager.step_to_cc_value(step)
+
+                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_horizontal'], cc_val]
+                                        midiout.send_message(midi_msg)
 
                                         # Record to loop
                                         loop_state = channel_manager.get_current_loop_state()
                                         if loop_state.recording:
-                                            loop_state.record_message(note_on)
+                                            loop_state.record_message(midi_msg)
 
-                                        controller_obj.active_notes['dpad_left'] = note
-                                        print(f"🎵 D-pad LEFT → Note ON: {note} (Ch {controller_obj.current_channel})")
-                                    elif event.value == 1:  # Right
-                                        note = DPAD_NOTES['right']
-                                        note_on = [controller_obj.get_midi_channel_byte(0x90), note, 100]
-                                        midiout.send_message(note_on)
+                                        print(f"⬅️  D-pad LEFT  → CC{CC_MAP['dpad_horizontal']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
+
+                                    elif event.value == 1:  # Right - increment step
+                                        step = channel_manager.increment_horizontal_step()
+                                        cc_val = channel_manager.step_to_cc_value(step)
+
+                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_horizontal'], cc_val]
+                                        midiout.send_message(midi_msg)
 
                                         # Record to loop
                                         loop_state = channel_manager.get_current_loop_state()
                                         if loop_state.recording:
-                                            loop_state.record_message(note_on)
+                                            loop_state.record_message(midi_msg)
 
-                                        controller_obj.active_notes['dpad_right'] = note
-                                        print(f"🎵 D-pad RIGHT → Note ON: {note} (Ch {controller_obj.current_channel})")
-                                    elif event.value == 0:  # Released
-                                        if 'dpad_left' in controller_obj.active_notes:
-                                            note_off = [controller_obj.get_midi_channel_byte(0x80), controller_obj.active_notes['dpad_left'], 0]
-                                            midiout.send_message(note_off)
-
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_off)
-
-                                            print(f"🎵 D-pad LEFT → Note OFF: {controller_obj.active_notes['dpad_left']} (Ch {controller_obj.current_channel})")
-                                            del controller_obj.active_notes['dpad_left']
-                                        if 'dpad_right' in controller_obj.active_notes:
-                                            note_off = [controller_obj.get_midi_channel_byte(0x80), controller_obj.active_notes['dpad_right'], 0]
-                                            midiout.send_message(note_off)
-
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_off)
-
-                                            print(f"🎵 D-pad RIGHT → Note OFF: {controller_obj.active_notes['dpad_right']} (Ch {controller_obj.current_channel})")
-                                            del controller_obj.active_notes['dpad_right']
+                                        print(f"➡️  D-pad RIGHT → CC{CC_MAP['dpad_horizontal']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_HAT0Y:  # D-pad Up/Down
-                                    if event.value == -1:  # Up
-                                        note = DPAD_NOTES['up']
-                                        note_on = [controller_obj.get_midi_channel_byte(0x90), note, 100]
-                                        midiout.send_message(note_on)
+                                    if event.value == -1:  # Up - increment step
+                                        step = channel_manager.increment_vertical_step()
+                                        cc_val = channel_manager.step_to_cc_value(step)
+
+                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_vertical'], cc_val]
+                                        midiout.send_message(midi_msg)
 
                                         # Record to loop
                                         loop_state = channel_manager.get_current_loop_state()
                                         if loop_state.recording:
-                                            loop_state.record_message(note_on)
+                                            loop_state.record_message(midi_msg)
 
-                                        controller_obj.active_notes['dpad_up'] = note
-                                        print(f"🎵 D-pad UP → Note ON: {note} (Ch {controller_obj.current_channel})")
-                                    elif event.value == 1:  # Down
-                                        note = DPAD_NOTES['down']
-                                        note_on = [controller_obj.get_midi_channel_byte(0x90), note, 100]
-                                        midiout.send_message(note_on)
+                                        print(f"⬆️  D-pad UP    → CC{CC_MAP['dpad_vertical']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
+
+                                    elif event.value == 1:  # Down - decrement step
+                                        step = channel_manager.decrement_vertical_step()
+                                        cc_val = channel_manager.step_to_cc_value(step)
+
+                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_vertical'], cc_val]
+                                        midiout.send_message(midi_msg)
 
                                         # Record to loop
                                         loop_state = channel_manager.get_current_loop_state()
                                         if loop_state.recording:
-                                            loop_state.record_message(note_on)
+                                            loop_state.record_message(midi_msg)
 
-                                        controller_obj.active_notes['dpad_down'] = note
-                                        print(f"🎵 D-pad DOWN → Note ON: {note} (Ch {controller_obj.current_channel})")
-                                    elif event.value == 0:  # Released
-                                        if 'dpad_up' in controller_obj.active_notes:
-                                            note_off = [controller_obj.get_midi_channel_byte(0x80), controller_obj.active_notes['dpad_up'], 0]
-                                            midiout.send_message(note_off)
-
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_off)
-
-                                            print(f"🎵 D-pad UP → Note OFF: {controller_obj.active_notes['dpad_up']} (Ch {controller_obj.current_channel})")
-                                            del controller_obj.active_notes['dpad_up']
-                                        if 'dpad_down' in controller_obj.active_notes:
-                                            note_off = [controller_obj.get_midi_channel_byte(0x80), controller_obj.active_notes['dpad_down'], 0]
-                                            midiout.send_message(note_off)
-
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_off)
-
-                                            print(f"🎵 D-pad DOWN → Note OFF: {controller_obj.active_notes['dpad_down']} (Ch {controller_obj.current_channel})")
-                                            del controller_obj.active_notes['dpad_down']
+                                        print(f"⬇️  D-pad DOWN  → CC{CC_MAP['dpad_vertical']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
 
                         # Handle motion sensor events
                         elif device == motion:
