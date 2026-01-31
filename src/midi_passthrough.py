@@ -6,22 +6,23 @@ def main():
     print("🎹 MIDI Hub Starting...")
     print("=" * 50)
 
-    # ===== STEP 1: Find and open the OUTPUT (NerdSEQ) =====
+    # ===== STEP 1: Find and open the OUTPUT (f_midi USB gadget) =====
     midiout = rtmidi.MidiOut()
     ports_out = midiout.get_ports()
 
-    nerdseq_port = None
+    f_midi_port = None
     for i, port in enumerate(ports_out):
-        if "NerdSEQ" in port:
-            nerdseq_port = i
+        if "f_midi" in port:
+            f_midi_port = i
             break
 
-    if nerdseq_port is None:
-        print("❌ NerdSEQ not found!")
+    if f_midi_port is None:
+        print("❌ f_midi (USB gadget) not found!")
+        print("Available ports:", ports_out)
         return
 
-    midiout.open_port(nerdseq_port)
-    print(f"✅ Output: {ports_out[nerdseq_port]}\n")
+    midiout.open_port(f_midi_port)
+    print(f"✅ Output: {ports_out[f_midi_port]} (USB Gadget)\n")
 
     # ===== STEP 2: Find ALL available INPUTS =====
     scanner = rtmidi.MidiIn()
@@ -40,7 +41,7 @@ def main():
     # - Example: NerdSEQ output → SSP, DualSense → both NerdSEQ and SSP
 
     # Current simple mode: Avoid feedback loop by skipping output devices as inputs
-    output_device_name = "NerdSEQ"  # TODO: Make this configurable
+    output_device_name = "f_midi"  # TODO: Make this configurable
 
     for i, port in enumerate(available_ports):
         # Skip "Midi Through" system port (always skip this)
@@ -85,7 +86,7 @@ def main():
         # IMPORTANT: Store this MidiIn object!
         input_ports.append(midiin)
 
-    print(f"🔄 Listening to {len(input_ports)} inputs, forwarding to NerdSEQ...")
+    print(f"🔄 Listening to {len(input_ports)} inputs, forwarding to f_midi (USB Gadget)...")
     print("Press Ctrl+C to stop\n")
 
     # ===== STEP 5: Keep running =====
