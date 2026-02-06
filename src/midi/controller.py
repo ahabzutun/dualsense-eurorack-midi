@@ -20,6 +20,14 @@ class MIDIController:
         self.active_notes = {}
         self.touchpad_active = False  # Track if finger is on touchpad
 
+        # Touchpad-based loop scanning
+        self.touchpad_x = 0      # 0-1920
+        self.touchpad_y = 0      # 0-1080
+        self.touchpad_active = False  # Already exists
+        self.window_position = 0.0    # 0.0 to 1.0 (percentage of loop)
+        self.window_size = 1.0        # 0.0 to 1.0 (percentage of loop)
+        self.min_window_ms = 5        # Minimum window for glitchy sounds
+
         # Motion control toggle and loop recording
         self.motion_enabled = False
         self.l1_pressed = False
@@ -327,6 +335,41 @@ class MIDIController:
         # Send to motors
         self.ds.setLeftMotor(rumble_left)
         self.ds.setRightMotor(rumble_right)
+
+    def update_touchpad(self, x, y, is_active):
+        """
+        Update touchpad position and calculate loop window
+        Called from main event loop when touchpad events arrive
+        """
+        self.touchpad_x = x
+        self.touchpad_y = y
+        self.touchpad_active = is_active
+
+        if not is_active:
+            # When finger lifts, reset to full loop playback
+            self.window_position = 0.0
+            self.window_size = 1.0
+            return
+
+        # Get current loop to calculate window
+        loop_state = self.channel_mgr.get_current_loop_state()
+        if not loop_state.playing or loop_state.loop_duration == 0:
+            return
+
+        # X-axis: Window starting position (0-100% of loop)
+        self.window_position = x / 1920.0
+
+        # Y-axis: Window size (minimum window to full loop)
+        # Inverted: Higher Y value = larger window
+        min_window_size = self.min_window_ms / (loop_state.loop_duration * 1000.0)
+        min_window_size = max(0.001, min(min_window_size, 1.0))  # Clamp to 0.1% - 100%
+
+        normalized_y = y / 1080.0
+        self.window_size = min_window_size + (normalized_y * (1.0 - min_window_size))
+
+        # Optional: Print for debugging
+        if int(time.time() * 4) % 2 == 0:  # Print occasionally
+            print(f"🎚️  Touchpad: Pos={self.window_position*100:.1f}% Size={self.window_size*100:.1f}%")
 
     def cleanup(self):
         """Properly shut down controller and haptics"""

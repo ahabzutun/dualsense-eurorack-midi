@@ -1,106 +1,162 @@
 #!/usr/bin/env python3
 import rtmidi
 import time
+import threading
+
+class MIDIHub:
+    def __init__(self):
+        self.outputs = {}  # {port_name: MidiOut object}
+        self.inputs = {}   # {port_name: MidiIn object}
+        self.skip_devices = ["f_midi", "NerdSEQ", "Midi Through"]
+        self.running = True
+        self.lock = threading.Lock()
+
+    def scan_and_update_outputs(self):
+        """Find and open all output devices"""
+        scanner = rtmidi.MidiOut()
+        available = scanner.get_ports()
+
+        # Find f_midi and NerdSEQ
+        found_outputs = {}
+
+        for i, port_name in enumerate(available):
+            if "f_midi" in port_name:
+                found_outputs['SSP'] = (i, port_name)
+            elif "NerdSEQ" in port_name:
+                found_outputs['NerdSEQ'] = (i, port_name)
+
+        with self.lock:
+            # Close outputs that are no longer available
+            for name in list(self.outputs.keys()):
+                if name not in found_outputs:
+                    print(f"❌ Output disconnected: {name}")
+                    try:
+                        self.outputs[name].close_port()
+                    except:
+                        pass
+                    del self.outputs[name]
+
+            # Open new outputs
+            for name, (port_num, port_name) in found_outputs.items():
+                if name not in self.outputs:
+                    try:
+                        midiout = rtmidi.MidiOut()
+                        midiout.open_port(port_num)
+                        self.outputs[name] = midiout
+                        print(f"✅ Output connected: {port_name}")
+                    except Exception as e:
+                        print(f"⚠️  Failed to open {port_name}: {e}")
+
+    def scan_and_update_inputs(self):
+        """Find and open all input devices"""
+        scanner = rtmidi.MidiIn()
+        available = scanner.get_ports()
+
+        # Find devices we should listen to
+        found_inputs = {}
+
+        for i, port_name in enumerate(available):
+            # Skip output devices and system ports
+            should_skip = any(skip in port_name for skip in self.skip_devices)
+            if "RtMidi output" in port_name and "DualSense_Controller" not in port_name:
+                should_skip = True
+
+            if not should_skip:
+                found_inputs[port_name] = i
+
+        with self.lock:
+            # Close inputs that are no longer available
+            for port_name in list(self.inputs.keys()):
+                if port_name not in found_inputs:
+                    print(f"❌ Input disconnected: {port_name}")
+                    try:
+                        self.inputs[port_name].close_port()
+                    except:
+                        pass
+                    del self.inputs[port_name]
+
+            # Open new inputs
+            for port_name, port_num in found_inputs.items():
+                if port_name not in self.inputs:
+                    try:
+                        midiin = rtmidi.MidiIn()
+                        midiin.open_port(port_num)
+                        midiin.set_callback(self.make_callback(port_name))
+                        self.inputs[port_name] = midiin
+                        print(f"✅ Input connected: {port_name}")
+                    except Exception as e:
+                        print(f"⚠️  Failed to open {port_name}: {e}")
+
+    def make_callback(self, port_name):
+        """Create a callback that forwards MIDI to all outputs"""
+        def callback(message, data):
+            try:
+                midi_message, deltatime = message
+                print(f"📨 [{port_name}] → {midi_message}")
+
+                with self.lock:
+                    for output_name, output in self.outputs.items():
+                        try:
+                            output.send_message(midi_message)
+                        except Exception as e:
+                            print(f"⚠️  Failed to send to {output_name}: {e}")
+            except Exception as e:
+                print(f"⚠️  Callback error for {port_name}: {e}")
+
+        return callback
+
+    def monitor_loop(self):
+        """Periodically rescan for device changes"""
+        print("🔄 Starting hot-plug monitor (rescanning every 2 seconds)...")
+        while self.running:
+            try:
+                self.scan_and_update_outputs()
+                self.scan_and_update_inputs()
+                time.sleep(2)  # Check every 2 seconds
+            except Exception as e:
+                print(f"⚠️  Monitor error: {e}")
+                time.sleep(2)
+
+    def run(self):
+        """Main run loop"""
+        print("🎹 MIDI Hub Starting (Hot-Plug Enabled)...")
+        print("=" * 50)
+
+        # Initial scan
+        self.scan_and_update_outputs()
+        self.scan_and_update_inputs()
+
+        # Start monitoring thread
+        monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
+        monitor_thread.start()
+
+        print("\n🔄 Ready! Devices can be plugged/unplugged anytime.")
+        print("Press Ctrl+C to stop\n")
+
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n\n👋 Shutting down...")
+            self.running = False
+
+            with self.lock:
+                for midiin in self.inputs.values():
+                    try:
+                        midiin.close_port()
+                    except:
+                        pass
+                for midiout in self.outputs.values():
+                    try:
+                        midiout.close_port()
+                    except:
+                        pass
+
+            print("✅ All ports closed")
 
 def main():
-    print("🎹 MIDI Hub Starting...")
-    print("=" * 50)
-
-    # ===== STEP 1: Find and open the OUTPUT (f_midi USB gadget) =====
-    midiout = rtmidi.MidiOut()
-    ports_out = midiout.get_ports()
-
-    f_midi_port = None
-    for i, port in enumerate(ports_out):
-        if "f_midi" in port:
-            f_midi_port = i
-            break
-
-    if f_midi_port is None:
-        print("❌ f_midi (USB gadget) not found!")
-        print("Available ports:", ports_out)
-        return
-
-    midiout.open_port(f_midi_port)
-    print(f"✅ Output: {ports_out[f_midi_port]} (USB Gadget)\n")
-
-    # ===== STEP 2: Find ALL available INPUTS =====
-    scanner = rtmidi.MidiIn()
-    available_ports = scanner.get_ports()
-
-    print("🔍 Scanning for MIDI inputs...")
-    for i, port in enumerate(available_ports):
-        print(f"   {i}: {port}")
-
-# ===== STEP 3: Filter which ports to listen to =====
-    ports_to_listen = []
-
-    # TODO: GADGET MODE - When Pi is in gadget mode with multiple outputs (SSP, NerdSEQ, etc.):
-    # - Remove this NerdSEQ input filter
-    # - Implement routing logic to send different inputs to different outputs
-    # - Example: NerdSEQ output → SSP, DualSense → both NerdSEQ and SSP
-
-    # Current simple mode: Avoid feedback loop by skipping output devices as inputs
-    output_device_name = "f_midi"  # TODO: Make this configurable
-
-    for i, port in enumerate(available_ports):
-        # Skip "Midi Through" system port (always skip this)
-        if "Midi Through" in port:
-            print(f"⏭️  Skipping: {port}")
-            continue
-
-        # Skip output device to avoid feedback (TODO: Remove when implementing routing)
-        if output_device_name in port:
-            print(f"⏭️  Skipping: {port} (output device - avoiding feedback)")
-            continue
-
-        # Skip generic RtMidi outputs (self-created ports) but allow DualSense_Controller
-        if "RtMidi output" in port and "DualSense_Controller" not in port:
-            print(f"⏭️  Skipping: {port} (internal RtMidi port)")
-            continue
-
-        # Add everything else to our listen list
-        ports_to_listen.append((i, port))
-        print(f"✅ Will listen to: {port}")
-
-    print()  # Blank line
-
-    # ===== STEP 4: Create MidiIn object for EACH port =====
-    input_ports = []  # Store all MidiIn objects here
-
-    for port_num, port_name in ports_to_listen:
-        # Create a NEW MidiIn for each input port
-        midiin = rtmidi.MidiIn()
-        midiin.open_port(port_num)
-
-        # Create callback that forwards to NerdSEQ
-        def make_callback(name):
-            def callback(message, data):
-                midi_message, deltatime = message
-                print(f"📨 [{name}] → {midi_message}")
-                midiout.send_message(midi_message)
-            return callback
-
-        midiin.set_callback(make_callback(port_name))
-
-        # IMPORTANT: Store this MidiIn object!
-        input_ports.append(midiin)
-
-    print(f"🔄 Listening to {len(input_ports)} inputs, forwarding to f_midi (USB Gadget)...")
-    print("Press Ctrl+C to stop\n")
-
-    # ===== STEP 5: Keep running =====
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n\n👋 Shutting down...")
-    finally:
-        # Clean up all ports
-        for midiin in input_ports:
-            midiin.close_port()
-        midiout.close_port()
-        print("✅ All ports closed")
+    hub = MIDIHub()
+    hub.run()
 
 if __name__ == "__main__":
     main()

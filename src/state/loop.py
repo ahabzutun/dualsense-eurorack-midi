@@ -64,8 +64,15 @@ class LoopState:
 
             self.midi_buffer.append((relative_time, midi_message))
 
-    def start_playback(self, midiout):
-        """Start loop playback in background thread"""
+    def start_playback(self, midiout, window_position_func=None, window_size_func=None):
+        """
+        Start loop playback in background thread
+
+        Args:
+            midiout: MIDI output interface
+            window_position_func: Optional function returning window position (0.0-1.0)
+            window_size_func: Optional function returning window size (0.0-1.0)
+        """
         if not self.midi_buffer or self.playing:
             return False
 
@@ -73,7 +80,7 @@ class LoopState:
         self.playback_stop_event.clear()
         self.playback_thread = threading.Thread(
             target=self._playback_loop,
-            args=(midiout,),
+            args=(midiout, window_position_func, window_size_func),
             daemon=True
         )
         self.playback_thread.start()
@@ -87,38 +94,102 @@ class LoopState:
             if self.playback_thread:
                 self.playback_thread.join(timeout=0.5)
 
-    def _playback_loop(self, midiout):
-        """Background thread that plays back the loop continuously"""
+    def _playback_loop(self, midiout, window_position_func=None, window_size_func=None):
+        """
+        Granular scanning playback - window continuously retriggers
+        Small windows = glitchy stuttering, large windows = smooth playback
+        Moving touchpad X = immediate scrubbing through the recording
+        """
+
+        last_window_pos = None
+        POSITION_CHANGE_THRESHOLD = 0.05  # 5% movement triggers new grain
+
         while self.playing and not self.playback_stop_event.is_set():
-            loop_start = time.time()
-
             with self.buffer_lock:
-                buffer_copy = list(self.midi_buffer)  # Copy for thread safety
+                buffer_copy = list(self.midi_buffer)
+                loop_duration = self.loop_duration
 
+            if loop_duration == 0:
+                time.sleep(0.01)
+                continue
+
+            # Get current window parameters
+            window_pos = window_position_func() if window_position_func else 0.0
+            window_size = window_size_func() if window_size_func else 1.0
+
+            # Calculate window boundaries in seconds
+            window_start_time = window_pos * loop_duration
+            window_length = window_size * loop_duration
+            window_end_time = window_start_time + window_length
+
+            # Minimum grain length to prevent CPU overload with tiny windows
+            MIN_GRAIN_MS = 10
+            grain_duration = max(window_length, MIN_GRAIN_MS / 1000.0)
+
+            # Collect all messages in the current window
+            messages_in_window = []
             for timestamp, midi_msg in buffer_copy:
-                if not self.playing or self.playback_stop_event.is_set():
+                in_window = False
+
+                if window_end_time <= loop_duration:
+                    # Normal case: window doesn't wrap
+                    if window_start_time <= timestamp < window_end_time:
+                        in_window = True
+                else:
+                    # Wrapped case: window extends past loop end
+                    wrap_amount = window_end_time - loop_duration
+                    if timestamp >= window_start_time or timestamp < wrap_amount:
+                        in_window = True
+
+                if in_window:
+                    # Calculate relative position within the window
+                    relative_pos = timestamp - window_start_time
+                    if relative_pos < 0:  # Handle wrap
+                        relative_pos += loop_duration
+                    messages_in_window.append((relative_pos, midi_msg))
+
+            # Sort messages by their position in the window
+            messages_in_window.sort(key=lambda x: x[0])
+
+            # PLAY THE GRAIN - retrigger all messages in window
+            grain_start = time.time()
+
+            for rel_time, midi_msg in messages_in_window:
+                if not self.playing:
                     break
 
-                # Wait until it's time to play this message
-                target_time = loop_start + timestamp
+                # Check if window position moved significantly during playback
+                # If so, abort this grain and start a new one at the new position
+                current_pos = window_position_func() if window_position_func else 0.0
+                if last_window_pos is not None and abs(current_pos - window_pos) > POSITION_CHANGE_THRESHOLD:
+                    # Window moved - retrigger immediately with new position
+                    break
+
+                # Calculate when to play this message within the grain
+                # Scale the timing to fit the grain duration
+                if window_length > 0:
+                    scaled_time = (rel_time / window_length) * grain_duration
+                else:
+                    scaled_time = 0
+
+                target_time = grain_start + scaled_time
                 sleep_time = target_time - time.time()
 
                 if sleep_time > 0:
-                    # Use event.wait for interruptible sleep
                     if self.playback_stop_event.wait(timeout=sleep_time):
-                        break  # Stop event was set
+                        break
 
                 # Send the MIDI message
                 try:
                     midiout.send_message(midi_msg)
                 except:
-                    pass  # Ignore errors during playback
+                    pass
 
-            # Wait for loop to complete before repeating
-            if self.playing and not self.playback_stop_event.is_set():
-                remaining_time = self.loop_duration - (time.time() - loop_start)
-                if remaining_time > 0:
-                    self.playback_stop_event.wait(timeout=remaining_time)
+            last_window_pos = window_pos
+
+            # Tiny delay before retriggering grain (prevents CPU overload)
+            # This is what creates the continuous scanning effect!
+            self.playback_stop_event.wait(timeout=0.001)
 
     def clear_loop(self):
         """Clear the loop buffer (safe version that prevents deadlock)"""

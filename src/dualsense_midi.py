@@ -170,7 +170,9 @@ def main():
                                                     controller_obj.update_led_color()
                                                     print(f"\n⏸️  Channel {channel_manager.current_channel}: Playback STOPPED (R1)")
                                                 elif loop_state.midi_buffer:
-                                                    if loop_state.start_playback(midiout):
+                                                    if loop_state.start_playback(midiout,
+                                                        window_position_func=lambda: controller_obj.window_position,
+                                                        window_size_func=lambda: controller_obj.window_size):
                                                         controller_obj.update_led_color()
                                                         print(f"\n▶️  Channel {channel_manager.current_channel}: Playing loop ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events) (R1)")
                                                 else:
@@ -234,7 +236,7 @@ def main():
                                             if press_duration >= LONG_PRESS_DURATION:
                                                 # LONG PRESS: Toggle recording
                                                 if loop_state.recording:
-                                                    if loop_state.stop_recording():
+                                                    if loop_state.stop_recording():  # ✅ Correct!
                                                         print(f"\n⏹️  Channel {channel_manager.current_channel}: Recording STOPPED ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events)")
                                                     else:
                                                         print(f"\n⚠️  Channel {channel_manager.current_channel}: Recording cancelled (empty or too long)")
@@ -250,9 +252,11 @@ def main():
                                                     controller_obj.update_led_color()
                                                     print(f"\n⏸️  Channel {channel_manager.current_channel}: Loop STOPPED")
                                                 elif loop_state.midi_buffer:
-                                                    if loop_state.start_playback(midiout):
+                                                    if loop_state.start_playback(midiout,
+                                                        window_position_func=lambda: controller_obj.window_position,
+                                                        window_size_func=lambda: controller_obj.window_size):  # ✅ Fixed!
                                                         controller_obj.update_led_color()
-                                                        print(f"\n▶️  Channel {channel_manager.current_channel}: Loop PLAYING ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events)")
+                                                        print(f"\n▶️  Channel {channel_manager.current_channel}: Loop PLAYING...")
                                                 else:
                                                     print(f"\n⚠️  Channel {channel_manager.current_channel}: No loop to play")
 
@@ -580,6 +584,8 @@ def main():
                                         print("👆 Touchpad: Finger DOWN")
                                     else:
                                         print("👆 Touchpad: Finger UP")
+                                        # Reset window when finger lifts
+                                        controller_obj.update_touchpad(0, 0, False)
 
                                 elif event.code == ecodes.BTN_LEFT:
                                     if event.code in NOTE_MAP:
@@ -609,32 +615,51 @@ def main():
                                             print(f"🎵 Touchpad Click → Note OFF: {note} (Ch {controller_obj.current_channel})")
 
                             elif event.type == ecodes.EV_ABS:
-                                if controller_obj.touchpad_active:
-                                    if event.code == ecodes.ABS_X:  # Touchpad X
-                                        cc_val = controller_obj.scale_value(event.value, 0, 1920)
-                                        if controller_obj.should_send_cc(CC_MAP['touchpad_x'], cc_val):
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_x'], cc_val]
-                                            midiout.send_message(midi_msg)
+                                if event.code == ecodes.ABS_X:  # Touchpad X
+                                    touchpad_x = event.value
 
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
+                                    # Update window position if finger is down and loop is playing
+                                    if controller_obj.touchpad_active:
+                                        loop_state = channel_manager.get_current_loop_state()
+                                        if loop_state.playing:
+                                            # Update scanning window - Y value comes from next event or stored value
+                                            controller_obj.update_touchpad(touchpad_x, controller_obj.touchpad_y, True)
 
-                                            print(f"👆 Touch X → CC{CC_MAP['touchpad_x']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                        # Also send as CC when NOT manipulating loop
+                                        if not loop_state.playing:
+                                            cc_val = controller_obj.scale_value(touchpad_x, 0, 1920)
+                                            if controller_obj.should_send_cc(CC_MAP['touchpad_x'], cc_val):
+                                                midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_x'], cc_val]
+                                                midiout.send_message(midi_msg)
 
-                                    elif event.code == ecodes.ABS_Y:  # Touchpad Y
-                                        cc_val = controller_obj.scale_value(event.value, 0, 1080)
-                                        if controller_obj.should_send_cc(CC_MAP['touchpad_y'], cc_val):
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_y'], cc_val]
-                                            midiout.send_message(midi_msg)
+                                                # Record to loop
+                                                if loop_state.recording:
+                                                    loop_state.record_message(midi_msg)
 
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
+                                                print(f"👆 Touch X → CC{CC_MAP['touchpad_x']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
-                                            print(f"👆 Touch Y → CC{CC_MAP['touchpad_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                elif event.code == ecodes.ABS_Y:  # Touchpad Y
+                                    touchpad_y = event.value
+
+                                    # Update window size if finger is down and loop is playing
+                                    if controller_obj.touchpad_active:
+                                        loop_state = channel_manager.get_current_loop_state()
+                                        if loop_state.playing:
+                                            # Update scanning window
+                                            controller_obj.update_touchpad(controller_obj.touchpad_x, touchpad_y, True)
+
+                                        # Also send as CC when NOT manipulating loop
+                                        if not loop_state.playing:
+                                            cc_val = controller_obj.scale_value(touchpad_y, 0, 1080)
+                                            if controller_obj.should_send_cc(CC_MAP['touchpad_y'], cc_val):
+                                                midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_y'], cc_val]
+                                                midiout.send_message(midi_msg)
+
+                                                # Record to loop
+                                                if loop_state.recording:
+                                                    loop_state.record_message(midi_msg)
+
+                                                print(f"👆 Touch Y → CC{CC_MAP['touchpad_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
                 # After processing all events, send repeated CCs for held buttons
                 controller_obj.send_held_button_ccs(midiout)
