@@ -11,6 +11,28 @@ from state.freeze import FreezeState
 from state.loop import LoopState
 from state.channel_manager import ChannelManager
 from midi.controller import MIDIController
+from state.clock_source import ClockSource
+from state.sequencer import SequencerManager
+
+def _sequencer_trigger(midiout, channel_manager, midi_channel, cc_number, value):
+    """
+    Callback for sequencer triggers.
+    Sends MIDI and records to loop if active.
+    """
+    try:
+        status_byte = 0xB0 + (midi_channel - 1)
+        message = [status_byte, cc_number, value]
+        midiout.send_message(message)
+
+        # Record to loop
+        loop_state = channel_manager.loop_states[midi_channel - 1]
+        if loop_state.recording:
+            loop_state.record_message(message)
+
+        # Print BOTH ON and OFF for debugging
+        print(f"🎹 Seq CH{midi_channel} → CC{cc_number}: {value}")
+    except Exception as e:
+        print(f"[Sequencer] Error: {e}")
 
 def main():
     # Initialize channel manager first
@@ -56,6 +78,31 @@ def main():
 
     print(f"✅ MIDI Output: {port_name}\n")
 
+    # ===== NOW INITIALIZE SEQUENCER (midiout exists now!) =====
+    print("🎹 Initializing sequencer system...")
+    clock_source = ClockSource(internal_bpm=120)
+    sequencer_manager = SequencerManager(clock_source, num_channels=3)
+
+    # Create sequencers - customize CC numbers here!
+    SEQUENCER_CCS = [22, 23, 24]  # CC numbers for channels 1, 2, 3
+
+    for channel_id in range(3):
+        sequencer_manager.add_sequencer(
+            channel_id=channel_id,
+            midi_channel=channel_id + 1,
+            cc_number=SEQUENCER_CCS[channel_id],
+            trigger_callback=lambda ch, cc, val, mgr=channel_manager, out=midiout:
+                _sequencer_trigger(out, mgr, ch, cc, val)
+        )
+
+    clock_source.start()
+
+    # Store references in controller_obj
+    controller_obj.clock_source = clock_source
+    controller_obj.sequencer_manager = sequencer_manager
+    print("✅ Sequencer system initialized")
+    print(f"   Clock: Internal {clock_source.internal_bpm} BPM (will sync to NerdSEQ if detected)\n")
+
     if controller_available:
         print("🎮 DualSense → 🎹 MIDI → 🎛️ Passthrough Service")
         print("=" * 50)
@@ -91,6 +138,14 @@ def main():
         print("🎛️  Motion Control: DISABLED (Press L1+R1 to enable)")
         print("=" * 50)
         print("Press Ctrl+C to exit\n")
+        print("=" * 50)
+        print("🎹 SEQUENCER CONTROLS:")
+        print("   L2 + ○ → Toggle Sequencer ON/OFF")
+        print("   L2 + □ → Toggle Quantization")
+        print("   L2 + △ → Cycle Pattern (4/4, Triplet, etc.)")
+        print("   L2 + ✕ → Reset Sequencer")
+        print("   L2 + D-Pad ↑↓ → Adjust BPM")
+        print("=" * 50)
     else:
         print("⏸️  Waiting for DualSense controller to be connected...")
         print("   Virtual MIDI port active for passthrough service")
@@ -217,6 +272,14 @@ def main():
 
                                 # === LOOP RECORDING: Triangle Button ===
                                 elif event.code == 307:  # BTN_NORTH (△)
+                                    if controller_obj.l2_held and event.value == 1:
+                                        # L2 + Triangle: Cycle pattern
+                                        controller_obj.sequencer_manager.cycle_current_pattern()
+                                        seq = controller_obj.sequencer_manager.get_current_sequencer()
+                                        if seq:
+                                            print(f"\n🎹 CH{channel_manager.current_channel}: Pattern = {seq.pattern.value}")
+                                        continue
+
                                     loop_state = channel_manager.get_current_loop_state()
 
                                     if event.value == 1:  # Button pressed
@@ -236,7 +299,7 @@ def main():
                                             if press_duration >= LONG_PRESS_DURATION:
                                                 # LONG PRESS: Toggle recording
                                                 if loop_state.recording:
-                                                    if loop_state.stop_recording():
+                                                    if loop_state.stop_recording():  # ✅ Correct!
                                                         print(f"\n⏹️  Channel {channel_manager.current_channel}: Recording STOPPED ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events)")
                                                     else:
                                                         print(f"\n⚠️  Channel {channel_manager.current_channel}: Recording cancelled (empty or too long)")
@@ -254,7 +317,7 @@ def main():
                                                 elif loop_state.midi_buffer:
                                                     if loop_state.start_playback(midiout,
                                                         window_position_func=lambda: controller_obj.window_position,
-                                                        window_size_func=lambda: controller_obj.window_size):
+                                                        window_size_func=lambda: controller_obj.window_size):  # ✅ Fixed!
                                                         controller_obj.update_led_color()
                                                         print(f"\n▶️  Channel {channel_manager.current_channel}: Loop PLAYING...")
                                                 else:
@@ -262,8 +325,16 @@ def main():
 
                                         controller_obj.triangle_pressed = False
 
-                                # Track Square button for clear combo and normal note
+                                # Track Square button for clear combo
                                 elif event.code == 308:  # BTN_WEST (□)
+                                    if controller_obj.l2_held and event.value == 1:
+                                        # L2 + Square: Toggle quantization
+                                        controller_obj.sequencer_manager.toggle_current_quantization()
+                                        seq = controller_obj.sequencer_manager.get_current_sequencer()
+                                        mode = "QUANTIZED ⏱️" if (seq and seq.quantized) else "FREE 🔓"
+                                        print(f"\n🎹 CH{channel_manager.current_channel}: {mode}")
+                                        continue
+
                                     if event.value == 1:  # Pressed
                                         controller_obj.square_pressed = True
 
@@ -304,7 +375,7 @@ def main():
                                             del controller_obj.active_notes[event.code]
                                             print(f"🎵 Note OFF: {note} (Ch {controller_obj.current_channel})")
 
-                                # SELECT button for channel switching
+                                # NEW: SELECT button for channel switching (no notes)
                                 elif event.code == 314:  # BTN_SELECT (Create/Share)
                                     if event.value == 1:  # Pressed
                                         controller_obj.select_pressed = True
@@ -312,7 +383,7 @@ def main():
                                     else:  # Released
                                         controller_obj.select_pressed = False
 
-                                # START button for channel switching
+                                # NEW: START button for channel switching (no notes)
                                 elif event.code == 315:  # BTN_START (Options)
                                     if event.value == 1:  # Pressed
                                         controller_obj.start_pressed = True
@@ -320,8 +391,16 @@ def main():
                                     else:  # Released
                                         controller_obj.start_pressed = False
 
-                                # CC Triggers: X button
+                                # CC Triggers: X and O buttons
                                 elif event.code == 304:  # BTN_SOUTH (✕)
+                                    if controller_obj.l2_held and event.value == 1:
+                                        # L2 + X: Reset sequencer
+                                        seq = controller_obj.sequencer_manager.get_current_sequencer()
+                                        if seq:
+                                            seq.reset()
+                                            print(f"\n🎹 CH{channel_manager.current_channel}: Sequencer RESET ↺")
+                                        continue
+
                                     if event.value == 1:  # Pressed
                                         controller_obj.btn_south_held = True
                                         controller_obj.last_btn_send_time['south'] = time.time()
@@ -350,8 +429,17 @@ def main():
 
                                         print(f"🎚️  X (✕)  → CC{CC_MAP['btn_south']:2d}:   0 (Trigger OFF) (Ch {controller_obj.current_channel})")
 
-                                # CC Triggers: O button
                                 elif event.code == 305:  # BTN_EAST (○)
+                                    if controller_obj.l2_held and event.value == 1:
+                                        # L2 + Circle: Toggle sequencer
+                                        controller_obj.sequencer_manager.toggle_current_sequencer()
+                                        seq = controller_obj.sequencer_manager.get_current_sequencer()
+                                        status = "ON 🟢" if (seq and seq.enabled) else "OFF ⚪"
+                                        print(f"\n🎹 CH{channel_manager.current_channel} Sequencer: {status}")
+                                        controller_obj.update_led_color()
+                                        # Don't process as normal button
+                                        continue
+
                                     if event.value == 1:  # Pressed
                                         controller_obj.btn_east_held = True
                                         controller_obj.last_btn_send_time['east'] = time.time()
@@ -443,6 +531,9 @@ def main():
                                     raw_val = controller_obj.scale_value(event.value, 0, 255)
                                     cc_val = channel_manager.get_l2_value(raw_val)
 
+                                    # Check if L2 is held firmly for sequencer mode
+                                    controller_obj.l2_held = (event.value > controller_obj.l2_modifier_threshold)
+
                                     if controller_obj.should_send_cc(CC_MAP['l2_trigger'], cc_val):
                                         midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['l2_trigger'], cc_val]
                                         midiout.send_message(midi_msg)
@@ -499,6 +590,18 @@ def main():
                                         print(f"➡️  D-pad RIGHT → CC{CC_MAP['dpad_horizontal']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_HAT0Y:  # D-pad Up/Down
+                                    if controller_obj.l2_held:
+                                        if event.value == -1:  # L2 + Up = Increase BPM
+                                            current_bpm = controller_obj.clock_source.get_current_bpm()
+                                            controller_obj.clock_source.set_bpm(current_bpm + 5)
+                                            print(f"\n🎼 BPM: {controller_obj.clock_source.get_current_bpm()} (+5)")
+                                            continue
+                                        elif event.value == 1:  # L2 + Down = Decrease BPM
+                                            current_bpm = controller_obj.clock_source.get_current_bpm()
+                                            controller_obj.clock_source.set_bpm(current_bpm - 5)
+                                            print(f"\n🎼 BPM: {controller_obj.clock_source.get_current_bpm()} (-5)")
+                                            continue
+
                                     if event.value == -1:  # Up - increment step
                                         step = channel_manager.increment_vertical_step()
                                         cc_val = channel_manager.step_to_cc_value(step)
@@ -668,6 +771,10 @@ def main():
 
         except KeyboardInterrupt:
             print("\n\n👋 Shutting down...")
+
+            if hasattr(controller_obj, 'clock_source'):
+                controller_obj.clock_source.stop()
+                print("🎹 Sequencer stopped")
 
             # Send note offs for any active notes
             for note in controller_obj.active_notes.values():

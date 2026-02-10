@@ -5,19 +5,24 @@ import threading
 
 class MIDIHub:
     def __init__(self):
-        self.outputs = {}  # {port_name: MidiOut object}
-        self.inputs = {}   # {port_name: MidiIn object}
+        self.outputs = {}
+        self.inputs = {}
         self.skip_devices = ["f_midi", "NerdSEQ", "Midi Through"]
         self.running = True
         self.lock = threading.Lock()
 
+        # Create scanners ONCE and reuse them
+        self.output_scanner = rtmidi.MidiOut()
+        self.input_scanner = rtmidi.MidiIn()
+
     def scan_and_update_outputs(self):
         """Find and open all output devices"""
-        scanner = rtmidi.MidiOut()
-        available = scanner.get_ports()
-        del scanner  # Fix memory leak!
+        try:
+            available = self.output_scanner.get_ports()
+        except Exception as e:
+            print(f"⚠️  Cannot scan outputs: {e}")
+            return
 
-        # Find f_midi and NerdSEQ
         found_outputs = {}
 
         for i, port_name in enumerate(available):
@@ -47,23 +52,29 @@ class MIDIHub:
                 if name not in self.outputs:
                     try:
                         midiout = rtmidi.MidiOut()
+                    except Exception as e:
+                        print(f"⚠️  Cannot create {port_name} client: {e}")
+                        continue
+
+                    try:
                         midiout.open_port(port_num)
                         self.outputs[name] = midiout
                         print(f"✅ Output connected: {port_name}")
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
+                        del midiout
 
     def scan_and_update_inputs(self):
         """Find and open all input devices"""
-        scanner = rtmidi.MidiIn()
-        available = scanner.get_ports()
-        del scanner  # Fix memory leak!
+        try:
+            available = self.input_scanner.get_ports()
+        except Exception as e:
+            print(f"⚠️  Cannot scan inputs: {e}")
+            return
 
-        # Find devices we should listen to
         found_inputs = {}
 
         for i, port_name in enumerate(available):
-            # Skip output devices and system ports
             should_skip = any(skip in port_name for skip in self.skip_devices)
             if "RtMidi output" in port_name and "DualSense_Controller" not in port_name:
                 should_skip = True
@@ -88,12 +99,18 @@ class MIDIHub:
                 if port_name not in self.inputs:
                     try:
                         midiin = rtmidi.MidiIn()
+                    except Exception as e:
+                        print(f"⚠️  Cannot create {port_name} client: {e}")
+                        continue
+
+                    try:
                         midiin.open_port(port_num)
                         midiin.set_callback(self.make_callback(port_name))
                         self.inputs[port_name] = midiin
                         print(f"✅ Input connected: {port_name}")
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
+                        del midiin
 
     def make_callback(self, port_name):
         """Create a callback that forwards MIDI to all outputs"""
@@ -123,7 +140,7 @@ class MIDIHub:
             try:
                 self.scan_and_update_outputs()
                 self.scan_and_update_inputs()
-                time.sleep(2)  # Check every 2 seconds
+                time.sleep(2)
             except Exception as e:
                 print(f"⚠️  Monitor error: {e}")
                 time.sleep(2)
@@ -162,6 +179,10 @@ class MIDIHub:
                         midiout.close_port()
                     except:
                         pass
+
+            # Cleanup scanners
+            del self.output_scanner
+            del self.input_scanner
 
             print("✅ All ports closed")
 
