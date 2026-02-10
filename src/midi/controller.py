@@ -28,6 +28,11 @@ class MIDIController:
         self.window_size = 1.0        # 0.0 to 1.0 (percentage of loop)
         self.min_window_ms = 5        # Minimum window for glitchy sounds
 
+        # LEFT STICK SLICE BANKING
+        self.slice_bank = 0           # Current bank (0-7 for 128 slices total)
+        self.slices_per_bank = 16     # Slices per bank
+        self.max_banks = 7            # 8 banks total (0-7) = 128 MIDI values
+
         # Motion control toggle and loop recording
         self.motion_enabled = False
         self.l1_pressed = False
@@ -53,6 +58,10 @@ class MIDIController:
         self.last_btn_send_time = {'south': 0, 'east': 0}
         self.btn_repeat_interval = 0.05  # Send CC every 50ms while held
 
+        # Sequencer control - L2 as modifier
+        self.l2_held = False
+        self.l2_modifier_threshold = 200  # Value where L2 acts as modifier (0-255)
+
         # Loop recording - Triangle button timing
         self.triangle_pressed = False
         self.triangle_press_time = 0
@@ -74,6 +83,56 @@ class MIDIController:
         """Scale input value to MIDI range (0-127)"""
         value = max(in_min, min(in_max, value))  # Clamp
         return int((value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min)
+
+    def calculate_slice_with_bank(self, stick_value):
+        """
+        Convert stick position (0-255) to absolute slice number with banking.
+
+        Args:
+            stick_value: Raw stick value 0-255
+        Returns:
+            MIDI CC value (0-127) representing the slice
+        """
+        # Map stick position to 0-15 range within the current bank
+        slice_in_bank = int((stick_value / 255.0) * (self.slices_per_bank - 1))
+
+        # Add the bank offset
+        absolute_slice = (self.slice_bank * self.slices_per_bank) + slice_in_bank
+
+        # Constrain to MIDI range (0-127)
+        midi_value = min(absolute_slice, 127)
+
+        return midi_value
+
+    def handle_dpad_left(self):
+        """Decrease slice bank (left arrow)"""
+        if self.slice_bank > 0:
+            self.slice_bank -= 1
+            start_slice = self.slice_bank * self.slices_per_bank + 1
+            end_slice = (self.slice_bank + 1) * self.slices_per_bank
+            print(f"\n⬅️  SLICE BANK {self.slice_bank}: Slices {start_slice}-{end_slice}\n")
+
+            # Optional: Give haptic feedback
+            self.ds.setRightMotor(100)
+            time.sleep(0.05)
+            self.ds.setRightMotor(0)
+        else:
+            print(f"\n⬅️  Already at bank 0 (slices 1-16)\n")
+
+    def handle_dpad_right(self):
+        """Increase slice bank (right arrow)"""
+        if self.slice_bank < self.max_banks:
+            self.slice_bank += 1
+            start_slice = self.slice_bank * self.slices_per_bank + 1
+            end_slice = (self.slice_bank + 1) * self.slices_per_bank
+            print(f"\n➡️  SLICE BANK {self.slice_bank}: Slices {start_slice}-{end_slice}\n")
+
+            # Optional: Give haptic feedback
+            self.ds.setLeftMotor(100)
+            time.sleep(0.05)
+            self.ds.setLeftMotor(0)
+        else:
+            print(f"\n➡️  Already at bank {self.max_banks} (slices {self.max_banks * 16 + 1}-128)\n")
 
     def apply_deadzone(self, value, center=127, deadzone=10):
         """Apply deadzone around center position"""
@@ -122,6 +181,27 @@ class MIDIController:
         self.stop_led_pulse()
 
         loop_state = self.channel_mgr.get_current_loop_state()
+
+        if hasattr(self, 'sequencer_manager'):
+            seq = self.sequencer_manager.get_current_sequencer()
+            if seq and seq.enabled:
+                # Sequencer is running - show pattern-specific colors
+                if not seq.quantized:
+                    # Free-running: Yellow pulse (fast)
+                    self.start_led_pulse(255, 255, 0)
+                    return
+                elif seq.pattern.value == '4/4':
+                    # 4/4: Green pulse
+                    self.start_led_pulse(0, 255, 0)
+                    return
+                elif seq.pattern.value == 'triplet':
+                    # Triplet: Purple pulse
+                    self.start_led_pulse(255, 0, 255)
+                    return
+                else:
+                    # Other patterns: Cyan pulse
+                    self.start_led_pulse(0, 255, 255)
+                    return
 
         if loop_state.recording and loop_state.playing:
             # Recording while playing - shouldn't happen but just in case
@@ -227,6 +307,8 @@ class MIDIController:
             if self.current_channel != 3:
                 self.current_channel = 3
                 self.channel_mgr.current_channel = 3  # Sync with channel manager
+                if hasattr(self, 'sequencer_manager'):
+                    self.sequencer_manager.set_current_channel(2)  # 0-indexed
                 self.update_led_color()
                 print(f"\n🎛️  SWITCHED TO CHANNEL 3 (Yellow) 🟡")
                 # Send frozen values for this channel
@@ -245,6 +327,8 @@ class MIDIController:
             if self.current_channel != 1:
                 self.current_channel = 1
                 self.channel_mgr.current_channel = 1
+                if hasattr(self, 'sequencer_manager'):
+                    self.sequencer_manager.set_current_channel(0)  # 0-indexed
                 self.update_led_color()
                 print(f"\n🎛️  SWITCHED TO CHANNEL 1 (White) ⚪")
                 self.channel_mgr.send_frozen_values_on_channel_switch(midiout, self, CC_MAP)
@@ -261,6 +345,8 @@ class MIDIController:
             if self.current_channel != 2:
                 self.current_channel = 2
                 self.channel_mgr.current_channel = 2
+                if hasattr(self, 'sequencer_manager'):
+                    self.sequencer_manager.set_current_channel(1)  # 0-indexed
                 self.update_led_color()
                 print(f"\n🎛️  SWITCHED TO CHANNEL 2 (Green) 🟢")
                 self.channel_mgr.send_frozen_values_on_channel_switch(midiout, self, CC_MAP)

@@ -382,12 +382,18 @@ def main():
 
                             # Analog inputs → CC (WITH FREEZE SUPPORT + LOOP RECORDING)
                             elif event.type == ecodes.EV_ABS:
-                                if event.code == ecodes.ABS_X:  # Left Stick X
+                                if event.code == ecodes.ABS_X:  # Left Stick X (with slice banking)
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
-                                    # Get frozen or live value
+                                    # Get frozen or live value (this handles freeze state)
                                     cc_val, _ = channel_manager.get_left_stick_values(raw_val, channel_manager.current_left_y)
-                                    if controller_obj.should_send_cc(CC_MAP['left_stick_x'], cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['left_stick_x'], cc_val]
+
+                                    # Apply slice banking to the CC value (0-127 range)
+                                    # Scale cc_val (0-127) to stick range (0-255) for banking calculation
+                                    stick_val = int((cc_val / 127.0) * 255)
+                                    banked_cc_val = controller_obj.calculate_slice_with_bank(stick_val)
+
+                                    if controller_obj.should_send_cc(CC_MAP['left_stick_x'], banked_cc_val):
+                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['left_stick_x'], banked_cc_val]
                                         midiout.send_message(midi_msg)
 
                                         # Record to loop
@@ -395,7 +401,7 @@ def main():
                                         if loop_state.recording:
                                             loop_state.record_message(midi_msg)
 
-                                        print(f"🕹️  Left X  → CC{CC_MAP['left_stick_x']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                        print(f"🕹️  Left X  → CC{CC_MAP['left_stick_x']:2d}: {banked_cc_val:3d} [Bank {controller_obj.slice_bank}] (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_Y:  # Left Stick Y
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
@@ -470,33 +476,10 @@ def main():
 
                                 # D-pad handling (HAT axes, now CC step controllers!)
                                 elif event.code == ecodes.ABS_HAT0X:  # D-pad Left/Right
-                                    if event.value == -1:  # Left - decrement step
-                                        step = channel_manager.decrement_horizontal_step()
-                                        cc_val = channel_manager.step_to_cc_value(step)
-
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_horizontal'], cc_val]
-                                        midiout.send_message(midi_msg)
-
-                                        # Record to loop
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-
-                                        print(f"⬅️  D-pad LEFT  → CC{CC_MAP['dpad_horizontal']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
-
-                                    elif event.value == 1:  # Right - increment step
-                                        step = channel_manager.increment_horizontal_step()
-                                        cc_val = channel_manager.step_to_cc_value(step)
-
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_horizontal'], cc_val]
-                                        midiout.send_message(midi_msg)
-
-                                        # Record to loop
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-
-                                        print(f"➡️  D-pad RIGHT → CC{CC_MAP['dpad_horizontal']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
+                                    if event.value == -1:  # Left - decrease slice bank
+                                        controller_obj.handle_dpad_left()
+                                    elif event.value == 1:  # Right - increase slice bank
+                                        controller_obj.handle_dpad_right()
 
                                 elif event.code == ecodes.ABS_HAT0Y:  # D-pad Up/Down
                                     if event.value == -1:  # Up - increment step
