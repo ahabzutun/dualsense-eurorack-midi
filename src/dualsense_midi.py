@@ -304,6 +304,24 @@ def main():
                                             del controller_obj.active_notes[event.code]
                                             print(f"🎵 Note OFF: {note} (Ch {controller_obj.current_channel})")
 
+                                # PlayStation button for harmonic strumming
+                                elif event.code == 316:  # BTN_MODE (PlayStation button)
+                                    if event.value == 1:  # Pressed
+                                        # Get current D-pad vertical step
+                                        dpad_step = channel_manager.dpad_vertical_steps[controller_obj.current_channel - 1]
+                                        center_cc = channel_manager.step_to_cc_value(dpad_step)
+
+                                        # Get current loop state for recording
+                                        loop_state = channel_manager.get_current_loop_state()
+
+                                        # Trigger strum on current channel around current pitch
+                                        controller_obj.strummer.arpeggiate(
+                                            midiout,
+                                            controller_obj.current_channel,
+                                            center_cc=center_cc,
+                                            loop_state=loop_state
+                                        )
+
                                 # SELECT button for channel switching
                                 elif event.code == 314:  # BTN_SELECT (Create/Share)
                                     if event.value == 1:  # Pressed

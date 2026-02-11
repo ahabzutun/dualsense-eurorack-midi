@@ -7,6 +7,8 @@ import time
 import threading
 import math
 from pydualsense import pydualsense
+from .harmonic_strummer import HarmonicStrummer
+
 
 from config.mappings import CC_MAP, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE, GYRO_DEADZONE
 
@@ -75,6 +77,12 @@ class MIDIController:
         # Create pydualsense controller for LED control
         self.ds = pydualsense()
         self.ds.init()
+
+        # Harmonic strummer for PlayStation button
+        self.strummer = HarmonicStrummer(
+        strum_delay_ms=80,     # Fast strumming
+        notes_per_chord=4      # 4-note chords
+        )
 
         # Set initial LED color
         self.update_led_color()
