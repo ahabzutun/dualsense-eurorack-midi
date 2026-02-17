@@ -4,6 +4,9 @@ from evdev import ecodes
 import rtmidi
 import time
 import select
+import gc
+import os
+import ctypes
 from pydualsense import pydualsense
 import threading
 from config.mappings import CC_MAP, NOTE_MAP, STICK_DEADZONE, MOTION_THRESHOLD, STICK_CENTER, MOTION_SMOOTHING, TILT_DEADZONE, GYRO_DEADZONE, LONG_PRESS_DURATION
@@ -12,7 +15,47 @@ from state.loop import LoopState
 from state.channel_manager import ChannelManager
 from midi.controller import MIDIController
 
+# ── Memory management setup ───────────────────────────────────────────────────
+# The DualSense motion sensor generates ~1500 evdev InputEvent objects/second
+# even when the controller is idle. Python's default GC thresholds (700,10,10)
+# can't keep up, causing RSS to grow ~5 MB/10s continuously.
+#
+# Fix 1: tighten GC thresholds so gen0 collects much more frequently.
+gc.set_threshold(200, 5, 2)
+
+# Fix 2: load libc so we can call malloc_trim() to return freed pages to the OS.
+# GC alone is not enough — Python holds onto freed memory pages indefinitely.
+try:
+    _libc = ctypes.CDLL("libc.so.6")
+    def _trim_heap():
+        _libc.malloc_trim(0)
+except (OSError, AttributeError):
+    def _trim_heap():
+        pass  # non-Linux fallback (e.g. macOS during dev)
+
+# Motion sensor rate limit: process IMU at max 50 Hz (every 20ms).
+# We still READ all events from the kernel buffer (to drain it), but only
+# run the MIDI/smoothing logic on the first event per 20ms window.
+_MOTION_INTERVAL = 0.02   # seconds between motion processing
+_last_motion_time = 0.0
+
+# struct input_event size on 64-bit Linux:
+#   struct timeval  = 8 (tv_sec) + 8 (tv_usec)  = 16 bytes
+#   __u16 type                                   =  2 bytes
+#   __u16 code                                   =  2 bytes
+#   __s32 value                                  =  4 bytes
+#   Total                                        = 24 bytes
+# Used for OS-level draining (no Python objects created).
+_MOTION_EVENT_SIZE = 24
+
+# Heap trim interval: return freed pages to OS every 30 seconds.
+_TRIM_INTERVAL   = 30.0
+_last_trim_time  = 0.0
+
 def main():
+    global _last_motion_time, _last_trim_time
+    _last_trim_time = time.time()
+
     # Initialize channel manager first
     channel_manager = ChannelManager()
 
@@ -111,6 +154,24 @@ def main():
 
                 for fd in r:
                     device = devices_dict[fd]
+
+                    # ── Motion device: rate-limited at the READ level ────────
+                    # device.read() calls evdev's device_read_many() which
+                    # allocates a Python InputEvent object for EVERY kernel
+                    # event — ~1500/sec from the IMU alone, even when still.
+                    # Fix: when it's not time to process motion, drain the
+                    # kernel buffer with os.read() (raw bytes → zero Python
+                    # objects). Only call device.read() at 50 Hz.
+                    if device == motion:
+                        _motion_now = time.time()
+                        if (_motion_now - _last_motion_time) < _MOTION_INTERVAL:
+                            # Drain kernel buffer with zero Python allocations
+                            try:
+                                os.read(motion.fd, _MOTION_EVENT_SIZE * 128)
+                            except OSError:
+                                pass
+                            continue  # skip device.read() entirely
+                        _last_motion_time = _motion_now
 
                     for event in device.read():
                         # Handle controller events
@@ -666,6 +727,21 @@ def main():
 
                 # After processing all events, send repeated CCs for held buttons
                 controller_obj.send_held_button_ccs(midiout)
+
+                # ── Periodic memory housekeeping ────────────────────────────
+                # gen0 GC every iteration (very cheap, <0.1ms). Prevents the
+                # 16,000 evdev InputEvent objects/sec from piling up faster
+                # than the default GC thresholds can collect them.
+                gc.collect(0)
+
+                # Every 30 seconds: full collection + return freed pages to OS.
+                # Python holds onto freed memory internally; malloc_trim() is
+                # the only way to actually give it back to the kernel.
+                _now = time.time()
+                if _now - _last_trim_time >= _TRIM_INTERVAL:
+                    gc.collect()
+                    _trim_heap()
+                    _last_trim_time = _now
 
         except KeyboardInterrupt:
             print("\n\n👋 Shutting down...")

@@ -1,7 +1,23 @@
+"""
+MIDI Passthrough Hub for DualSense Eurorack system
+Routes MIDI between DualSense virtual port, NerdSEQ, and Percussa SSP
+
+FIX: rtmidi MidiIn objects were not having their callbacks cancelled before
+     close_port() and del, creating a reference cycle (MidiIn → callback closure
+     → self.outputs → MidiIn) that prevented the C++ ALSA client destructor from
+     running. With a 2-second rescan cycle and any brief disconnections, leaked
+     ALSA clients accumulate until the system-wide cap of 64 is hit and all
+     MIDI creation fails.
+
+     Fix: call midiin.cancel_callback() before close_port(), then explicitly
+     del the object so Python releases it immediately.
+"""
+
 #!/usr/bin/env python3
 import rtmidi
 import time
 import threading
+
 
 class MIDIHub:
     def __init__(self):
@@ -11,7 +27,7 @@ class MIDIHub:
         self.running = True
         self.lock = threading.Lock()
 
-        # Create scanners ONCE and reuse them
+        # Create scanners ONCE and reuse them (never re-create these)
         self.output_scanner = rtmidi.MidiOut()
         self.input_scanner = rtmidi.MidiIn()
 
@@ -41,11 +57,12 @@ class MIDIHub:
             for name in list(self.outputs.keys()):
                 if name not in found_outputs:
                     print(f"❌ Output disconnected: {name}")
+                    midiout = self.outputs.pop(name)
                     try:
-                        self.outputs[name].close_port()
-                    except:
+                        midiout.close_port()
+                    except Exception:
                         pass
-                    del self.outputs[name]
+                    del midiout   # ensure C++ destructor runs now
 
             # Open new outputs
             for name, (port_num, port_name) in found_outputs.items():
@@ -62,7 +79,7 @@ class MIDIHub:
                         print(f"✅ Output connected: {port_name}")
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
-                        del midiout
+                        del midiout   # don't leak the client on failure either
 
     def scan_and_update_inputs(self):
         """Find and open all input devices"""
@@ -88,11 +105,16 @@ class MIDIHub:
             for port_name in list(self.inputs.keys()):
                 if port_name not in found_inputs:
                     print(f"❌ Input disconnected: {port_name}")
+                    midiin = self.inputs.pop(port_name)
                     try:
-                        self.inputs[port_name].close_port()
-                    except:
+                        # FIX: cancel_callback() FIRST to break the reference
+                        # cycle (MidiIn → closure → self.outputs → MidiIn).
+                        # Without this the C++ ALSA client is never freed.
+                        midiin.cancel_callback()
+                        midiin.close_port()
+                    except Exception:
                         pass
-                    del self.inputs[port_name]
+                    del midiin   # allow C++ destructor to run immediately
 
             # Open new inputs
             for port_name, port_num in found_inputs.items():
@@ -110,6 +132,11 @@ class MIDIHub:
                         print(f"✅ Input connected: {port_name}")
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
+                        # FIX: also cancel callback on failed open before del
+                        try:
+                            midiin.cancel_callback()
+                        except Exception:
+                            pass
                         del midiin
 
     def make_callback(self, port_name):
@@ -169,15 +196,17 @@ class MIDIHub:
             self.running = False
 
             with self.lock:
+                # FIX: cancel callbacks before closing on shutdown too
                 for midiin in self.inputs.values():
                     try:
+                        midiin.cancel_callback()
                         midiin.close_port()
-                    except:
+                    except Exception:
                         pass
                 for midiout in self.outputs.values():
                     try:
                         midiout.close_port()
-                    except:
+                    except Exception:
                         pass
 
             # Cleanup scanners
@@ -186,9 +215,11 @@ class MIDIHub:
 
             print("✅ All ports closed")
 
+
 def main():
     hub = MIDIHub()
     hub.run()
+
 
 if __name__ == "__main__":
     main()
