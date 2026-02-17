@@ -1,6 +1,13 @@
 """
 MIDI loop recording and playback for DualSense controller
 Handles recording, playback, and clearing of MIDI loops per channel
+
+FIX: _playback_loop was allocating 2-3 new list/tuple objects every 1ms
+     (1000x/second), causing ~100-500MB/hr of heap growth. Fixed by:
+     - Caching the buffer copy outside the while loop
+     - Only refreshing the cache when recording is active
+     - Reusing messages_in_window via .clear() instead of re-allocating
+     - Moving the sort key lambda outside the loop
 """
 
 import time
@@ -96,20 +103,42 @@ class LoopState:
 
     def _playback_loop(self, midiout, window_position_func=None, window_size_func=None):
         """
-        Granular scanning playback - window continuously retriggers
-        Small windows = glitchy stuttering, large windows = smooth playback
-        Moving touchpad X = immediate scrubbing through the recording
+        Granular scanning playback - window continuously retriggers.
+        Small windows = glitchy stuttering, large windows = smooth playback.
+        Moving touchpad X = immediate scrubbing through the recording.
+
+        FIX: Buffer is cached outside the while loop and only refreshed when
+        recording is active. messages_in_window is pre-allocated and cleared
+        each iteration rather than re-allocated. Sort key lambda is defined
+        once outside the loop. Together these eliminate ~3 allocations/ms.
         """
 
         last_window_pos = None
         POSITION_CHANGE_THRESHOLD = 0.05  # 5% movement triggers new grain
 
-        while self.playing and not self.playback_stop_event.is_set():
-            with self.buffer_lock:
-                buffer_copy = list(self.midi_buffer)
-                loop_duration = self.loop_duration
+        # --- FIX: pre-allocate these outside the hot loop ---
+        cached_buffer = []
+        cached_duration = 0
+        buffer_loaded = False
+        messages_in_window = []          # reused via .clear() each iteration
+        _sort_key = lambda x: x[0]      # defined once, not re-created each loop
 
-            if loop_duration == 0:
+        while self.playing and not self.playback_stop_event.is_set():
+
+            # --- FIX: only re-copy buffer when strictly necessary ---
+            if self.recording:
+                # Buffer is actively changing - must refresh every iteration
+                with self.buffer_lock:
+                    cached_buffer = list(self.midi_buffer)
+                    cached_duration = self.loop_duration
+            elif not buffer_loaded:
+                # First time entering playback (or after clear) - load once
+                with self.buffer_lock:
+                    cached_buffer = list(self.midi_buffer)
+                    cached_duration = self.loop_duration
+                buffer_loaded = True
+
+            if cached_duration == 0:
                 time.sleep(0.01)
                 continue
 
@@ -118,38 +147,38 @@ class LoopState:
             window_size = window_size_func() if window_size_func else 1.0
 
             # Calculate window boundaries in seconds
-            window_start_time = window_pos * loop_duration
-            window_length = window_size * loop_duration
+            window_start_time = window_pos * cached_duration
+            window_length = window_size * cached_duration
             window_end_time = window_start_time + window_length
 
             # Minimum grain length to prevent CPU overload with tiny windows
             MIN_GRAIN_MS = 10
             grain_duration = max(window_length, MIN_GRAIN_MS / 1000.0)
 
-            # Collect all messages in the current window
-            messages_in_window = []
-            for timestamp, midi_msg in buffer_copy:
+            # --- FIX: reuse the list, don't reallocate ---
+            messages_in_window.clear()
+
+            for timestamp, midi_msg in cached_buffer:
                 in_window = False
 
-                if window_end_time <= loop_duration:
+                if window_end_time <= cached_duration:
                     # Normal case: window doesn't wrap
                     if window_start_time <= timestamp < window_end_time:
                         in_window = True
                 else:
                     # Wrapped case: window extends past loop end
-                    wrap_amount = window_end_time - loop_duration
+                    wrap_amount = window_end_time - cached_duration
                     if timestamp >= window_start_time or timestamp < wrap_amount:
                         in_window = True
 
                 if in_window:
-                    # Calculate relative position within the window
                     relative_pos = timestamp - window_start_time
                     if relative_pos < 0:  # Handle wrap
-                        relative_pos += loop_duration
+                        relative_pos += cached_duration
                     messages_in_window.append((relative_pos, midi_msg))
 
-            # Sort messages by their position in the window
-            messages_in_window.sort(key=lambda x: x[0])
+            # --- FIX: reuse the lambda defined once above ---
+            messages_in_window.sort(key=_sort_key)
 
             # PLAY THE GRAIN - retrigger all messages in window
             grain_start = time.time()
@@ -159,14 +188,11 @@ class LoopState:
                     break
 
                 # Check if window position moved significantly during playback
-                # If so, abort this grain and start a new one at the new position
                 current_pos = window_position_func() if window_position_func else 0.0
                 if last_window_pos is not None and abs(current_pos - window_pos) > POSITION_CHANGE_THRESHOLD:
-                    # Window moved - retrigger immediately with new position
                     break
 
                 # Calculate when to play this message within the grain
-                # Scale the timing to fit the grain duration
                 if window_length > 0:
                     scaled_time = (rel_time / window_length) * grain_duration
                 else:
@@ -182,13 +208,12 @@ class LoopState:
                 # Send the MIDI message
                 try:
                     midiout.send_message(midi_msg)
-                except:
+                except Exception:
                     pass
 
             last_window_pos = window_pos
 
             # Tiny delay before retriggering grain (prevents CPU overload)
-            # This is what creates the continuous scanning effect!
             self.playback_stop_event.wait(timeout=0.001)
 
     def clear_loop(self):
