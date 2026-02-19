@@ -207,7 +207,7 @@ class MIDIController:
             if self.current_channel == 1:
                 self.ds.light.setColorI(50, 50, 50)   # Dim white
             elif self.current_channel == 2:
-                self.ds.light.setColorI(0, 80, 0)     # Dim green
+                self.ds.light.setColorI(0, 80, 80)    # Dim turquoise
             elif self.current_channel == 3:
                 self.ds.light.setColorI(80, 80, 0)    # Dim yellow
 
