@@ -103,8 +103,7 @@ def main():
         print("🎮 DualSense → 🎹 MIDI → 🎛️ Passthrough Service")
         print("=" * 50)
         print("Controls:")
-        print("  Button (□) → Note")
-        print("  Buttons (✕○) → CC Triggers (14, 15) - with MIDI learn repeat")
+        print("  Buttons (✕○△□) → CC Triggers (14, 15, 22, 23) - with MIDI learn repeat")
         print("  D-Pad (↑↓) → CC 11 (8 steps)")
         print("  D-Pad (←→) → CC 13 (8 steps)")
         print("  Touchpad Click → Note")
@@ -282,94 +281,57 @@ def main():
 
                                     channel_manager.prev_r3 = r3_pressed
 
-                                # === LOOP RECORDING: Triangle Button ===
+                                # CC Trigger: △ button
                                 elif event.code == 307:  # BTN_NORTH (△)
-                                    loop_state = channel_manager.get_current_loop_state()
+                                    if event.value == 1:  # Pressed
+                                        controller_obj.btn_north_held = True
+                                        controller_obj.last_btn_send_time['north'] = time.time()
+                                        status_byte = controller_obj.get_midi_channel_byte(0xB0)
+                                        midi_msg = [status_byte, CC_MAP['btn_north'], 127]
+                                        midiout.send_message(midi_msg)
 
-                                    if event.value == 1:  # Button pressed
-                                        controller_obj.triangle_pressed = True
-                                        controller_obj.triangle_press_time = time.time()
+                                        loop_state = channel_manager.get_current_loop_state()
+                                        if loop_state.recording:
+                                            loop_state.record_message(midi_msg)
 
-                                        # Check for clear combo: Triangle + Square
-                                        if controller_obj.square_pressed:
-                                            loop_state.clear_loop()
-                                            controller_obj.update_led_color()
-                                            print(f"\n🗑️  Channel {channel_manager.current_channel}: Loop CLEARED")
+                                        print(f"🎚️  △      → CC{CC_MAP['btn_north']:2d}: 127 (Trigger ON) (Ch {controller_obj.current_channel})")
+                                    else:  # Released
+                                        controller_obj.btn_north_held = False
+                                        status_byte = controller_obj.get_midi_channel_byte(0xB0)
+                                        midi_msg = [status_byte, CC_MAP['btn_north'], 0]
+                                        midiout.send_message(midi_msg)
 
-                                    elif event.value == 0:  # Button released
-                                        if controller_obj.triangle_pressed:
-                                            press_duration = time.time() - controller_obj.triangle_press_time
+                                        loop_state = channel_manager.get_current_loop_state()
+                                        if loop_state.recording:
+                                            loop_state.record_message(midi_msg)
 
-                                            if press_duration >= LONG_PRESS_DURATION:
-                                                # LONG PRESS: Toggle recording
-                                                if loop_state.recording:
-                                                    if loop_state.stop_recording():
-                                                        print(f"\n⏹️  Channel {channel_manager.current_channel}: Recording STOPPED ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events)")
-                                                    else:
-                                                        print(f"\n⚠️  Channel {channel_manager.current_channel}: Recording cancelled (empty or too long)")
-                                                    controller_obj.update_led_color()
-                                                else:
-                                                    loop_state.start_recording()
-                                                    controller_obj.update_led_color()
-                                                    print(f"\n🔴 Channel {channel_manager.current_channel}: Recording STARTED")
-                                            else:
-                                                # SHORT PRESS: Toggle playback
-                                                if loop_state.playing:
-                                                    loop_state.stop_playback()
-                                                    controller_obj.update_led_color()
-                                                    print(f"\n⏸️  Channel {channel_manager.current_channel}: Loop STOPPED")
-                                                elif loop_state.midi_buffer:
-                                                    if loop_state.start_playback(midiout,
-                                                        window_position_func=lambda: controller_obj.window_position,
-                                                        window_size_func=lambda: controller_obj.window_size):
-                                                        controller_obj.update_led_color()
-                                                        print(f"\n▶️  Channel {channel_manager.current_channel}: Loop PLAYING...")
-                                                else:
-                                                    print(f"\n⚠️  Channel {channel_manager.current_channel}: No loop to play")
+                                        print(f"🎚️  △      → CC{CC_MAP['btn_north']:2d}:   0 (Trigger OFF) (Ch {controller_obj.current_channel})")
 
-                                        controller_obj.triangle_pressed = False
-
-                                # Track Square button for clear combo and normal note
+                                # CC Trigger: □ button
                                 elif event.code == 308:  # BTN_WEST (□)
                                     if event.value == 1:  # Pressed
-                                        controller_obj.square_pressed = True
+                                        controller_obj.btn_west_held = True
+                                        controller_obj.last_btn_send_time['west'] = time.time()
+                                        status_byte = controller_obj.get_midi_channel_byte(0xB0)
+                                        midi_msg = [status_byte, CC_MAP['btn_west'], 127]
+                                        midiout.send_message(midi_msg)
 
-                                        # Check for clear combo: Triangle + Square
-                                        if controller_obj.triangle_pressed:
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            loop_state.clear_loop()
-                                            controller_obj.update_led_color()
-                                            print(f"\n🗑️  Channel {channel_manager.current_channel}: Loop CLEARED")
-                                        else:
-                                            # Square as normal note
-                                            if event.code in NOTE_MAP:
-                                                note = NOTE_MAP[event.code]
-                                                note_on = [controller_obj.get_midi_channel_byte(0x90), note, 100]
-                                                midiout.send_message(note_on)
+                                        loop_state = channel_manager.get_current_loop_state()
+                                        if loop_state.recording:
+                                            loop_state.record_message(midi_msg)
 
-                                                # Record to loop
-                                                loop_state = channel_manager.get_current_loop_state()
-                                                if loop_state.recording:
-                                                    loop_state.record_message(note_on)
-
-                                                controller_obj.active_notes[event.code] = note
-                                                print(f"🎵 Note ON:  {note} (Ch {controller_obj.current_channel})")
+                                        print(f"🎚️  □      → CC{CC_MAP['btn_west']:2d}: 127 (Trigger ON) (Ch {controller_obj.current_channel})")
                                     else:  # Released
-                                        controller_obj.square_pressed = False
+                                        controller_obj.btn_west_held = False
+                                        status_byte = controller_obj.get_midi_channel_byte(0xB0)
+                                        midi_msg = [status_byte, CC_MAP['btn_west'], 0]
+                                        midiout.send_message(midi_msg)
 
-                                        # Square note off
-                                        if event.code in NOTE_MAP and event.code in controller_obj.active_notes:
-                                            note = NOTE_MAP[event.code]
-                                            note_off = [controller_obj.get_midi_channel_byte(0x80), note, 0]
-                                            midiout.send_message(note_off)
+                                        loop_state = channel_manager.get_current_loop_state()
+                                        if loop_state.recording:
+                                            loop_state.record_message(midi_msg)
 
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_off)
-
-                                            del controller_obj.active_notes[event.code]
-                                            print(f"🎵 Note OFF: {note} (Ch {controller_obj.current_channel})")
+                                        print(f"🎚️  □      → CC{CC_MAP['btn_west']:2d}:   0 (Trigger OFF) (Ch {controller_obj.current_channel})")
 
                                 # PlayStation button for harmonic strumming
                                 elif event.code == 316:  # BTN_MODE (PlayStation button)

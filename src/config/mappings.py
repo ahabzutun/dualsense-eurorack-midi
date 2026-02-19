@@ -18,16 +18,19 @@ CC_MAP = {
     'touchpad_y': 21,    # Touchpad Y
     'btn_south': 14,     # X button (✕) trigger (General Purpose)
     'btn_east': 15,      # O button (○) trigger (General Purpose)
+    'btn_north': 22,     # △ button trigger (General Purpose)
+    'btn_west': 23,      # □ button trigger (General Purpose)
     'dpad_vertical': 11,   # D-pad Up/Down (Expression)
     'dpad_horizontal': 13, # D-pad Left/Right (Effect Control 1)
 }
 
 # Note mapping for buttons
 NOTE_MAP = {
-    # 304: BTN_SOUTH (✕) - Now CC trigger (CC 14)
-    # 305: BTN_EAST (○) - Now CC trigger (CC 15)
+    # 304: BTN_SOUTH (✕) - CC trigger (CC 14)
+    # 305: BTN_EAST (○)  - CC trigger (CC 15)
+    # 307: BTN_NORTH (△) - CC trigger (CC 22)
+    # 308: BTN_WEST (□)  - CC trigger (CC 23)
     # 307: BTN_NORTH (△) - Now used for LOOP RECORDING
-    308: 67,  # BTN_WEST (□) → G4
     272: 72,  # BTN_LEFT (Touchpad Click) → C5
     # 317: BTN_THUMBL (L3 - Left Stick Click) - Now used for FREEZE
     # 318: BTN_THUMBR (R3 - Right Stick Click) - Now used for FREEZE

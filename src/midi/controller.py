@@ -15,7 +15,7 @@ import math
 from pydualsense import pydualsense
 from .harmonic_strummer import HarmonicStrummer
 
-from config.mappings import CC_MAP, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE, GYRO_DEADZONE
+from config.mappings import CC_MAP, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE, GYRO_DEADZONE, LONG_PRESS_DURATION
 
 
 class MIDIController:
@@ -67,19 +67,17 @@ class MIDIController:
         self.start_pressed = False   # BTN_START (Options)
 
         # Button hold tracking for repeated CC messages (MIDI learn support)
-        self.btn_south_held = False  # X button
-        self.btn_east_held = False   # O button
-        self.last_btn_send_time = {'south': 0, 'east': 0}
+        # All four face buttons behave identically: press → CC 127, release → CC 0
+        self.btn_south_held = False  # X (✕)
+        self.btn_east_held = False   # O (○)
+        self.btn_north_held = False  # △
+        self.btn_west_held = False   # □
+        self.last_btn_send_time = {'south': 0, 'east': 0, 'north': 0, 'west': 0}
         self.btn_repeat_interval = 0.05  # Send CC every 50ms while held
 
         # Sequencer control - L2 as modifier
         self.l2_held = False
         self.l2_modifier_threshold = 200  # Value where L2 acts as modifier (0-255)
-
-        # Loop recording - Triangle button timing
-        self.triangle_pressed = False
-        self.triangle_press_time = 0
-        self.square_pressed = False  # For clear combo
 
         # --- FIX: per-thread stop event instead of shared led_pulse_active flag ---
         # Each call to start_led_pulse() creates a fresh Event and passes it to
@@ -266,35 +264,25 @@ class MIDIController:
         """Send repeated CC messages for held buttons (helps MIDI learn)"""
         current_time = time.time()
 
-        # X button (south)
-        if self.btn_south_held:
-            if current_time - self.last_btn_send_time['south'] >= self.btn_repeat_interval:
-                status_byte = self.get_midi_channel_byte(0xB0)
-                midi_msg = [status_byte, CC_MAP['btn_south'], 127]
-                midiout.send_message(midi_msg)
+        for key, held, cc_key, label in [
+            ('south', self.btn_south_held, 'btn_south', 'X (✕)'),
+            ('east',  self.btn_east_held,  'btn_east',  'O (○)'),
+            ('north', self.btn_north_held, 'btn_north', '△'),
+            ('west',  self.btn_west_held,  'btn_west',  '□'),
+        ]:
+            if held:
+                if current_time - self.last_btn_send_time[key] >= self.btn_repeat_interval:
+                    status_byte = self.get_midi_channel_byte(0xB0)
+                    midi_msg = [status_byte, CC_MAP[cc_key], 127]
+                    midiout.send_message(midi_msg)
 
-                loop_state = self.channel_mgr.get_current_loop_state()
-                if loop_state.recording:
-                    loop_state.record_message(midi_msg)
+                    loop_state = self.channel_mgr.get_current_loop_state()
+                    if loop_state.recording:
+                        loop_state.record_message(midi_msg)
 
-                self.last_btn_send_time['south'] = current_time
-                if int(current_time * 10) % 5 == 0:
-                    print(f"🎚️  X (✕) HELD → CC{CC_MAP['btn_south']:2d}: 127 (Ch {self.current_channel})")
-
-        # O button (east)
-        if self.btn_east_held:
-            if current_time - self.last_btn_send_time['east'] >= self.btn_repeat_interval:
-                status_byte = self.get_midi_channel_byte(0xB0)
-                midi_msg = [status_byte, CC_MAP['btn_east'], 127]
-                midiout.send_message(midi_msg)
-
-                loop_state = self.channel_mgr.get_current_loop_state()
-                if loop_state.recording:
-                    loop_state.record_message(midi_msg)
-
-                self.last_btn_send_time['east'] = current_time
-                if int(current_time * 10) % 5 == 0:
-                    print(f"🎚️  O (○) HELD → CC{CC_MAP['btn_east']:2d}: 127 (Ch {self.current_channel})")
+                    self.last_btn_send_time[key] = current_time
+                    if int(current_time * 10) % 5 == 0:
+                        print(f"🎚️  {label} HELD → CC{CC_MAP[cc_key]:2d}: 127 (Ch {self.current_channel})")
 
     def check_channel_switch(self, midiout):
         """Check for START/SELECT button combinations to switch channels"""
