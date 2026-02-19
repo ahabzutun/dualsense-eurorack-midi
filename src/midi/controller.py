@@ -19,8 +19,9 @@ from config.mappings import CC_MAP, NRPN_MAP, NRPN_MOTION_THRESHOLD, MOTION_THRE
 
 
 class MIDIController:
-    def __init__(self, channel_manager):
-        self.channel_mgr = channel_manager  # Reference to the channel manager
+    def __init__(self, channel_manager, clock_source=None):
+        self.channel_mgr = channel_manager
+        self.clock_source = clock_source  # ClockSource reference for sync state queries  # Reference to the channel manager
         self.last_cc_values = {}  # Track last sent CC values
         self.last_motion_raw = {'tilt_x': 0, 'tilt_y': 0, 'twist': 0}
         self.smoothed_motion = {'tilt_x': 64, 'tilt_y': 64, 'twist': 64}
@@ -210,42 +211,49 @@ class MIDIController:
         return False
 
     def update_led_color(self):
-        """Update LED based on current channel, motion state, and loop state"""
+        """Update LED based on current channel, quantize state, motion state, and loop state"""
         self.stop_led_pulse()
 
         loop_state = self.channel_mgr.get_current_loop_state()
 
-        if hasattr(self, 'sequencer_manager'):
-            seq = self.sequencer_manager.get_current_sequencer()
-            if seq and seq.enabled:
-                if not seq.quantized:
-                    self.start_led_pulse(255, 255, 0)
-                    return
-                elif seq.pattern.value == '4/4':
-                    self.start_led_pulse(0, 255, 0)
-                    return
-                elif seq.pattern.value == 'triplet':
-                    self.start_led_pulse(255, 0, 255)
-                    return
-                else:
-                    self.start_led_pulse(0, 255, 255)
-                    return
-
+        # Loop states take top priority
         if loop_state.recording and loop_state.playing:
-            self.start_led_pulse(255, 0, 255)  # Purple pulse
-        elif loop_state.recording:
-            self.start_led_pulse(255, 0, 0)    # Red pulse
-        elif loop_state.playing:
-            self.start_led_pulse(0, 255, 0)    # Green pulse
-        elif self.is_motion_enabled():
+            self.start_led_pulse(255, 0, 255)   # Purple: overdub
+            return
+        if loop_state.recording:
+            self.start_led_pulse(255, 0, 0)     # Red: recording
+            return
+        if loop_state.playing:
+            self.start_led_pulse(0, 255, 0)     # Green: playing
+            return
+
+        # Quantize active: blink to show sync source
+        if loop_state.quantize_subdivision is not None:
+            synced = self.clock_source is not None and self.clock_source.is_synced_external()
+            if synced:
+                self.start_led_pulse(0, 255, 0)         # Green: locked to external clock
+            else:
+                # Blink in current channel colour
+                if self.current_channel == 1:
+                    self.start_led_pulse(150, 150, 150)  # White
+                elif self.current_channel == 2:
+                    self.start_led_pulse(0, 150, 150)    # Turquoise
+                elif self.current_channel == 3:
+                    self.start_led_pulse(150, 150, 0)    # Yellow
+            return
+
+        # Motion enabled
+        if self.is_motion_enabled():
             self.ds.light.setColorI(0, 100, 255)
-        else:
-            if self.current_channel == 1:
-                self.ds.light.setColorI(50, 50, 50)   # Dim white
-            elif self.current_channel == 2:
-                self.ds.light.setColorI(0, 80, 80)    # Dim turquoise
-            elif self.current_channel == 3:
-                self.ds.light.setColorI(80, 80, 0)    # Dim yellow
+            return
+
+        # Idle: base channel colour
+        if self.current_channel == 1:
+            self.ds.light.setColorI(50, 50, 50)    # Dim white
+        elif self.current_channel == 2:
+            self.ds.light.setColorI(0, 80, 80)     # Dim turquoise
+        elif self.current_channel == 3:
+            self.ds.light.setColorI(80, 80, 0)     # Dim yellow
 
     def start_led_pulse(self, r, g, b):
         """Start pulsing LED in background thread.
@@ -458,6 +466,7 @@ class MIDIController:
             if loop_state.quantize_subdivision is not None:
                 loop_state.quantize_subdivision = None
                 print("🎵 Quantize: OFF (finger lifted)")
+                self.update_led_color()  # Return LED to base state
             return
 
         if not loop_state.playing or loop_state.loop_duration == 0:
@@ -477,6 +486,7 @@ class MIDIController:
                 print(f"🎵 Quantize: 1/{new_sub} (zone {zone})")
             else:
                 print(f"🎵 Quantize: OFF")
+            self.update_led_color()  # Reflect quantize state on LED immediately
 
         if int(time.time() * 4) % 2 == 0:
             sub_str = f"1/{loop_state.quantize_subdivision}" if loop_state.quantize_subdivision else "OFF"

@@ -64,8 +64,8 @@ def main():
     clock_source = ClockSource(internal_bpm=120)
     clock_source.start()
 
-    # Pass channel manager to MIDIController
-    controller_obj = MIDIController(channel_manager)
+    # Pass channel manager and clock source to MIDIController
+    controller_obj = MIDIController(channel_manager, clock_source=clock_source)
 
     # ===== STEP 1: Try to find DualSense devices =====
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
