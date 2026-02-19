@@ -27,6 +27,16 @@ class MIDIHub:
         self.running = True
         self.lock = threading.Lock()
 
+        # ── Diagnostic mode ──────────────────────────────────────────────────
+        # Set to True to print every raw message received from the 16n faderbank
+        # without forwarding it. Helps diagnose min/max range mismatches.
+        # Switch back to False for normal operation.
+        self.DIAGNOSTIC_MODE = True
+        self.DIAGNOSTIC_FILTER_CHANNEL = 16   # only log ch 16 (16n)
+        self.DIAGNOSTIC_FILTER_CC_MIN  = 80   # only log CC 80-95
+        self.DIAGNOSTIC_FILTER_CC_MAX  = 95
+        # ─────────────────────────────────────────────────────────────────────
+
         # Create scanners ONCE and reuse them (never re-create these)
         self.output_scanner = rtmidi.MidiOut()
         self.input_scanner = rtmidi.MidiIn()
@@ -144,8 +154,30 @@ class MIDIHub:
         def callback(message, data):
             try:
                 midi_message, deltatime = message
-                print(f"📨 [{port_name}] → {midi_message}")
 
+                # ── Diagnostic mode: log raw bytes, skip forwarding ──────────
+                if self.DIAGNOSTIC_MODE and "16n" in port_name or "fader" in port_name.lower():
+                    if len(midi_message) >= 3:
+                        status  = midi_message[0]
+                        msg_type = status & 0xF0
+                        channel  = (status & 0x0F) + 1  # 1-indexed
+
+                        if msg_type == 0xB0:  # Control Change
+                            cc_num = midi_message[1]
+                            cc_val = midi_message[2]
+                            in_range = (
+                                channel == self.DIAGNOSTIC_FILTER_CHANNEL and
+                                self.DIAGNOSTIC_FILTER_CC_MIN <= cc_num <= self.DIAGNOSTIC_FILTER_CC_MAX
+                            )
+                            if in_range:
+                                bar = "█" * int(cc_val / 127 * 20)
+                                print(f"🔬 [16n] Ch{channel:2d} CC{cc_num:3d} = {cc_val:3d}/127  |{bar:<20}|  raw: {[hex(b) for b in midi_message]}")
+                        else:
+                            print(f"🔬 [16n] Non-CC msg: {[hex(b) for b in midi_message]}")
+                    return  # ← do NOT forward in diagnostic mode
+
+                # ── Normal mode: forward to all outputs ──────────────────────
+                print(f"📨 [{port_name}] → {midi_message}")
                 with self.lock:
                     if not self.outputs:
                         print(f"⚠️  No outputs available to forward to!")
