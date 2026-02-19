@@ -50,7 +50,8 @@ class MIDIHub:
         self.RESCALE_CHANNEL  = 16          # only rescale ch16 (the 16n)
         self.RESCALE_CC_MIN   = 80          # first fader CC
         self.RESCALE_CC_MAX   = 95          # last fader CC
-        self.SSP_CC_MAX       = 80          # 0-127 in → 0-80 to SSP
+        self.SSP_CC_MAX       = 127         # 127 = no compression; full fader = 1.0 (0dB on PMIX)
+                                            # Lower this only if modulation adds on top of a non-zero base
         # ─────────────────────────────────────────────────────────────────────
 
         # Create scanners ONCE and reuse them (never re-create these)
