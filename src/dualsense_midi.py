@@ -183,18 +183,21 @@ def main():
                                         controller_obj.l1_pressed = True
                                         controller_obj.l1_press_time = time.time()
                                     else:  # Button released
-                                        # Check if this was a combo press with R1
                                         if controller_obj.r1_pressed:
-                                            # Both were held = Motion toggle
+                                            # Both held → Motion toggle (combo)
                                             controller_obj.check_motion_toggle()
-                                        else:
-                                            # Solo L1 press = Clear loop
+                                            # combo_used flag is set inside check_motion_toggle
+                                        elif not controller_obj.l1_r1_combo_used:
+                                            # Solo L1 release: Clear loop
                                             loop_state = channel_manager.get_current_loop_state()
                                             if loop_state.clear_loop():
                                                 controller_obj.update_led_color()
                                                 print(f"\n🗑️  Channel {channel_manager.current_channel}: Loop CLEARED (L1)")
                                             else:
                                                 print(f"\n⚠️  Channel {channel_manager.current_channel}: Could not clear loop")
+                                        else:
+                                            # L1 was the second button released after a combo — skip solo action
+                                            controller_obj.l1_r1_combo_used = False
 
                                         controller_obj.l1_pressed = False
 
@@ -203,12 +206,12 @@ def main():
                                         controller_obj.r1_pressed = True
                                         controller_obj.r1_press_time = time.time()
                                     else:  # Button released
-                                        # Check if this was a combo press with L1
                                         if controller_obj.l1_pressed:
-                                            # Both were held = Motion toggle
+                                            # Both held → Motion toggle (combo)
                                             controller_obj.check_motion_toggle()
-                                        else:
-                                            # Solo R1 press = Loop recording controls
+                                            # combo_used flag is set inside check_motion_toggle
+                                        elif not controller_obj.l1_r1_combo_used:
+                                            # Solo R1 release: Loop recording controls
                                             loop_state = channel_manager.get_current_loop_state()
                                             press_duration = time.time() - controller_obj.r1_press_time
 
@@ -238,6 +241,9 @@ def main():
                                                         print(f"\n▶️  Channel {channel_manager.current_channel}: Playing loop ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events) (R1)")
                                                 else:
                                                     print(f"\n⚠️  Channel {channel_manager.current_channel}: No loop to play")
+                                        else:
+                                            # R1 was the second button released after a combo — skip solo action
+                                            controller_obj.l1_r1_combo_used = False
 
                                         controller_obj.r1_pressed = False
 
@@ -596,7 +602,7 @@ def main():
                                     raw = controller_obj.scale_value(event.value, -500, 500)
                                     cc_val = controller_obj.smooth_motion(raw, 'tilt_x', MOTION_SMOOTHING)
                                     controller_obj.update_haptics_from_tilt(cc_val, controller_obj.smoothed_motion['tilt_y'])
-                                    if controller_obj.motion_enabled and abs(cc_val - 64) > TILT_DEADZONE:
+                                    if controller_obj.is_motion_enabled() and abs(cc_val - 64) > TILT_DEADZONE:
                                         if controller_obj.should_send_cc(CC_MAP['tilt_x'], cc_val):
                                             midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['tilt_x'], cc_val]
                                             midiout.send_message(midi_msg)
@@ -612,7 +618,7 @@ def main():
                                     raw = controller_obj.scale_value(event.value, 7500, 8500)
                                     cc_val = controller_obj.smooth_motion(raw, 'tilt_y', MOTION_SMOOTHING)
                                     controller_obj.update_haptics_from_tilt(controller_obj.smoothed_motion['tilt_x'], cc_val)
-                                    if controller_obj.motion_enabled and abs(cc_val - 64) > TILT_DEADZONE:
+                                    if controller_obj.is_motion_enabled() and abs(cc_val - 64) > TILT_DEADZONE:
                                         if controller_obj.should_send_cc(CC_MAP['tilt_y'], cc_val):
                                             midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['tilt_y'], cc_val]
                                             midiout.send_message(midi_msg)
@@ -627,7 +633,7 @@ def main():
                                 elif event.code == ecodes.ABS_RZ:  # Twist (yaw)
                                     raw = controller_obj.scale_value(event.value, -1000, 1000)
                                     cc_val = controller_obj.smooth_motion(raw, 'twist', MOTION_SMOOTHING)
-                                    if controller_obj.motion_enabled and abs(cc_val - 64) > GYRO_DEADZONE:
+                                    if controller_obj.is_motion_enabled() and abs(cc_val - 64) > GYRO_DEADZONE:
                                         if controller_obj.should_send_cc(CC_MAP['twist'], cc_val):
                                             midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['twist'], cc_val]
                                             midiout.send_message(midi_msg)

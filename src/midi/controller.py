@@ -41,7 +41,14 @@ class MIDIController:
         self.max_banks = 7            # 8 banks total (0-7) = 128 MIDI values
 
         # Motion control toggle and loop recording
-        self.motion_enabled = False
+        # Per-channel: one flag per channel so enabling motion on ch1 doesn't
+        # affect ch2/ch3.
+        self.motion_enabled = [False, False, False]
+
+        # Combo guard: set True when L1+R1 fires check_motion_toggle() so the
+        # second button to be released doesn't also trigger its solo action.
+        self.l1_r1_combo_used = False
+
         self.l1_pressed = False
         self.r1_pressed = False
         self.l1_press_time = 0
@@ -196,7 +203,7 @@ class MIDIController:
             self.start_led_pulse(255, 0, 0)    # Red pulse
         elif loop_state.playing:
             self.start_led_pulse(0, 255, 0)    # Green pulse
-        elif self.motion_enabled:
+        elif self.is_motion_enabled():
             self.ds.light.setColorI(0, 100, 255)
         else:
             if self.current_channel == 1:
@@ -343,22 +350,31 @@ class MIDIController:
         """Get MIDI status byte with current channel (channels are 0-indexed in MIDI)"""
         return message_type + (self.current_channel - 1)
 
+    def is_motion_enabled(self):
+        """Return motion-enabled state for the current channel."""
+        return self.motion_enabled[self.current_channel - 1]
+
     def check_motion_toggle(self):
         """Check if L1+R1 pressed together to toggle motion"""
         if self.l1_pressed and self.r1_pressed:
-            self.motion_enabled = not self.motion_enabled
-            status = "ENABLED ✅" if self.motion_enabled else "DISABLED ❌"
+            idx = self.current_channel - 1
+            self.motion_enabled[idx] = not self.motion_enabled[idx]
+            status = "ENABLED ✅" if self.motion_enabled[idx] else "DISABLED ❌"
 
-            if self.motion_enabled:
+            if self.motion_enabled[idx]:
                 self.tilt_baseline_x = self.smoothed_motion['tilt_x']
                 self.tilt_baseline_y = self.smoothed_motion['tilt_y']
                 print(f"\n🎯 CALIBRATED: Baseline X={self.tilt_baseline_x:.1f}, Y={self.tilt_baseline_y:.1f}")
 
-            print(f"\n🎛️  MOTION CONTROL {status} (L1+R1)\n")
+            print(f"\n🎛️  MOTION CONTROL {status} on Ch {self.current_channel} (L1+R1)\n")
+
+            # Signal that a combo was handled — whichever button is released
+            # second should NOT also fire its solo action.
+            self.l1_r1_combo_used = True
 
         self.update_led_color()
 
-        if not self.motion_enabled:
+        if not self.is_motion_enabled():
             self.ds.setLeftMotor(0)
             self.ds.setRightMotor(0)
 
@@ -366,7 +382,7 @@ class MIDIController:
 
     def update_haptics_from_tilt(self, tilt_x_cc, tilt_y_cc):
         """Directional rumble: left/right for X-axis, both motors for Y-axis"""
-        if not self.motion_enabled:
+        if not self.is_motion_enabled():
             self.ds.setLeftMotor(0)
             self.ds.setRightMotor(0)
             return
