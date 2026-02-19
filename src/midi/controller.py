@@ -216,18 +216,15 @@ class MIDIController:
 
         loop_state = self.channel_mgr.get_current_loop_state()
 
-        # Loop states take top priority
+        # Recording states take top priority (always want to see record state)
         if loop_state.recording and loop_state.playing:
             self.start_led_pulse(255, 0, 255)   # Purple: overdub
             return
         if loop_state.recording:
             self.start_led_pulse(255, 0, 0)     # Red: recording
             return
-        if loop_state.playing:
-            self.start_led_pulse(0, 255, 0)     # Green: playing
-            return
 
-        # Quantize active: blink to show sync source
+        # Quantize active: overrides playing state so you can always see sync status
         if loop_state.quantize_subdivision is not None:
             synced = self.clock_source is not None and self.clock_source.is_synced_external()
             if synced:
@@ -242,7 +239,10 @@ class MIDIController:
                     self.start_led_pulse(150, 150, 0)    # Yellow
             return
 
-        # Motion enabled
+        # Playing (no quantize active)
+        if loop_state.playing:
+            self.start_led_pulse(0, 255, 0)     # Green: playing
+            return
         if self.is_motion_enabled():
             self.ds.light.setColorI(0, 100, 255)
             return
