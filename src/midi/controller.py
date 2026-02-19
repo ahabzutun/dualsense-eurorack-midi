@@ -15,7 +15,7 @@ import math
 from pydualsense import pydualsense
 from .harmonic_strummer import HarmonicStrummer
 
-from config.mappings import CC_MAP, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE, GYRO_DEADZONE, LONG_PRESS_DURATION
+from config.mappings import CC_MAP, NRPN_MAP, NRPN_MOTION_THRESHOLD, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
 
 
 class MIDIController:
@@ -24,6 +24,10 @@ class MIDIController:
         self.last_cc_values = {}  # Track last sent CC values
         self.last_motion_raw = {'tilt_x': 0, 'tilt_y': 0, 'twist': 0}
         self.smoothed_motion = {'tilt_x': 64, 'tilt_y': 64, 'twist': 64}
+
+        # 14-bit motion smoothing state (for NRPN sends, center = 8192)
+        self.smoothed_motion_14bit = {'tilt_x': 8192, 'tilt_y': 8192, 'twist': 8192}
+        self.last_nrpn_values = {}  # Track last sent NRPN values for threshold gating
         self.active_notes = {}
         self.touchpad_active = False  # Track if finger is on touchpad
 
@@ -149,24 +153,57 @@ class MIDIController:
             return self.scale_value(centered + deadzone, -(127 - deadzone), 0, 0, 63)
 
     def smooth_motion(self, raw_value, key, smoothing=0.3):
-        """Apply exponential smoothing to motion values"""
+        """Apply exponential smoothing to motion values (7-bit, 0-127)"""
         self.last_motion_raw[key] = raw_value
         self.smoothed_motion[key] = (smoothing * raw_value +
                                      (1 - smoothing) * self.smoothed_motion[key])
         return int(self.smoothed_motion[key])
+
+    def smooth_motion_14bit(self, raw_14bit, key, smoothing=0.3):
+        """Apply exponential smoothing in 14-bit space (0-16383, center 8192).
+        Smoothing before quantization gives genuine sub-LSB averaging and
+        eliminates the staircasing you get when upscaling 7-bit smoothed values.
+        """
+        self.smoothed_motion_14bit[key] = (
+            smoothing * raw_14bit +
+            (1 - smoothing) * self.smoothed_motion_14bit[key]
+        )
+        return int(self.smoothed_motion_14bit[key])
+
+    def should_send_nrpn(self, param, value):
+        """Gate NRPN sends: only send when value changed by more than threshold."""
+        if param not in self.last_nrpn_values:
+            self.last_nrpn_values[param] = value
+            return True
+        if abs(value - self.last_nrpn_values[param]) >= NRPN_MOTION_THRESHOLD:
+            self.last_nrpn_values[param] = value
+            return True
+        return False
+
+    def send_nrpn(self, midiout, param, value_14bit):
+        """Send a 14-bit NRPN value on the current MIDI channel.
+
+        NRPN 4-message sequence (all on same channel):
+          CC 99 = NRPN parameter MSB  (param >> 7)
+          CC 98 = NRPN parameter LSB  (param & 0x7F)
+          CC 6  = value MSB           (value >> 7)
+          CC 38 = value LSB           (value & 0x7F)
+        """
+        ch = self.get_midi_channel_byte(0xB0)
+        p_msb = (param >> 7) & 0x7F
+        p_lsb = param & 0x7F
+        v_msb = (value_14bit >> 7) & 0x7F
+        v_lsb = value_14bit & 0x7F
+        midiout.send_message([ch, 99, p_msb])
+        midiout.send_message([ch, 98, p_lsb])
+        midiout.send_message([ch,  6, v_msb])
+        midiout.send_message([ch, 38, v_lsb])
 
     def should_send_cc(self, cc_num, value):
         """Check if CC value changed enough to send"""
         if cc_num not in self.last_cc_values:
             self.last_cc_values[cc_num] = value
             return True
-
-        if cc_num in [CC_MAP['tilt_x'], CC_MAP['tilt_y'], CC_MAP['twist']]:
-            if abs(value - self.last_cc_values[cc_num]) >= MOTION_THRESHOLD:
-                self.last_cc_values[cc_num] = value
-                return True
-            return False
-
         if value != self.last_cc_values[cc_num]:
             self.last_cc_values[cc_num] = value
             return True

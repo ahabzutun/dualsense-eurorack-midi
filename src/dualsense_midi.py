@@ -9,7 +9,7 @@ import os
 import ctypes
 from pydualsense import pydualsense
 import threading
-from config.mappings import CC_MAP, NOTE_MAP, STICK_DEADZONE, MOTION_THRESHOLD, STICK_CENTER, MOTION_SMOOTHING, TILT_DEADZONE, GYRO_DEADZONE, LONG_PRESS_DURATION
+from config.mappings import CC_MAP, NOTE_MAP, NRPN_MAP, STICK_DEADZONE, MOTION_THRESHOLD, STICK_CENTER, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
 from state.freeze import FreezeState
 from state.loop import LoopState
 from state.channel_manager import ChannelManager
@@ -118,7 +118,7 @@ def main():
         print("  Triggers → CC 7,10")
         print("  Touchpad X  → Scrub loop position")
         print("  Touchpad Y  → Quantize (top→bottom: 1/32 / 1/16 / 1/8 / 1/4 / OFF, lift = OFF)")
-        print("  Motion → CC 16,17,18 (Press L1+R1 to toggle)")
+        print("  Motion → NRPN 0,1,2 (14-bit tilt X/Y, twist) (Press L1+R1 to toggle)")
         print("=" * 50)
         print("🎛️  MIDI Channel: 1 (White LED) ⚪")
         print("   SELECT (Create) → Channel 1 (White)")
@@ -567,51 +567,55 @@ def main():
                         elif device == motion:
                             if event.type == ecodes.EV_ABS:
                                 if event.code == ecodes.ABS_X:  # Tilt X (left/right)
-                                    raw = controller_obj.scale_value(event.value, -500, 500)
-                                    cc_val = controller_obj.smooth_motion(raw, 'tilt_x', MOTION_SMOOTHING)
+                                    # Scale raw (-500..500) → 14-bit (0..16383), smooth in 14-bit space
+                                    raw_14 = controller_obj.scale_value(event.value, -500, 500, 0, 16383)
+                                    val_14 = controller_obj.smooth_motion_14bit(raw_14, 'tilt_x', MOTION_SMOOTHING)
+                                    # Also keep 7-bit smoothed value for haptics
+                                    raw_7 = controller_obj.scale_value(event.value, -500, 500)
+                                    cc_val = controller_obj.smooth_motion(raw_7, 'tilt_x', MOTION_SMOOTHING)
                                     controller_obj.update_haptics_from_tilt(cc_val, controller_obj.smoothed_motion['tilt_y'])
-                                    if controller_obj.is_motion_enabled() and abs(cc_val - 64) > TILT_DEADZONE:
-                                        if controller_obj.should_send_cc(CC_MAP['tilt_x'], cc_val):
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['tilt_x'], cc_val]
-                                            midiout.send_message(midi_msg)
-
-                                            # Record to loop
+                                    if controller_obj.is_motion_enabled() and abs(val_14 - 8192) > TILT_DEADZONE_14BIT:
+                                        if controller_obj.should_send_nrpn(NRPN_MAP['tilt_x'], val_14):
+                                            controller_obj.send_nrpn(midiout, NRPN_MAP['tilt_x'], val_14)
                                             loop_state = channel_manager.get_current_loop_state()
                                             if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
-
-                                            print(f"📐 Tilt X  → CC{CC_MAP['tilt_x']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                                # Record as 4 individual CC messages that make up the NRPN
+                                                ch = controller_obj.get_midi_channel_byte(0xB0)
+                                                p = NRPN_MAP['tilt_x']
+                                                for msg in ([ch,99,(p>>7)&0x7F],[ch,98,p&0x7F],[ch,6,(val_14>>7)&0x7F],[ch,38,val_14&0x7F]):
+                                                    loop_state.record_message(msg)
+                                            print(f"📐 Tilt X  → NRPN {NRPN_MAP['tilt_x']}: {val_14:5d} (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_Y:  # Tilt Y (forward/back)
-                                    raw = controller_obj.scale_value(event.value, 7500, 8500)
-                                    cc_val = controller_obj.smooth_motion(raw, 'tilt_y', MOTION_SMOOTHING)
+                                    raw_14 = controller_obj.scale_value(event.value, 7500, 8500, 0, 16383)
+                                    val_14 = controller_obj.smooth_motion_14bit(raw_14, 'tilt_y', MOTION_SMOOTHING)
+                                    raw_7 = controller_obj.scale_value(event.value, 7500, 8500)
+                                    cc_val = controller_obj.smooth_motion(raw_7, 'tilt_y', MOTION_SMOOTHING)
                                     controller_obj.update_haptics_from_tilt(controller_obj.smoothed_motion['tilt_x'], cc_val)
-                                    if controller_obj.is_motion_enabled() and abs(cc_val - 64) > TILT_DEADZONE:
-                                        if controller_obj.should_send_cc(CC_MAP['tilt_y'], cc_val):
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['tilt_y'], cc_val]
-                                            midiout.send_message(midi_msg)
-
-                                            # Record to loop
+                                    if controller_obj.is_motion_enabled() and abs(val_14 - 8192) > TILT_DEADZONE_14BIT:
+                                        if controller_obj.should_send_nrpn(NRPN_MAP['tilt_y'], val_14):
+                                            controller_obj.send_nrpn(midiout, NRPN_MAP['tilt_y'], val_14)
                                             loop_state = channel_manager.get_current_loop_state()
                                             if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
-
-                                            print(f"📐 Tilt Y  → CC{CC_MAP['tilt_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                                ch = controller_obj.get_midi_channel_byte(0xB0)
+                                                p = NRPN_MAP['tilt_y']
+                                                for msg in ([ch,99,(p>>7)&0x7F],[ch,98,p&0x7F],[ch,6,(val_14>>7)&0x7F],[ch,38,val_14&0x7F]):
+                                                    loop_state.record_message(msg)
+                                            print(f"📐 Tilt Y  → NRPN {NRPN_MAP['tilt_y']}: {val_14:5d} (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_RZ:  # Twist (yaw)
-                                    raw = controller_obj.scale_value(event.value, -1000, 1000)
-                                    cc_val = controller_obj.smooth_motion(raw, 'twist', MOTION_SMOOTHING)
-                                    if controller_obj.is_motion_enabled() and abs(cc_val - 64) > GYRO_DEADZONE:
-                                        if controller_obj.should_send_cc(CC_MAP['twist'], cc_val):
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['twist'], cc_val]
-                                            midiout.send_message(midi_msg)
-
-                                            # Record to loop
+                                    raw_14 = controller_obj.scale_value(event.value, -1000, 1000, 0, 16383)
+                                    val_14 = controller_obj.smooth_motion_14bit(raw_14, 'twist', MOTION_SMOOTHING)
+                                    if controller_obj.is_motion_enabled() and abs(val_14 - 8192) > GYRO_DEADZONE_14BIT:
+                                        if controller_obj.should_send_nrpn(NRPN_MAP['twist'], val_14):
+                                            controller_obj.send_nrpn(midiout, NRPN_MAP['twist'], val_14)
                                             loop_state = channel_manager.get_current_loop_state()
                                             if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
-
-                                            print(f"🔄 Twist   → CC{CC_MAP['twist']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                                ch = controller_obj.get_midi_channel_byte(0xB0)
+                                                p = NRPN_MAP['twist']
+                                                for msg in ([ch,99,(p>>7)&0x7F],[ch,98,p&0x7F],[ch,6,(val_14>>7)&0x7F],[ch,38,val_14&0x7F]):
+                                                    loop_state.record_message(msg)
+                                            print(f"🔄 Twist   → NRPN {NRPN_MAP['twist']}: {val_14:5d} (Ch {controller_obj.current_channel})")
 
                         # Handle touchpad events
                         elif device == touchpad:
