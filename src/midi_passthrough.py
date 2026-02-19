@@ -28,13 +28,29 @@ class MIDIHub:
         self.lock = threading.Lock()
 
         # ── Diagnostic mode ──────────────────────────────────────────────────
-        # Set to True to print every raw message received from the 16n faderbank
-        # without forwarding it. Helps diagnose min/max range mismatches.
-        # Switch back to False for normal operation.
-        self.DIAGNOSTIC_MODE = True
-        self.DIAGNOSTIC_FILTER_CHANNEL = 16   # only log ch 16 (16n)
-        self.DIAGNOSTIC_FILTER_CC_MIN  = 80   # only log CC 80-95
+        # Set to True to print raw 16n values WITHOUT forwarding.
+        # Set to False for normal operation.
+        self.DIAGNOSTIC_MODE = False
+        self.DIAGNOSTIC_FILTER_CHANNEL = 16
+        self.DIAGNOSTIC_FILTER_CC_MIN  = 80
         self.DIAGNOSTIC_FILTER_CC_MAX  = 95
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── 16n → SSP rescaling ───────────────────────────────────────────────
+        # The SSP maps CC 0-127 to its internal 0.0-1.0 range, but PMIX/ATTN
+        # treat 1.0 as maximum gain (far above unity), so full fader travel
+        # slams the output immediately. We rescale 16n fader values (ch16,
+        # CC 80-95) before forwarding to SSP only, leaving NerdSEQ untouched.
+        #
+        # TUNING: raise SSP_CC_MAX if the faders feel too restricted,
+        #         lower it if they still max out too early.
+        #         Start at 80 (~63% of full scale) and adjust by feel.
+        #
+        self.RESCALE_ENABLED  = True
+        self.RESCALE_CHANNEL  = 16          # only rescale ch16 (the 16n)
+        self.RESCALE_CC_MIN   = 80          # first fader CC
+        self.RESCALE_CC_MAX   = 95          # last fader CC
+        self.SSP_CC_MAX       = 80          # 0-127 in → 0-80 to SSP
         # ─────────────────────────────────────────────────────────────────────
 
         # Create scanners ONCE and reuse them (never re-create these)
@@ -149,6 +165,35 @@ class MIDIHub:
                             pass
                         del midiin
 
+    def rescale_for_ssp(self, midi_message):
+        """
+        Rescale 16n fader CC values before sending to SSP.
+
+        The SSP maps CC 0-127 → 0.0-1.0 internally, but PMIX/ATTN treat
+        1.0 as maximum gain (well above unity), so even small CC values
+        slam the output. We compress the range so full fader travel = SSP_CC_MAX
+        instead of 127.
+
+        Returns a new message list with the rescaled value, or the original
+        if this message doesn't need rescaling.
+        """
+        if len(midi_message) < 3:
+            return midi_message
+
+        status   = midi_message[0]
+        msg_type = status & 0xF0
+        channel  = (status & 0x0F) + 1
+
+        if (msg_type == 0xB0 and
+                channel == self.RESCALE_CHANNEL and
+                self.RESCALE_CC_MIN <= midi_message[1] <= self.RESCALE_CC_MAX):
+            raw = midi_message[2]
+            rescaled = round(raw * self.SSP_CC_MAX / 127)
+            rescaled = max(0, min(127, rescaled))
+            return [status, midi_message[1], rescaled]
+
+        return midi_message
+
     def make_callback(self, port_name):
         """Create a callback that forwards MIDI to all outputs"""
         def callback(message, data):
@@ -156,13 +201,12 @@ class MIDIHub:
                 midi_message, deltatime = message
 
                 # ── Diagnostic mode: log raw bytes, skip forwarding ──────────
-                if self.DIAGNOSTIC_MODE and "16n" in port_name or "fader" in port_name.lower():
+                if self.DIAGNOSTIC_MODE and ("16n" in port_name or "fader" in port_name.lower()):
                     if len(midi_message) >= 3:
-                        status  = midi_message[0]
+                        status   = midi_message[0]
                         msg_type = status & 0xF0
-                        channel  = (status & 0x0F) + 1  # 1-indexed
-
-                        if msg_type == 0xB0:  # Control Change
+                        channel  = (status & 0x0F) + 1
+                        if msg_type == 0xB0:
                             cc_num = midi_message[1]
                             cc_val = midi_message[2]
                             in_range = (
@@ -174,17 +218,23 @@ class MIDIHub:
                                 print(f"🔬 [16n] Ch{channel:2d} CC{cc_num:3d} = {cc_val:3d}/127  |{bar:<20}|  raw: {[hex(b) for b in midi_message]}")
                         else:
                             print(f"🔬 [16n] Non-CC msg: {[hex(b) for b in midi_message]}")
-                    return  # ← do NOT forward in diagnostic mode
+                    return  # do NOT forward in diagnostic mode
 
                 # ── Normal mode: forward to all outputs ──────────────────────
-                print(f"📨 [{port_name}] → {midi_message}")
                 with self.lock:
                     if not self.outputs:
                         print(f"⚠️  No outputs available to forward to!")
                     for output_name, output in self.outputs.items():
                         try:
-                            output.send_message(midi_message)
-                            print(f"   ✓ Sent to {output_name}")
+                            # SSP gets rescaled 16n values; NerdSEQ gets originals
+                            if self.RESCALE_ENABLED and output_name == 'SSP':
+                                msg_to_send = self.rescale_for_ssp(midi_message)
+                                if msg_to_send[2] != midi_message[2]:
+                                    print(f"🎚️  [16n→SSP] CC{midi_message[1]} {midi_message[2]}→{msg_to_send[2]}")
+                            else:
+                                msg_to_send = midi_message
+
+                            output.send_message(msg_to_send)
                         except Exception as e:
                             print(f"⚠️  Failed to send to {output_name}: {e}")
             except Exception as e:
