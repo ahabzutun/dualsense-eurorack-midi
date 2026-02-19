@@ -27,18 +27,21 @@ class LoopState:
         self.buffer_lock = threading.Lock()  # Thread-safe buffer access
         self.MAX_LOOP_DURATION = 60.0  # 60 seconds max
 
+        # Quantization: None = off, 4/8/16/32 = subdivision
+        # Raw timestamps are always preserved; snapping is applied at
+        # playback time so you can toggle quantization mid-loop freely.
+        self.quantize_subdivision = None
+
     def start_recording(self):
         """Start recording MIDI messages"""
         with self.buffer_lock:
-            # If playing, stop playback first
             if self.playing:
                 self.stop_playback()
-
-            # Clear buffer and start fresh
             self.midi_buffer = []
             self.recording = True
             self.record_start_time = time.time()
             self.loop_duration = 0
+            self.quantize_subdivision = None  # Reset quantization on new recording
 
     def stop_recording(self):
         """Stop recording and calculate loop duration"""
@@ -71,14 +74,14 @@ class LoopState:
 
             self.midi_buffer.append((relative_time, midi_message))
 
-    def start_playback(self, midiout, window_position_func=None, window_size_func=None):
+    def start_playback(self, midiout, window_position_func=None, bpm_func=None):
         """
         Start loop playback in background thread
 
         Args:
             midiout: MIDI output interface
-            window_position_func: Optional function returning window position (0.0-1.0)
-            window_size_func: Optional function returning window size (0.0-1.0)
+            window_position_func: Optional function returning scrub position (0.0-1.0)
+            bpm_func: Optional function returning current BPM (for quantization)
         """
         if not self.midi_buffer or self.playing:
             return False
@@ -87,7 +90,7 @@ class LoopState:
         self.playback_stop_event.clear()
         self.playback_thread = threading.Thread(
             target=self._playback_loop,
-            args=(midiout, window_position_func, window_size_func),
+            args=(midiout, window_position_func, bpm_func),
             daemon=True
         )
         self.playback_thread.start()
@@ -101,38 +104,51 @@ class LoopState:
             if self.playback_thread:
                 self.playback_thread.join(timeout=0.5)
 
-    def _playback_loop(self, midiout, window_position_func=None, window_size_func=None):
+    @staticmethod
+    def _snap_to_grid(timestamp, bpm, subdivision, loop_duration):
         """
-        Granular scanning playback - window continuously retriggers.
-        Small windows = glitchy stuttering, large windows = smooth playback.
-        Moving touchpad X = immediate scrubbing through the recording.
+        Snap a timestamp (seconds) to the nearest grid point.
 
-        FIX: Buffer is cached outside the while loop and only refreshed when
-        recording is active. messages_in_window is pre-allocated and cleared
-        each iteration rather than re-allocated. Sort key lambda is defined
-        once outside the loop. Together these eliminate ~3 allocations/ms.
+        grid_size = one quarter note * (4 / subdivision)
+        e.g. subdivision=16 → grid every (60/bpm * 4/16) = 60/(bpm*4) seconds
+
+        The snapped value is wrapped to stay inside [0, loop_duration).
+        """
+        if bpm <= 0:
+            return timestamp
+        quarter_note = 60.0 / bpm
+        grid_size = quarter_note * (4.0 / subdivision)
+        snapped = round(timestamp / grid_size) * grid_size
+        return snapped % loop_duration
+
+    def _playback_loop(self, midiout, window_position_func=None, bpm_func=None):
+        """
+        Playback loop with optional real-time quantization.
+
+        window_size is now fixed at 1.0 (full loop); touchpad Y controls
+        quantize_subdivision instead. Touchpad X still scrubs position.
+
+        Quantization is non-destructive — raw timestamps are preserved in
+        midi_buffer and snapping is applied per-grain so it can be toggled
+        freely during playback.
         """
 
         last_window_pos = None
-        POSITION_CHANGE_THRESHOLD = 0.05  # 5% movement triggers new grain
+        POSITION_CHANGE_THRESHOLD = 0.05
 
-        # --- FIX: pre-allocate these outside the hot loop ---
         cached_buffer = []
         cached_duration = 0
         buffer_loaded = False
-        messages_in_window = []          # reused via .clear() each iteration
-        _sort_key = lambda x: x[0]      # defined once, not re-created each loop
+        messages_in_window = []
+        _sort_key = lambda x: x[0]
 
         while self.playing and not self.playback_stop_event.is_set():
 
-            # --- FIX: only re-copy buffer when strictly necessary ---
             if self.recording:
-                # Buffer is actively changing - must refresh every iteration
                 with self.buffer_lock:
                     cached_buffer = list(self.midi_buffer)
                     cached_duration = self.loop_duration
             elif not buffer_loaded:
-                # First time entering playback (or after clear) - load once
                 with self.buffer_lock:
                     cached_buffer = list(self.midi_buffer)
                     cached_duration = self.loop_duration
@@ -142,57 +158,59 @@ class LoopState:
                 time.sleep(0.01)
                 continue
 
-            # Get current window parameters
+            # Window position from touchpad X (scrubbing); size fixed at 1.0
             window_pos = window_position_func() if window_position_func else 0.0
-            window_size = window_size_func() if window_size_func else 1.0
+            window_size = 1.0  # always full loop — granular sizing removed
 
-            # Calculate window boundaries in seconds
             window_start_time = window_pos * cached_duration
-            window_length = window_size * cached_duration
+            window_length = cached_duration  # always the full loop
             window_end_time = window_start_time + window_length
 
-            # Minimum grain length to prevent CPU overload with tiny windows
-            MIN_GRAIN_MS = 10
-            grain_duration = max(window_length, MIN_GRAIN_MS / 1000.0)
+            grain_duration = window_length
 
-            # --- FIX: reuse the list, don't reallocate ---
+            # Snapshot quantization state for this grain so it stays
+            # consistent even if the user changes it mid-grain.
+            subdivision = self.quantize_subdivision
+            bpm = bpm_func() if (bpm_func and subdivision) else 0
+
             messages_in_window.clear()
 
             for timestamp, midi_msg in cached_buffer:
                 in_window = False
 
                 if window_end_time <= cached_duration:
-                    # Normal case: window doesn't wrap
                     if window_start_time <= timestamp < window_end_time:
                         in_window = True
                 else:
-                    # Wrapped case: window extends past loop end
                     wrap_amount = window_end_time - cached_duration
                     if timestamp >= window_start_time or timestamp < wrap_amount:
                         in_window = True
 
                 if in_window:
-                    relative_pos = timestamp - window_start_time
-                    if relative_pos < 0:  # Handle wrap
+                    # Apply quantization to the original timestamp, then
+                    # derive the grain-relative position from the snapped value.
+                    if subdivision and bpm > 0:
+                        snapped = self._snap_to_grid(timestamp, bpm, subdivision, cached_duration)
+                    else:
+                        snapped = timestamp
+
+                    relative_pos = snapped - window_start_time
+                    if relative_pos < 0:
                         relative_pos += cached_duration
                     messages_in_window.append((relative_pos, midi_msg))
 
-            # --- FIX: reuse the lambda defined once above ---
             messages_in_window.sort(key=_sort_key)
 
-            # PLAY THE GRAIN - retrigger all messages in window
             grain_start = time.time()
 
             for rel_time, midi_msg in messages_in_window:
                 if not self.playing:
                     break
 
-                # Check if window position moved significantly during playback
                 current_pos = window_position_func() if window_position_func else 0.0
                 if last_window_pos is not None and abs(current_pos - window_pos) > POSITION_CHANGE_THRESHOLD:
                     break
 
-                # Calculate when to play this message within the grain
                 if window_length > 0:
                     scaled_time = (rel_time / window_length) * grain_duration
                 else:
@@ -205,15 +223,12 @@ class LoopState:
                     if self.playback_stop_event.wait(timeout=sleep_time):
                         break
 
-                # Send the MIDI message
                 try:
                     midiout.send_message(midi_msg)
                 except Exception:
                     pass
 
             last_window_pos = window_pos
-
-            # Tiny delay before retriggering grain (prevents CPU overload)
             self.playback_stop_event.wait(timeout=0.001)
 
     def clear_loop(self):
@@ -232,6 +247,7 @@ class LoopState:
                 self.midi_buffer = []
                 self.loop_duration = 0
                 self.recording = False
+                self.quantize_subdivision = None
 
                 # Wait for playback thread to finish (non-blocking)
                 if self.playback_thread and self.playback_thread.is_alive():

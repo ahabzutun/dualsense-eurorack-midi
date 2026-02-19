@@ -13,6 +13,7 @@ from config.mappings import CC_MAP, NOTE_MAP, STICK_DEADZONE, MOTION_THRESHOLD, 
 from state.freeze import FreezeState
 from state.loop import LoopState
 from state.channel_manager import ChannelManager
+from state.clock_source import ClockSource
 from midi.controller import MIDIController
 
 # ── Memory management setup ───────────────────────────────────────────────────
@@ -58,6 +59,10 @@ def main():
 
     # Initialize channel manager first
     channel_manager = ChannelManager()
+
+    # Initialize and start clock source (NerdSEQ external clock, internal BPM fallback)
+    clock_source = ClockSource(internal_bpm=120)
+    clock_source.start()
 
     # Pass channel manager to MIDIController
     controller_obj = MIDIController(channel_manager)
@@ -111,7 +116,8 @@ def main():
         print("  R3 (Right Stick Click) → FREEZE Right Stick ❄️")
         print("  Sticks → CC 1,2,74,71")
         print("  Triggers → CC 7,10")
-        print("  Touchpad → CC 20,21")
+        print("  Touchpad X  → Scrub loop position")
+        print("  Touchpad Y  → Quantize (top→bottom: 1/32 / 1/16 / 1/8 / 1/4 / OFF, lift = OFF)")
         print("  Motion → CC 16,17,18 (Press L1+R1 to toggle)")
         print("=" * 50)
         print("🎛️  MIDI Channel: 1 (White LED) ⚪")
@@ -235,7 +241,7 @@ def main():
                                                 elif loop_state.midi_buffer:
                                                     if loop_state.start_playback(midiout,
                                                         window_position_func=lambda: controller_obj.window_position,
-                                                        window_size_func=lambda: controller_obj.window_size):
+                                                        bpm_func=lambda: clock_source.get_current_bpm()):
                                                         controller_obj.update_led_color()
                                                         print(f"\n▶️  Channel {channel_manager.current_channel}: Playing loop ({loop_state.loop_duration:.1f}s, {len(loop_state.midi_buffer)} events) (R1)")
                                                 else:
@@ -673,24 +679,19 @@ def main():
                                 elif event.code == ecodes.ABS_Y:  # Touchpad Y
                                     touchpad_y = event.value
 
-                                    # Update window size if finger is down and loop is playing
                                     if controller_obj.touchpad_active:
                                         loop_state = channel_manager.get_current_loop_state()
                                         if loop_state.playing:
-                                            # Update scanning window
+                                            # Y controls quantization subdivision
                                             controller_obj.update_touchpad(controller_obj.touchpad_x, touchpad_y, True)
-
-                                        # Also send as CC when NOT manipulating loop
-                                        if not loop_state.playing:
+                                        else:
+                                            # Not playing: send as CC
                                             cc_val = controller_obj.scale_value(touchpad_y, 0, 1080)
                                             if controller_obj.should_send_cc(CC_MAP['touchpad_y'], cc_val):
                                                 midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_y'], cc_val]
                                                 midiout.send_message(midi_msg)
-
-                                                # Record to loop
                                                 if loop_state.recording:
                                                     loop_state.record_message(midi_msg)
-
                                                 print(f"👆 Touch Y → CC{CC_MAP['touchpad_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
                 # After processing all events, send repeated CCs for held buttons
@@ -719,6 +720,7 @@ def main():
                 midiout.send_message([controller_obj.get_midi_channel_byte(0x80), note, 0])
 
             controller_obj.cleanup()
+            clock_source.stop()
 
             if controller:
                 controller.close()

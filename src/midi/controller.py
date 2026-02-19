@@ -27,13 +27,12 @@ class MIDIController:
         self.active_notes = {}
         self.touchpad_active = False  # Track if finger is on touchpad
 
-        # Touchpad-based loop scanning
+        # Touchpad-based loop controls
         self.touchpad_x = 0      # 0-1920
         self.touchpad_y = 0      # 0-1080
         self.touchpad_active = False
-        self.window_position = 0.0    # 0.0 to 1.0 (percentage of loop)
-        self.window_size = 1.0        # 0.0 to 1.0 (percentage of loop)
-        self.min_window_ms = 5        # Minimum window for glitchy sounds
+        self.window_position = 0.0    # 0.0 to 1.0 — scrub position via touchpad X
+        self.window_size = 1.0        # Fixed at 1.0 (full loop); touchpad Y now controls quantization
 
         # LEFT STICK SLICE BANKING
         self.slice_bank = 0           # Current bank (0-7 for 128 slices total)
@@ -398,30 +397,53 @@ class MIDIController:
         self.ds.setRightMotor(rumble_right)
 
     def update_touchpad(self, x, y, is_active):
-        """Update touchpad position and calculate loop window"""
+        """
+        Update touchpad position.
+
+        X → loop scrub position (0.0-1.0 through the loop)
+        Y → quantization subdivision, top to bottom:
+              0- 216  (zone 0) = 1/32
+            216- 432  (zone 1) = 1/16
+            432- 648  (zone 2) = 1/8
+            648- 864  (zone 3) = 1/4
+            864-1080  (zone 4) = OFF
+        Finger lift → quantization OFF, position reset
+        """
         self.touchpad_x = x
         self.touchpad_y = y
         self.touchpad_active = is_active
 
+        loop_state = self.channel_mgr.get_current_loop_state()
+
         if not is_active:
             self.window_position = 0.0
-            self.window_size = 1.0
+            # Turn quantization off when finger leaves touchpad
+            if loop_state.quantize_subdivision is not None:
+                loop_state.quantize_subdivision = None
+                print("🎵 Quantize: OFF (finger lifted)")
             return
 
-        loop_state = self.channel_mgr.get_current_loop_state()
         if not loop_state.playing or loop_state.loop_duration == 0:
             return
 
+        # X → scrub position
         self.window_position = x / 1920.0
 
-        min_window_size = self.min_window_ms / (loop_state.loop_duration * 1000.0)
-        min_window_size = max(0.001, min(min_window_size, 1.0))
+        # Y → quantization subdivision (5 equal zones over 1080px)
+        SUBDIVISIONS = [32, 16, 8, 4, None]  # top→bottom
+        zone = min(int(y / 216), 4)
+        new_sub = SUBDIVISIONS[zone]
 
-        normalized_y = y / 1080.0
-        self.window_size = min_window_size + (normalized_y * (1.0 - min_window_size))
+        if new_sub != loop_state.quantize_subdivision:
+            loop_state.quantize_subdivision = new_sub
+            if new_sub:
+                print(f"🎵 Quantize: 1/{new_sub} (zone {zone})")
+            else:
+                print(f"🎵 Quantize: OFF")
 
         if int(time.time() * 4) % 2 == 0:
-            print(f"🎚️  Touchpad: Pos={self.window_position*100:.1f}% Size={self.window_size*100:.1f}%")
+            sub_str = f"1/{loop_state.quantize_subdivision}" if loop_state.quantize_subdivision else "OFF"
+            print(f"👆 Touchpad: Scrub={self.window_position*100:.1f}% Quantize={sub_str}")
 
     def cleanup(self):
         """Properly shut down controller and haptics"""
