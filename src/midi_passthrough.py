@@ -23,7 +23,12 @@ class MIDIHub:
     def __init__(self):
         self.outputs = {}
         self.inputs = {}
-        self.skip_devices = ["f_midi", "NerdSEQ", "Midi Through"]
+        # Devices to never open as inputs (we only write to them, or they're loopback noise)
+        # Note: NerdSEQ is intentionally NOT listed here — it is both a source
+        # (sequences/patterns it sends out) and a destination, so we do want to
+        # read from it. The callback already prevents feedback by skipping the
+        # source device when forwarding.
+        self.skip_input_devices = ["f_midi", "Midi Through"]
         self.running = True
         self.lock = threading.Lock()
 
@@ -119,7 +124,7 @@ class MIDIHub:
         found_inputs = {}
 
         for i, port_name in enumerate(available):
-            should_skip = any(skip in port_name for skip in self.skip_devices)
+            should_skip = any(skip in port_name for skip in self.skip_input_devices)
             if "RtMidi output" in port_name and "DualSense_Controller" not in port_name:
                 should_skip = True
 
@@ -196,7 +201,7 @@ class MIDIHub:
         return midi_message
 
     def make_callback(self, port_name):
-        """Create a callback that forwards MIDI to all outputs"""
+        """Create a callback that forwards MIDI to all outputs except the source device"""
         def callback(message, data):
             try:
                 midi_message, deltatime = message
@@ -226,8 +231,13 @@ class MIDIHub:
                     if not self.outputs:
                         print(f"⚠️  No outputs available to forward to!")
                     for output_name, output in self.outputs.items():
+                        # ── Feedback prevention: never send a message back to
+                        # its own source device (e.g. NerdSEQ → NerdSEQ) ─────
+                        if output_name in port_name or port_name in output_name:
+                            continue
+
                         try:
-                            # SSP gets rescaled 16n values; NerdSEQ gets originals
+                            # SSP gets rescaled 16n values; everything else gets originals
                             if self.RESCALE_ENABLED and output_name == 'SSP':
                                 msg_to_send = self.rescale_for_ssp(midi_message)
                                 if msg_to_send[2] != midi_message[2]:
