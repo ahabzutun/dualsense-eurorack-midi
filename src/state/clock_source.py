@@ -49,6 +49,7 @@ class ClockSource:
 
     def _find_nerdseq_port(self):
         """Return (index, name) of the NerdSEQ MIDI port, or (None, None)."""
+        probe = None
         try:
             probe = rtmidi.MidiIn()
             ports = probe.get_ports()
@@ -58,6 +59,11 @@ class ClockSource:
             return None, None
         except Exception:
             return None, None
+        finally:
+            # CRITICAL: always delete the probe — every rtmidi.MidiIn() allocates
+            # an ALSA sequencer client. Leaking these exhausts the 256-client limit.
+            if probe is not None:
+                del probe
 
     def _setup_midi_clock_listener(self):
         """Open the NerdSEQ MIDI port and start receiving clock. Safe to call
@@ -107,11 +113,13 @@ class ClockSource:
             self.on_sync_change(False)
 
     def _hotplug_monitor(self):
-        """Background thread: scan for NerdSEQ every 5 seconds and
+        """Background thread: scan for NerdSEQ every 15 seconds and
         connect/disconnect as it appears or disappears."""
         while self.is_running:
-            self._setup_midi_clock_listener()
-            time.sleep(5.0)
+            # Skip scan if already connected — no need to probe
+            if self._connected_port_name is None:
+                self._setup_midi_clock_listener()
+            time.sleep(15.0)
 
     def _midi_clock_callback(self, message, data):
         """Handle incoming MIDI clock messages"""
