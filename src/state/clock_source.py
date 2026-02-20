@@ -79,6 +79,9 @@ class ClockSource:
         try:
             self.midi_in = rtmidi.MidiIn()
             self.midi_in.open_port(idx)
+            # rtmidi ignores timing clock (0xF8) by default — must explicitly enable it
+            # ignore_types(sysex, timing, active_sensing)
+            self.midi_in.ignore_types(False, False, False)
             self.midi_in.set_callback(self._midi_clock_callback)
             self._connected_port_name = name
             print(f"[ClockSource] ✅ Listening for MIDI clock on: {name}")
