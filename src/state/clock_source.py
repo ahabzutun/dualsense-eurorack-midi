@@ -42,32 +42,69 @@ class ClockSource:
 
         # MIDI input for clock sync
         self.midi_in = None
+        self._connected_port_name = None   # Track which port we have open
+        self._hotplug_thread: Optional[threading.Thread] = None
         self._setup_midi_clock_listener()
 
+    def _find_nerdseq_port(self):
+        """Return (index, name) of the NerdSEQ MIDI port, or (None, None)."""
+        try:
+            probe = rtmidi.MidiIn()
+            ports = probe.get_ports()
+            for idx, name in enumerate(ports):
+                if 'nerdseq' in name.lower():
+                    return idx, name
+            return None, None
+        except Exception:
+            return None, None
+
     def _setup_midi_clock_listener(self):
-        """Setup MIDI input to listen for clock from NerdSEQ"""
+        """Open the NerdSEQ MIDI port and start receiving clock. Safe to call
+        multiple times — does nothing if already connected to the same port."""
+        idx, name = self._find_nerdseq_port()
+        if idx is None:
+            if self._connected_port_name is not None:
+                # Was connected, now gone — clean up
+                self._teardown_midi_listener()
+                print("[ClockSource] NerdSEQ disconnected, using internal clock")
+            return  # Nothing to open
+
+        if self._connected_port_name == name:
+            return  # Already connected to this port, nothing to do
+
+        # Close existing connection before opening new one
+        self._teardown_midi_listener()
+
         try:
             self.midi_in = rtmidi.MidiIn()
-            available_ports = self.midi_in.get_ports()
-
-            # Look for NerdSEQ or open first available port
-            nerdseq_port = None
-            for idx, port_name in enumerate(available_ports):
-                if 'nerdseq' in port_name.lower() or 'nerdseq' in port_name.lower():
-                    nerdseq_port = idx
-                    break
-
-            if nerdseq_port is not None:
-                self.midi_in.open_port(nerdseq_port)
-                self.midi_in.set_callback(self._midi_clock_callback)
-                print(f"[ClockSource] Listening for MIDI clock on: {available_ports[nerdseq_port]}")
-            else:
-                print("[ClockSource] NerdSEQ not found, using internal clock")
-                self.midi_in = None
-
+            self.midi_in.open_port(idx)
+            self.midi_in.set_callback(self._midi_clock_callback)
+            self._connected_port_name = name
+            print(f"[ClockSource] ✅ Listening for MIDI clock on: {name}")
         except Exception as e:
-            print(f"[ClockSource] Could not setup MIDI clock listener: {e}")
+            print(f"[ClockSource] Could not open NerdSEQ port: {e}")
             self.midi_in = None
+            self._connected_port_name = None
+
+    def _teardown_midi_listener(self):
+        """Close the current MIDI input cleanly."""
+        if self.midi_in is not None:
+            try:
+                self.midi_in.cancel_callback()
+                self.midi_in.close_port()
+            except Exception:
+                pass
+            self.midi_in = None
+        self._connected_port_name = None
+        with self.lock:
+            self.use_external_clock = False
+
+    def _hotplug_monitor(self):
+        """Background thread: scan for NerdSEQ every 5 seconds and
+        connect/disconnect as it appears or disappears."""
+        while self.is_running:
+            self._setup_midi_clock_listener()
+            time.sleep(5.0)
 
     def _midi_clock_callback(self, message, data):
         """Handle incoming MIDI clock messages"""
@@ -190,6 +227,10 @@ class ClockSource:
         self.clock_thread = threading.Thread(target=self._internal_clock_loop, daemon=True)
         self.clock_thread.start()
 
+        # Start NerdSEQ hot-plug monitor
+        self._hotplug_thread = threading.Thread(target=self._hotplug_monitor, daemon=True)
+        self._hotplug_thread.start()
+
         print(f"[ClockSource] Started - Internal BPM: {self.internal_bpm}")
 
     def stop(self):
@@ -200,9 +241,7 @@ class ClockSource:
         if self.clock_thread:
             self.clock_thread.join(timeout=2.0)
 
-        if self.midi_in:
-            self.midi_in.cancel_callback()  # break ref cycle before close
-            self.midi_in.close_port()
+        self._teardown_midi_listener()
 
         print("[ClockSource] Stopped")
 
