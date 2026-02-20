@@ -42,6 +42,7 @@ class MIDIController:
         # Quantize toggle state (touchpad click = on/off)
         self.quantize_on = False
         self.last_quantize_subdivision = 4  # Default to 1/4 when first enabled
+        self._last_quantize_toggle_time = 0.0  # Debounce: ignore Y changes right after click
 
         # LEFT STICK SLICE BANKING
         self.slice_bank = 0           # Current bank (0-7 for 128 slices total)
@@ -457,6 +458,7 @@ class MIDIController:
         """Toggle quantization on/off (touchpad click). Remembers last subdivision."""
         loop_state = self.channel_mgr.get_current_loop_state()
         self.quantize_on = not self.quantize_on
+        self._last_quantize_toggle_time = time.time()  # Start debounce window
 
         if self.quantize_on:
             loop_state.quantize_subdivision = self.last_quantize_subdivision
@@ -531,7 +533,12 @@ class MIDIController:
         # X → scrub position
         self.window_position = x / 1920.0
 
-        # Y → quantization subdivision (4 equal zones over 1080px)
+        # Y → quantization subdivision — skip for 300ms after a click toggle
+        # (click re-registers as a new touch, which would immediately overwrite subdivision)
+        if (time.time() - self._last_quantize_toggle_time) < 0.3:
+            return
+
+        # 4 equal zones over 1080px
         SUBDIVISIONS = [32, 16, 8, 4]  # top→bottom
         zone = min(int(y / 270), 3)    # 1080 / 4 zones = 270px per zone
         new_sub = SUBDIVISIONS[zone]
