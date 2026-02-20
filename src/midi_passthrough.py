@@ -23,12 +23,7 @@ class MIDIHub:
     def __init__(self):
         self.outputs = {}
         self.inputs = {}
-        # Devices to never open as inputs (we only write to them, or they're loopback noise)
-        # Note: NerdSEQ is intentionally NOT listed here — it is both a source
-        # (sequences/patterns it sends out) and a destination, so we do want to
-        # read from it. The callback already prevents feedback by skipping the
-        # source device when forwarding.
-        self.skip_input_devices = ["f_midi", "Midi Through"]
+        self.skip_devices = ["f_midi", "Midi Through"]
         self.running = True
         self.lock = threading.Lock()
 
@@ -124,7 +119,7 @@ class MIDIHub:
         found_inputs = {}
 
         for i, port_name in enumerate(available):
-            should_skip = any(skip in port_name for skip in self.skip_input_devices)
+            should_skip = any(skip in port_name for skip in self.skip_devices)
             if "RtMidi output" in port_name and "DualSense_Controller" not in port_name:
                 should_skip = True
 
@@ -201,7 +196,14 @@ class MIDIHub:
         return midi_message
 
     def make_callback(self, port_name):
-        """Create a callback that forwards MIDI to all outputs except the source device"""
+        """Create a callback that forwards MIDI to all outputs.
+
+        Routing rules:
+          NerdSEQ input  → SSP only  (avoid echo loop back to NerdSEQ itself)
+          Everything else → all outputs (SSP + NerdSEQ)
+        """
+        is_nerdseq_source = "NerdSEQ" in port_name
+
         def callback(message, data):
             try:
                 midi_message, deltatime = message
@@ -226,14 +228,13 @@ class MIDIHub:
                             print(f"🔬 [16n] Non-CC msg: {[hex(b) for b in midi_message]}")
                     return  # do NOT forward in diagnostic mode
 
-                # ── Normal mode: forward to all outputs ──────────────────────
+                # ── Normal mode: forward with routing rules ──────────────────
                 with self.lock:
                     if not self.outputs:
                         print(f"⚠️  No outputs available to forward to!")
                     for output_name, output in self.outputs.items():
-                        # ── Feedback prevention: never send a message back to
-                        # its own source device (e.g. NerdSEQ → NerdSEQ) ─────
-                        if output_name in port_name or port_name in output_name:
+                        # NerdSEQ input must NOT be echoed back to NerdSEQ output
+                        if is_nerdseq_source and output_name == 'NerdSEQ':
                             continue
 
                         try:
