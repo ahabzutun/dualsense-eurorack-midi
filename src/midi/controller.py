@@ -12,7 +12,7 @@ FIX: LED pulse thread leak - start_led_pulse() was spawning new Thread objects
 import time
 import threading
 import math
-from pydualsense import pydualsense
+from pydualsense import pydualsense, PlayerID
 from .harmonic_strummer import HarmonicStrummer
 
 from config.mappings import CC_MAP, NRPN_MAP, NRPN_MOTION_THRESHOLD, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
@@ -38,6 +38,10 @@ class MIDIController:
         self.touchpad_active = False
         self.window_position = 0.0    # 0.0 to 1.0 — scrub position via touchpad X
         self.window_size = 1.0        # Fixed at 1.0 (full loop); touchpad Y now controls quantization
+
+        # Quantize toggle state (touchpad click = on/off)
+        self.quantize_on = False
+        self.last_quantize_subdivision = 4  # Default to 1/4 when first enabled
 
         # LEFT STICK SLICE BANKING
         self.slice_bank = 0           # Current bank (0-7 for 128 slices total)
@@ -224,22 +228,21 @@ class MIDIController:
             self.start_led_pulse(255, 0, 0)     # Red: recording
             return
 
-        # Quantize active: overrides playing state so you can always see sync status
-        if loop_state.quantize_subdivision is not None:
+        # Quantize active: blink bars to show sync state (dots show subdivision)
+        if self.quantize_on:
             synced = self.clock_source is not None and self.clock_source.is_synced_external()
             if synced:
-                self.start_led_pulse(0, 255, 0)         # Green: locked to external clock
+                self.start_led_pulse(0, 255, 0)         # Green blink: locked to external clock
             else:
-                # Blink in current channel colour
                 if self.current_channel == 1:
-                    self.start_led_pulse(150, 150, 150)  # White
+                    self.start_led_pulse(150, 150, 150)  # White blink
                 elif self.current_channel == 2:
-                    self.start_led_pulse(0, 150, 150)    # Turquoise
+                    self.start_led_pulse(0, 150, 150)    # Turquoise blink
                 elif self.current_channel == 3:
-                    self.start_led_pulse(150, 150, 0)    # Yellow
+                    self.start_led_pulse(150, 150, 0)    # Yellow blink
             return
 
-        # Playing (no quantize active)
+        # Playing
         if loop_state.playing:
             self.start_led_pulse(0, 255, 0)     # Green: playing
             return
@@ -441,18 +444,66 @@ class MIDIController:
         self.ds.setLeftMotor(rumble_left)
         self.ds.setRightMotor(rumble_right)
 
+    def toggle_quantize(self):
+        """Toggle quantization on/off (touchpad click). Remembers last subdivision."""
+        loop_state = self.channel_mgr.get_current_loop_state()
+        self.quantize_on = not self.quantize_on
+
+        if self.quantize_on:
+            loop_state.quantize_subdivision = self.last_quantize_subdivision
+            sub_str = f"1/{self.last_quantize_subdivision}"
+            print(f"\n🎵 Quantize: ON ({sub_str})\n")
+        else:
+            # Save the last used subdivision before turning off
+            if loop_state.quantize_subdivision is not None:
+                self.last_quantize_subdivision = loop_state.quantize_subdivision
+            loop_state.quantize_subdivision = None
+            print(f"\n🎵 Quantize: OFF\n")
+
+        self.update_player_dots()
+        self.update_led_color()
+
+    def update_player_dots(self):
+        """Show quantize state on the 4 player indicator dots beneath the touchpad.
+
+        Dot count = subdivision coarseness:
+          0 dots = quantize OFF
+          1 dot  = 1/4   (coarsest)
+          2 dots = 1/8
+          3 dots = 1/16
+          4 dots = 1/32  (finest)
+
+        Also blinks the dots according to external/internal clock when quantize is on:
+          external clock → green blink via LED bars (separate), dots show subdivision
+          internal clock → channel colour blink via LED bars, dots show subdivision
+        """
+        if not self.quantize_on:
+            try:
+                self.ds.setPlayerID(0)
+            except Exception:
+                pass
+            return
+
+        sub_to_dots = {4: PlayerID.PLAYER_1, 8: PlayerID.PLAYER_2,
+                       16: PlayerID.PLAYER_3, 32: PlayerID.PLAYER_4}
+        dot_id = sub_to_dots.get(self.last_quantize_subdivision, PlayerID.PLAYER_1)
+        try:
+            self.ds.setPlayerID(dot_id)
+        except Exception:
+            pass
+
     def update_touchpad(self, x, y, is_active):
         """
         Update touchpad position.
 
         X → loop scrub position (0.0-1.0 through the loop)
-        Y → quantization subdivision, top to bottom:
+        Y → quantization subdivision selector (while quantize is ON):
               0- 216  (zone 0) = 1/32
             216- 432  (zone 1) = 1/16
             432- 648  (zone 2) = 1/8
-            648- 864  (zone 3) = 1/4
-            864-1080  (zone 4) = OFF
-        Finger lift → quantization OFF, position reset
+            648-1080  (zone 3) = 1/4
+        Touchpad click → toggle quantize on/off (via toggle_quantize())
+        Finger lift → reset scrub position only; quantize state preserved
         """
         self.touchpad_x = x
         self.touchpad_y = y
@@ -462,11 +513,7 @@ class MIDIController:
 
         if not is_active:
             self.window_position = 0.0
-            # Turn quantization off when finger leaves touchpad
-            if loop_state.quantize_subdivision is not None:
-                loop_state.quantize_subdivision = None
-                print("🎵 Quantize: OFF (finger lifted)")
-                self.update_led_color()  # Return LED to base state
+            # Quantize stays on/off as it was — only touchpad click toggles it
             return
 
         if not loop_state.playing or loop_state.loop_duration == 0:
@@ -475,22 +522,21 @@ class MIDIController:
         # X → scrub position
         self.window_position = x / 1920.0
 
-        # Y → quantization subdivision (5 equal zones over 1080px)
-        SUBDIVISIONS = [32, 16, 8, 4, None]  # top→bottom
-        zone = min(int(y / 216), 4)
+        # Y → quantization subdivision (4 equal zones over 1080px)
+        SUBDIVISIONS = [32, 16, 8, 4]  # top→bottom
+        zone = min(int(y / 270), 3)    # 1080 / 4 zones = 270px per zone
         new_sub = SUBDIVISIONS[zone]
 
-        if new_sub != loop_state.quantize_subdivision:
-            loop_state.quantize_subdivision = new_sub
-            if new_sub:
-                print(f"🎵 Quantize: 1/{new_sub} (zone {zone})")
-            else:
-                print(f"🎵 Quantize: OFF")
-            self.update_led_color()  # Reflect quantize state on LED immediately
+        if new_sub != self.last_quantize_subdivision:
+            self.last_quantize_subdivision = new_sub
+            if self.quantize_on:
+                loop_state.quantize_subdivision = new_sub
+            self.update_player_dots()
+            print(f"🎵 Quantize subdivision: 1/{new_sub} (zone {zone})")
 
         if int(time.time() * 4) % 2 == 0:
-            sub_str = f"1/{loop_state.quantize_subdivision}" if loop_state.quantize_subdivision else "OFF"
-            print(f"👆 Touchpad: Scrub={self.window_position*100:.1f}% Quantize={sub_str}")
+            q_str = f"ON (1/{self.last_quantize_subdivision})" if self.quantize_on else f"OFF (last: 1/{self.last_quantize_subdivision})"
+            print(f"👆 Touchpad: Scrub={self.window_position*100:.1f}% Quantize={q_str}")
 
     def cleanup(self):
         """Properly shut down controller and haptics"""
@@ -503,6 +549,10 @@ class MIDIController:
             self.ds.setLeftMotor(0)
             self.ds.setRightMotor(0)
             self.ds.light.setColorI(0, 0, 0)
+            try:
+                self.ds.setPlayerID(0)   # Clear player dots
+            except Exception:
+                pass
             self.ds.close()
 
             print("🎮 Controller cleaned up")

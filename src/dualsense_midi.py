@@ -111,13 +111,13 @@ def main():
         print("  Buttons (✕○△□) → CC Triggers (14, 15, 22, 23) - with MIDI learn repeat")
         print("  D-Pad (↑↓) → CC 11 (8 steps)")
         print("  D-Pad (←→) → CC 13 (8 steps)")
-        print("  Touchpad Click → Note")
+        print("  Touchpad Click → Toggle Quantize ON/OFF (dots show subdivision)")
         print("  L3 (Left Stick Click) → FREEZE L2/R2/Left Stick ❄️")
         print("  R3 (Right Stick Click) → FREEZE Right Stick ❄️")
         print("  Sticks → CC 1,2,74,71")
         print("  Triggers → CC 7,10")
         print("  Touchpad X  → Scrub loop position")
-        print("  Touchpad Y  → Quantize (top→bottom: 1/32 / 1/16 / 1/8 / 1/4 / OFF, lift = OFF)")
+        print("  Touchpad Y  → Quantize subdivision (top→bottom: 1/32 / 1/16 / 1/8 / 1/4)")
         print("  Motion → NRPN 0,1,2 (14-bit tilt X/Y, twist) (Press L1+R1 to toggle)")
         print("=" * 50)
         print("🎛️  MIDI Channel: 1 (White LED) ⚪")
@@ -630,31 +630,9 @@ def main():
                                         controller_obj.update_touchpad(0, 0, False)
 
                                 elif event.code == ecodes.BTN_LEFT:
-                                    if event.code in NOTE_MAP:
-                                        note = NOTE_MAP[event.code]
-                                        if event.value == 1:
-                                            note_on = [controller_obj.get_midi_channel_byte(0x90), note, 100]
-                                            midiout.send_message(note_on)
-
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_on)
-
-                                            controller_obj.active_notes[event.code] = note
-                                            print(f"🎵 Touchpad Click → Note ON: {note} (Ch {controller_obj.current_channel})")
-                                        elif event.value == 0:
-                                            note_off = [controller_obj.get_midi_channel_byte(0x80), note, 0]
-                                            midiout.send_message(note_off)
-
-                                            # Record to loop
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(note_off)
-
-                                            if event.code in controller_obj.active_notes:
-                                                del controller_obj.active_notes[event.code]
-                                            print(f"🎵 Touchpad Click → Note OFF: {note} (Ch {controller_obj.current_channel})")
+                                    # Touchpad physical click → toggle quantize on/off
+                                    if event.value == 1:  # Press only (not release)
+                                        controller_obj.toggle_quantize()
 
                             elif event.type == ecodes.EV_ABS:
                                 if event.code == ecodes.ABS_X:  # Touchpad X
