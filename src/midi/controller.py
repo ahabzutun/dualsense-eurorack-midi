@@ -226,23 +226,29 @@ class MIDIController:
             self.start_led_pulse(255, 0, 0)     # Red: recording
             return
 
-        # Quantize active: blink bars to show sync state (dots show subdivision)
+        # Quantize active: GREEN = locked to NerdSEQ, channel color = internal/free
         if self.quantize_on:
             synced = self.clock_source is not None and self.clock_source.is_synced_external()
             if synced:
-                self.start_led_pulse(0, 255, 0)         # Green blink: locked to external clock
+                self.start_led_pulse(0, 255, 0)         # Green pulse: locked to NerdSEQ
             else:
                 if self.current_channel == 1:
-                    self.start_led_pulse(150, 150, 150)  # White blink
+                    self.start_led_pulse(150, 150, 150)  # White blink: internal clock
                 elif self.current_channel == 2:
-                    self.start_led_pulse(0, 150, 150)    # Turquoise blink
+                    self.start_led_pulse(0, 150, 150)    # Turquoise blink: internal clock
                 elif self.current_channel == 3:
-                    self.start_led_pulse(150, 150, 0)    # Yellow blink
+                    self.start_led_pulse(150, 150, 0)    # Yellow blink: internal clock
             return
 
-        # Playing
+        # Playing free-running (no quantize): channel color pulse — NOT green
+        # Green is reserved exclusively for "quantize locked to NerdSEQ"
         if loop_state.playing:
-            self.start_led_pulse(0, 255, 0)     # Green: playing
+            if self.current_channel == 1:
+                self.start_led_pulse(200, 200, 200)  # Bright white pulse
+            elif self.current_channel == 2:
+                self.start_led_pulse(0, 200, 200)    # Bright turquoise pulse
+            elif self.current_channel == 3:
+                self.start_led_pulse(200, 200, 0)    # Bright yellow pulse
             return
         if self.is_motion_enabled():
             self.stop_led_pulse()
