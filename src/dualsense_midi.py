@@ -243,6 +243,11 @@ def main():
                                                 # SHORT PRESS: Toggle playback
                                                 if loop_state.playing:
                                                     loop_state.stop_playback()
+                                                    # Auto-exit quantize when loop stops
+                                                    if controller_obj.quantize_on:
+                                                        controller_obj.quantize_on = False
+                                                        loop_state.quantize_subdivision = None
+                                                        controller_obj.update_player_dots()
                                                     controller_obj.update_led_color()
                                                     print(f"\n⏸️  Channel {channel_manager.current_channel}: Playback STOPPED (R1)")
                                                 elif loop_state.midi_buffer:
