@@ -216,8 +216,6 @@ class MIDIController:
 
     def update_led_color(self):
         """Update LED based on current channel, quantize state, motion state, and loop state"""
-        self.stop_led_pulse()
-
         loop_state = self.channel_mgr.get_current_loop_state()
 
         # Recording states take top priority (always want to see record state)
@@ -247,10 +245,12 @@ class MIDIController:
             self.start_led_pulse(0, 255, 0)     # Green: playing
             return
         if self.is_motion_enabled():
+            self.stop_led_pulse()
             self.ds.light.setColorI(0, 100, 255)
             return
 
         # Idle: base channel colour
+        self.stop_led_pulse()
         if self.current_channel == 1:
             self.ds.light.setColorI(50, 50, 50)    # Dim white
         elif self.current_channel == 2:
@@ -261,32 +261,35 @@ class MIDIController:
     def start_led_pulse(self, r, g, b):
         """Start pulsing LED in background thread.
 
-        FIX: Each invocation creates a fresh stop Event and passes it directly
-        to the new thread. The old thread gets its own stop_event set via
-        stop_led_pulse(), so it exits cleanly regardless of what the new thread
-        does with led_pulse_active. No more zombie LED threads.
+        FIX: Non-blocking. Signals the old thread to stop (it exits on its own
+        since it's a daemon and checks stop_event), then immediately starts a
+        new thread. No join() → main event loop never blocks waiting for LED.
         """
-        self.stop_led_pulse()  # cleanly stop old thread first
+        # Signal old thread to exit (it checks stop_event before each HID write)
+        self._current_pulse_stop.set()
+        self.led_pulse_active = True
 
         stop_event = threading.Event()
-        self._current_pulse_stop = stop_event   # save ref so stop_led_pulse can reach it
-        self.led_pulse_active = True
+        self._current_pulse_stop = stop_event
 
         self.led_pulse_thread = threading.Thread(
             target=self._led_pulse_loop,
-            args=(r, g, b, stop_event),          # thread owns its stop_event
+            args=(r, g, b, stop_event),
             daemon=True
         )
         self.led_pulse_thread.start()
 
     def stop_led_pulse(self):
-        """Stop LED pulsing and wait for the thread to actually exit."""
-        if self.led_pulse_active:
-            self.led_pulse_active = False
-            self._current_pulse_stop.set()       # signal the currently-live thread
-            if self.led_pulse_thread and self.led_pulse_thread.is_alive():
-                self.led_pulse_thread.join(timeout=0.5)
-            self.led_pulse_thread = None
+        """Signal LED pulse thread to stop. Non-blocking — daemon thread exits naturally.
+
+        FIX: Removed join(). The old code blocked the main thread for up to 500ms
+        on every LED state change (update_led_color → stop_led_pulse → join).
+        Since the thread is a daemon and checks its stop_event each iteration,
+        it exits within one 50ms cycle without needing the main thread to wait.
+        """
+        self._current_pulse_stop.set()
+        self.led_pulse_active = False
+        self.led_pulse_thread = None
 
     def _led_pulse_loop(self, r, g, b, stop_event):
         """Background thread for pulsing LED.
@@ -473,24 +476,24 @@ class MIDIController:
           3 dots = 1/16
           4 dots = 1/32  (finest)
 
-        Also blinks the dots according to external/internal clock when quantize is on:
-          external clock → green blink via LED bars (separate), dots show subdivision
-          internal clock → channel colour blink via LED bars, dots show subdivision
+        FIX: Use self.ds.light.setPlayerID() — setPlayerID lives on DSLight, not
+        on the top-level pydualsense object. The old self.ds.setPlayerID() was
+        throwing AttributeError silently caught by except, so dots never changed.
         """
         if not self.quantize_on:
             try:
-                self.ds.setPlayerID(0)
-            except Exception:
-                pass
+                self.ds.light.setPlayerID(PlayerID(0))
+            except Exception as e:
+                print(f"⚠️  Player dots clear failed: {e}")
             return
 
         sub_to_dots = {4: PlayerID.PLAYER_1, 8: PlayerID.PLAYER_2,
                        16: PlayerID.PLAYER_3, 32: PlayerID.PLAYER_4}
         dot_id = sub_to_dots.get(self.last_quantize_subdivision, PlayerID.PLAYER_1)
         try:
-            self.ds.setPlayerID(dot_id)
-        except Exception:
-            pass
+            self.ds.light.setPlayerID(dot_id)
+        except Exception as e:
+            print(f"⚠️  Player dots update failed: {e}")
 
     def update_touchpad(self, x, y, is_active):
         """
@@ -550,7 +553,7 @@ class MIDIController:
             self.ds.setRightMotor(0)
             self.ds.light.setColorI(0, 0, 0)
             try:
-                self.ds.setPlayerID(0)   # Clear player dots
+                self.ds.light.setPlayerID(PlayerID(0))   # Clear player dots
             except Exception:
                 pass
             self.ds.close()

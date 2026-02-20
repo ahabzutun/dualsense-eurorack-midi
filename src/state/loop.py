@@ -34,9 +34,18 @@ class LoopState:
 
     def start_recording(self):
         """Start recording MIDI messages"""
+        # FIX: Signal playback to stop BEFORE acquiring buffer_lock.
+        # The old code called stop_playback() (which joins the thread) while
+        # holding buffer_lock. The playback thread's first iteration tries to
+        # acquire buffer_lock too → deadlock until the 0.5s join timeout.
+        # Pattern matches clear_loop() which already solved this correctly.
+        if self.playing:
+            self.playing = False
+            self.playback_stop_event.set()
+            if self.playback_thread and self.playback_thread.is_alive():
+                self.playback_thread.join(timeout=0.5)
+
         with self.buffer_lock:
-            if self.playing:
-                self.stop_playback()
             self.midi_buffer = []
             self.recording = True
             self.record_start_time = time.time()
@@ -124,6 +133,8 @@ class LoopState:
     def _playback_loop(self, midiout, window_position_func=None, bpm_func=None):
         """
         Playback loop with optional real-time quantization.
+        Wrapped in try/finally so any unhandled exception resets state cleanly
+        and surfaces in the logs instead of leaving playing=True forever.
 
         window_size is now fixed at 1.0 (full loop); touchpad Y controls
         quantize_subdivision instead. Touchpad X still scrubs position.
@@ -133,6 +144,19 @@ class LoopState:
         freely during playback.
         """
 
+        try:
+            self._playback_loop_inner(midiout, window_position_func, bpm_func)
+        except Exception as e:
+            import traceback
+            print(f"\n🔴 PLAYBACK LOOP CRASHED: {e}")
+            traceback.print_exc()
+        finally:
+            self.playing = False
+            self.playback_stop_event.set()
+            print("⏹️  Playback thread exiting")
+
+    def _playback_loop_inner(self, midiout, window_position_func=None, bpm_func=None):
+        """Inner playback logic, called by _playback_loop wrapper."""
         last_window_pos = None
         POSITION_CHANGE_THRESHOLD = 0.05
 
