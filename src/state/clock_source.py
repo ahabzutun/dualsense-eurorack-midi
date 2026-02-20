@@ -39,6 +39,7 @@ class ClockSource:
 
         # Subscriber management
         self.subscribers: List[Callable[[int], None]] = []  # Functions to call on clock tick
+        self.on_sync_change: Optional[Callable[[bool], None]] = None  # Called when sync state changes
 
         # MIDI input for clock sync
         self.midi_in = None
@@ -88,6 +89,7 @@ class ClockSource:
 
     def _teardown_midi_listener(self):
         """Close the current MIDI input cleanly."""
+        was_synced = self.use_external_clock
         if self.midi_in is not None:
             try:
                 self.midi_in.cancel_callback()
@@ -98,6 +100,8 @@ class ClockSource:
         self._connected_port_name = None
         with self.lock:
             self.use_external_clock = False
+        if was_synced and self.on_sync_change:
+            self.on_sync_change(False)
 
     def _hotplug_monitor(self):
         """Background thread: scan for NerdSEQ every 5 seconds and
@@ -116,22 +120,30 @@ class ClockSource:
         if msg_type == self.CLOCK_MSG:
             # MIDI clock tick (24 ppqn)
             with self.lock:
+                just_synced = not self.use_external_clock  # First clock pulse?
+
                 if self.last_clock_time > 0:
-                    # Calculate interval between clocks
                     interval = current_time - self.last_clock_time
-                    # Smooth the interval with simple averaging
                     if self.clock_interval > 0:
                         self.clock_interval = (self.clock_interval * 0.8) + (interval * 0.2)
                     else:
                         self.clock_interval = interval
 
-                    # Calculate BPM from clock interval (24 ppqn = 24 clocks per quarter note)
                     if self.clock_interval > 0:
                         self.external_bpm = int(60.0 / (self.clock_interval * 24))
 
                 self.last_clock_time = current_time
                 self.clock_count += 1
                 self.use_external_clock = True
+
+                if just_synced:
+                    print(f"[ClockSource] 🟢 External clock LOCKED — NerdSEQ BPM will appear shortly")
+                    if self.on_sync_change:
+                        self.on_sync_change(True)
+
+                # Log BPM once we have a stable reading (after first 24 pulses)
+                if self.clock_count == 24:
+                    print(f"[ClockSource] 🎵 NerdSEQ BPM: {self.external_bpm}")
 
                 # Notify subscribers on quarter note boundaries (every 24 clocks)
                 if self.clock_count % 24 == 0:
@@ -172,6 +184,8 @@ class ClockSource:
                     self.use_external_clock = False
                     using_external = False
                     print("[ClockSource] External clock timeout, switching to internal")
+                    if self.on_sync_change:
+                        self.on_sync_change(False)
 
             if not using_external and self.is_playing:
                 # Generate internal clock

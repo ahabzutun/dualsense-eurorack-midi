@@ -67,6 +67,13 @@ def main():
     # Pass channel manager and clock source to MIDIController
     controller_obj = MIDIController(channel_manager, clock_source=clock_source)
 
+    # When NerdSEQ clock lock state changes, immediately refresh LED colour
+    def _on_sync_change(is_synced):
+        if controller_obj.quantize_on:
+            controller_obj.update_led_color()
+
+    clock_source.on_sync_change = _on_sync_change
+
     # ===== STEP 1: Try to find DualSense devices =====
     devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
 
