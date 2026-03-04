@@ -1,7 +1,6 @@
 [Unit]
 Description=Midi Passthrough Service
-After=dualsense-midi.service
-Requires=dualsense-midi.service
+After=sound.target
 
 [Service]
 Type=simple
