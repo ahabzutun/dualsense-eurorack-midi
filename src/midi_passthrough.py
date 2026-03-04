@@ -249,7 +249,7 @@ class MIDIHub:
           Everything else → all outputs (SSP + NerdSEQ)
         """
         is_nerdseq_source = "NerdSEQ" in port_name
-        is_pedal_source   = "CH345"   in port_name
+        is_pedal_source   = "CH345" in port_name or "DOREMiDi" in port_name
 
         def callback(message, data):
             try:
