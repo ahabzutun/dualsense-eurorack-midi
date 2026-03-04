@@ -69,6 +69,7 @@ class MIDIHub:
         self.PEDAL_REMAP_ENABLED  = True
         self.PEDAL_SOURCE_CHANNEL = 1     # what the DOReMIDI sends on
         self._channel_file        = '/tmp/dualsense_channel'
+        self._cached_target_channel = 1  # in-memory cache — updated by monitor loop
         # ─────────────────────────────────────────────────────────────────────
 
     def scan_and_update_outputs(self):
@@ -214,9 +215,8 @@ class MIDIHub:
     def remap_pedal_channel(self, midi_message):
         """
         Remap CH345/DOReMIDI messages from their fixed channel to the current
-        DualSense instrument channel, read from /tmp/dualsense_channel.
-        Returns a new message with the remapped channel byte, or the original
-        if remapping is disabled or the message isn't on the pedal source channel.
+        DualSense instrument channel, using an in-memory cache updated by the
+        monitor loop every 2 seconds (avoids per-message file I/O latency).
         """
         if not self.PEDAL_REMAP_ENABLED or len(midi_message) < 1:
             return midi_message
@@ -229,12 +229,7 @@ class MIDIHub:
         if channel != self.PEDAL_SOURCE_CHANNEL or msg_type not in (0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0):
             return midi_message
 
-        try:
-            with open(self._channel_file, 'r') as f:
-                target_channel = int(f.read().strip())
-        except Exception:
-            return midi_message  # file not ready yet, pass through unchanged
-
+        target_channel = self._cached_target_channel
         if target_channel == self.PEDAL_SOURCE_CHANNEL:
             return midi_message  # already on the right channel
 
@@ -306,11 +301,23 @@ class MIDIHub:
 
         return callback
 
+    def _refresh_channel_cache(self):
+        """Read the DualSense channel file and update the in-memory cache."""
+        try:
+            with open(self._channel_file, 'r') as f:
+                ch = int(f.read().strip())
+                if ch != self._cached_target_channel:
+                    print(f"🎛️  Pedal channel updated: {self._cached_target_channel} → {ch}")
+                    self._cached_target_channel = ch
+        except Exception:
+            pass  # file not written yet, keep current cache
+
     def monitor_loop(self):
         """Periodically rescan for device changes"""
         print("🔄 Hot-plug monitoring active (logging on change only)")
         while self.running:
             try:
+                self._refresh_channel_cache()
                 self.scan_and_update_outputs()
                 self.scan_and_update_inputs()
                 time.sleep(2)
