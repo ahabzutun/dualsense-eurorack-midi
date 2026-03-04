@@ -62,6 +62,15 @@ class MIDIHub:
         self._last_output_names = set()
         self._last_input_names = set()
 
+        # ── DOReMIDI channel remapping ────────────────────────────────────────
+        # The CH345/DOReMIDI pedals send on channel 1. We remap them to
+        # follow the current DualSense instrument channel (written to
+        # /tmp/dualsense_channel on every channel switch).
+        self.PEDAL_REMAP_ENABLED  = True
+        self.PEDAL_SOURCE_CHANNEL = 1     # what the DOReMIDI sends on
+        self._channel_file        = '/tmp/dualsense_channel'
+        # ─────────────────────────────────────────────────────────────────────
+
     def scan_and_update_outputs(self):
         """Find and open all output devices"""
         try:
@@ -202,6 +211,36 @@ class MIDIHub:
 
         return midi_message
 
+    def remap_pedal_channel(self, midi_message):
+        """
+        Remap CH345/DOReMIDI messages from their fixed channel to the current
+        DualSense instrument channel, read from /tmp/dualsense_channel.
+        Returns a new message with the remapped channel byte, or the original
+        if remapping is disabled or the message isn't on the pedal source channel.
+        """
+        if not self.PEDAL_REMAP_ENABLED or len(midi_message) < 1:
+            return midi_message
+
+        status   = midi_message[0]
+        msg_type = status & 0xF0
+        channel  = (status & 0x0F) + 1
+
+        # Only remap voice messages on the pedal source channel
+        if channel != self.PEDAL_SOURCE_CHANNEL or msg_type not in (0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0):
+            return midi_message
+
+        try:
+            with open(self._channel_file, 'r') as f:
+                target_channel = int(f.read().strip())
+        except Exception:
+            return midi_message  # file not ready yet, pass through unchanged
+
+        if target_channel == self.PEDAL_SOURCE_CHANNEL:
+            return midi_message  # already on the right channel
+
+        new_status = msg_type | ((target_channel - 1) & 0x0F)
+        return [new_status] + list(midi_message[1:])
+
     def make_callback(self, port_name):
         """Create a callback that forwards MIDI to all outputs.
 
@@ -210,6 +249,7 @@ class MIDIHub:
           Everything else → all outputs (SSP + NerdSEQ)
         """
         is_nerdseq_source = "NerdSEQ" in port_name
+        is_pedal_source   = "CH345"   in port_name
 
         def callback(message, data):
             try:
@@ -245,13 +285,18 @@ class MIDIHub:
                             continue
 
                         try:
+                            msg_to_send = midi_message
+
+                            # Remap DOReMIDI/CH345 pedal channel to match DualSense
+                            if is_pedal_source:
+                                msg_to_send = self.remap_pedal_channel(msg_to_send)
+
                             # SSP gets rescaled 16n values; everything else gets originals
                             if self.RESCALE_ENABLED and output_name == 'SSP':
-                                msg_to_send = self.rescale_for_ssp(midi_message)
-                                if msg_to_send[2] != midi_message[2]:
-                                    print(f"🎚️  [16n→SSP] CC{midi_message[1]} {midi_message[2]}→{msg_to_send[2]}")
-                            else:
-                                msg_to_send = midi_message
+                                rescaled = self.rescale_for_ssp(msg_to_send)
+                                if len(rescaled) > 2 and len(msg_to_send) > 2 and rescaled[2] != msg_to_send[2]:
+                                    print(f"🎚️  [16n→SSP] CC{msg_to_send[1]} {msg_to_send[2]}→{rescaled[2]}")
+                                msg_to_send = rescaled
 
                             output.send_message(msg_to_send)
                         except Exception as e:

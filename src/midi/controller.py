@@ -75,6 +75,13 @@ class MIDIController:
         self.select_pressed = False  # BTN_SELECT (Create/Share)
         self.start_pressed = False   # BTN_START (Options)
 
+        # Write initial channel so passthrough starts in sync
+        try:
+            with open('/tmp/dualsense_channel', 'w') as f:
+                f.write('1')
+        except Exception:
+            pass
+
         # Button hold tracking for repeated CC messages (MIDI learn support)
         # All four face buttons behave identically: press → CC 127, release → CC 0
         self.btn_south_held = False  # X (✕)
@@ -341,6 +348,14 @@ class MIDIController:
                     if int(current_time * 10) % 5 == 0:
                         print(f"🎚️  {label} HELD → CC{CC_MAP[cc_key]:2d}: 127 (Ch {self.current_channel})")
 
+    def _write_current_channel(self):
+        """Write current channel to shared file so passthrough can remap pedal messages."""
+        try:
+            with open('/tmp/dualsense_channel', 'w') as f:
+                f.write(str(self.current_channel))
+        except Exception:
+            pass
+
     def check_channel_switch(self, midiout):
         """Check for START/SELECT button combinations to switch channels"""
         if self.select_pressed and self.start_pressed:
@@ -350,6 +365,7 @@ class MIDIController:
                 if hasattr(self, 'sequencer_manager'):
                     self.sequencer_manager.set_current_channel(2)
                 self.update_led_color()
+                self._write_current_channel()
                 print(f"\n🎛️  SWITCHED TO CHANNEL 3 (Yellow) 🟡")
                 self.channel_mgr.send_frozen_values_on_channel_switch(midiout, self, CC_MAP)
                 loop_state = self.channel_mgr.get_current_loop_state()
@@ -366,6 +382,7 @@ class MIDIController:
                 if hasattr(self, 'sequencer_manager'):
                     self.sequencer_manager.set_current_channel(0)
                 self.update_led_color()
+                self._write_current_channel()
                 print(f"\n🎛️  SWITCHED TO CHANNEL 1 (White) ⚪")
                 self.channel_mgr.send_frozen_values_on_channel_switch(midiout, self, CC_MAP)
                 loop_state = self.channel_mgr.get_current_loop_state()
@@ -382,6 +399,7 @@ class MIDIController:
                 if hasattr(self, 'sequencer_manager'):
                     self.sequencer_manager.set_current_channel(1)
                 self.update_led_color()
+                self._write_current_channel()
                 print(f"\n🎛️  SWITCHED TO CHANNEL 2 (Green) 🟢")
                 self.channel_mgr.send_frozen_values_on_channel_switch(midiout, self, CC_MAP)
                 loop_state = self.channel_mgr.get_current_loop_state()
