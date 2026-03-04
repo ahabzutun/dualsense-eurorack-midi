@@ -58,6 +58,10 @@ class MIDIHub:
         self.output_scanner = rtmidi.MidiOut()
         self.input_scanner = rtmidi.MidiIn()
 
+        # Track connected sets to suppress redundant log spam
+        self._last_output_names = set()
+        self._last_input_names = set()
+
     def scan_and_update_outputs(self):
         """Find and open all output devices"""
         try:
@@ -71,13 +75,11 @@ class MIDIHub:
         for i, port_name in enumerate(available):
             if "f_midi" in port_name:
                 found_outputs['SSP'] = (i, port_name)
-                print(f"🔍 Found f_midi at port {i}: {port_name}")
             elif "NerdSEQ" in port_name:
                 found_outputs['NerdSEQ'] = (i, port_name)
-                print(f"🔍 Found NerdSEQ at port {i}: {port_name}")
 
-        print(f"🎯 Current outputs in memory: {list(self.outputs.keys())}")
-        print(f"🎯 Found outputs to open: {list(found_outputs.keys())}")
+        current_names = set(found_outputs.keys())
+        changed = current_names != self._last_output_names
 
         with self.lock:
             # Close outputs that are no longer available
@@ -108,6 +110,10 @@ class MIDIHub:
                         print(f"⚠️  Failed to open {port_name}: {e}")
                         del midiout   # don't leak the client on failure either
 
+        if changed:
+            self._last_output_names = current_names
+            print(f"🔊 Active outputs: {list(self.outputs.keys())}")
+
     def scan_and_update_inputs(self):
         """Find and open all input devices"""
         try:
@@ -122,10 +128,11 @@ class MIDIHub:
             should_skip = any(skip in port_name for skip in self.skip_devices)
             if "RtMidi output" in port_name and "DualSense_Controller" not in port_name:
                 should_skip = True
-
             if not should_skip:
                 found_inputs[port_name] = i
-                print(f"🔍 Found input: {port_name}")
+
+        current_names = set(found_inputs.keys())
+        changed = current_names != self._last_input_names
 
         with self.lock:
             # Close inputs that are no longer available
@@ -134,14 +141,11 @@ class MIDIHub:
                     print(f"❌ Input disconnected: {port_name}")
                     midiin = self.inputs.pop(port_name)
                     try:
-                        # FIX: cancel_callback() FIRST to break the reference
-                        # cycle (MidiIn → closure → self.outputs → MidiIn).
-                        # Without this the C++ ALSA client is never freed.
                         midiin.cancel_callback()
                         midiin.close_port()
                     except Exception:
                         pass
-                    del midiin   # allow C++ destructor to run immediately
+                    del midiin
 
             # Open new inputs
             for port_name, port_num in found_inputs.items():
@@ -159,12 +163,15 @@ class MIDIHub:
                         print(f"✅ Input connected: {port_name}")
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
-                        # FIX: also cancel callback on failed open before del
                         try:
                             midiin.cancel_callback()
                         except Exception:
                             pass
                         del midiin
+
+        if changed:
+            self._last_input_names = current_names
+            print(f"🎹 Active inputs:  {list(self.inputs.keys())}")
 
     def rescale_for_ssp(self, midi_message):
         """
@@ -256,7 +263,7 @@ class MIDIHub:
 
     def monitor_loop(self):
         """Periodically rescan for device changes"""
-        print("🔄 Starting hot-plug monitor (rescanning every 2 seconds)...")
+        print("🔄 Hot-plug monitoring active (logging on change only)")
         while self.running:
             try:
                 self.scan_and_update_outputs()
