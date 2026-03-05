@@ -2,15 +2,23 @@
 # reset-doremidi.sh
 #
 # Called by udev when the DOREMiDi MPC-20-30C4 (VID 1a86 PID 752d) connects.
-# The device gets urb status -32 (EPIPE) on first enumeration. A USB reset
-# alone is not enough — after USBDEVFS_RESET the kernel MIDI driver doesn't
-# automatically rebind. We must unbind and rebind the driver explicitly.
+# On first boot the device gets urb status -32 (EPIPE) and never creates a
+# MIDI port. A USB unbind/rebind cycle fixes this by re-triggering driver probe.
 #
-# Run as root by udev.
+# KEY BEHAVIOUR: only resets if the MIDI port did NOT appear within 3 seconds.
+# This prevents the script from breaking a healthy device on manual replug.
 
-sleep 2
+sleep 3
 
-# Find the sysfs device path by VID/PID
+# Check if the DOREMiDi MIDI port already exists in ALSA
+if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
+    echo "reset-doremidi: MIDI port already present, no reset needed" | systemd-cat -t reset-doremidi
+    exit 0
+fi
+
+echo "reset-doremidi: MIDI port missing after 3s, triggering unbind/rebind" | systemd-cat -t reset-doremidi
+
+# Find sysfs device path by VID/PID
 DEVICE_PATH=$(grep -rl "1a86" /sys/bus/usb/devices/*/idVendor 2>/dev/null | while read f; do
     dir=$(dirname "$f")
     pid=$(cat "$dir/idProduct" 2>/dev/null)
@@ -25,22 +33,17 @@ if [ -z "$DEVICE_PATH" ]; then
     exit 1
 fi
 
-# Get the device's kernel name (e.g. "1-1.3.3")
 DEVNAME=$(basename "$DEVICE_PATH")
-BUS=$(cat "$DEVICE_PATH/busnum" 2>/dev/null)
-DEV=$(cat "$DEVICE_PATH/devnum" 2>/dev/null)
-DEVNODE="/dev/bus/usb/$(printf '%03d' $BUS)/$(printf '%03d' $DEV)"
+echo "reset-doremidi: unbind/rebind $DEVNAME" | systemd-cat -t reset-doremidi
 
-echo "reset-doremidi: unbind/rebind $DEVNAME ($DEVNODE)" | systemd-cat -t reset-doremidi
-
-# Unbind the USB device from its current driver
 echo "$DEVNAME" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null
-
 sleep 1
-
-# Rebind — this re-triggers driver probe for all interfaces (MIDI driver rebinds)
 echo "$DEVNAME" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
+sleep 2
 
-sleep 1
-
-echo "reset-doremidi: done" | systemd-cat -t reset-doremidi
+# Confirm MIDI port appeared after rebind
+if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
+    echo "reset-doremidi: ✅ MIDI port appeared after rebind" | systemd-cat -t reset-doremidi
+else
+    echo "reset-doremidi: ⚠️  MIDI port still missing after rebind" | systemd-cat -t reset-doremidi
+fi
