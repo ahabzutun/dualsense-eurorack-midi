@@ -2,23 +2,17 @@
 # reset-doremidi.sh
 #
 # Called by udev when the DOREMiDi MPC-20-30C4 (VID 1a86 PID 752d) connects.
-# On first boot the device gets urb status -32 (EPIPE) and never creates a
-# MIDI port. A USB unbind/rebind cycle fixes this by re-triggering driver probe.
+# The device gets urb status -32 (EPIPE) on first boot enumeration, leaving
+# the endpoint stalled — it appears in aconnect but sends no MIDI data.
+# A USB unbind/rebind cycle re-triggers driver probe and clears the stall.
 #
-# KEY BEHAVIOUR: only resets if the MIDI port did NOT appear within 3 seconds.
-# This prevents the script from breaking a healthy device on manual replug.
+# We always rebind on connect. The rebind takes ~3 seconds total and is
+# harmless on manual replugs — the device simply re-enumerates cleanly.
+# The passthrough service's hot-plug detection handles the brief disconnect.
 
-sleep 3
+sleep 1
 
-# Check if the DOREMiDi MIDI port already exists in ALSA
-if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
-    echo "reset-doremidi: MIDI port already present, no reset needed" | systemd-cat -t reset-doremidi
-    exit 0
-fi
-
-echo "reset-doremidi: MIDI port missing after 3s, triggering unbind/rebind" | systemd-cat -t reset-doremidi
-
-# Find sysfs device path by VID/PID
+# Find the sysfs device path by VID/PID
 DEVICE_PATH=$(grep -rl "1a86" /sys/bus/usb/devices/*/idVendor 2>/dev/null | while read f; do
     dir=$(dirname "$f")
     pid=$(cat "$dir/idProduct" 2>/dev/null)
@@ -41,9 +35,8 @@ sleep 1
 echo "$DEVNAME" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
 sleep 2
 
-# Confirm MIDI port appeared after rebind
 if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
-    echo "reset-doremidi: ✅ MIDI port appeared after rebind" | systemd-cat -t reset-doremidi
+    echo "reset-doremidi: ✅ MIDI port present after rebind" | systemd-cat -t reset-doremidi
 else
-    echo "reset-doremidi: ⚠️  MIDI port still missing after rebind" | systemd-cat -t reset-doremidi
+    echo "reset-doremidi: ⚠️  MIDI port missing after rebind" | systemd-cat -t reset-doremidi
 fi
