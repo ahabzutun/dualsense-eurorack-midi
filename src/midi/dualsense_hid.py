@@ -140,7 +140,7 @@ class DualSenseHID:
     def init(self) -> None:
         """Open the HID device and start the background write thread."""
         path = self._find_hidraw()
-        self._fd = os.open(path, os.O_WRONLY)
+        self._fd = os.open(path, os.O_RDWR)  # HID driver requires O_RDWR even for write-only use
         print(f"[DualSenseHID] ✅ Opened {path} for output")
         self._running = True
         self._dirty   = True

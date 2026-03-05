@@ -7,7 +7,6 @@ import select
 import gc
 import os
 import ctypes
-from pydualsense import pydualsense
 import threading
 from config.mappings import CC_MAP, NOTE_MAP, NRPN_MAP, STICK_DEADZONE, MOTION_THRESHOLD, STICK_CENTER, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
 from state.freeze import FreezeState
