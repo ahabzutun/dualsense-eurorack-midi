@@ -108,6 +108,19 @@ class MIDIController:
         self.ds = pydualsense()
         self.ds.init()
 
+        # PERF: pydualsense.sendReport() is a single thread that both reads the
+        # HID report from hidraw0 AND writes LED/haptic state back to it. It calls
+        # readInput() 250x/sec to parse the full controller state into Python objects.
+        # We use evdev for all input — we never read pydualsense's parsed state —
+        # so those 250 parse cycles per second are pure waste, and the short-lived
+        # objects they create are the source of the ~8 MB/min heap growth we measured.
+        #
+        # Fix: replace readInput with a no-op lambda. The sendReport thread keeps
+        # running (so LED setColorI() and setLeftMotor() writes still work), and
+        # device.read() still drains the kernel HID buffer, but no Python state
+        # objects are built or discarded.
+        self.ds.readInput = lambda inReport: None
+
         # Harmonic strummer for PlayStation button
         self.strummer = HarmonicStrummer(
             strum_delay_ms=80,     # Fast strumming
