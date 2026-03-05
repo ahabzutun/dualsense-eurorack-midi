@@ -5,7 +5,7 @@ After=sound.target
 [Service]
 Type=simple
 User=ahab
-Environment=PYTHONBUFFERED=1
+Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/ahab/dualsense-eurorack-midi
 ExecStartPre=/bin/sleep 3
 ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/midi_passthrough.py
