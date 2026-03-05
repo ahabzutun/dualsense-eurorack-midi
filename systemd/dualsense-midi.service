@@ -12,11 +12,13 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONBUFFERED=1
-# PYTHONMALLOC=malloc: bypass Python's internal pymalloc arena allocator and use
-# libc malloc directly. This makes malloc_trim() able to reclaim the full heap
-# instead of only the small fraction that pymalloc has already returned to libc.
-# Without this, RSS grew ~170 MB/hr despite gc.collect() + malloc_trim() calls.
-Environment=PYTHONMALLOC=malloc
+# NOTE: PYTHONMALLOC=malloc was tested here and REVERTED.
+# tracemalloc confirmed the Python heap is stable after ~60s warmup — growth
+# was entirely evdev InputEvent objects recycled within pymalloc arenas (never
+# actually retained). PYTHONMALLOC=malloc bypasses pymalloc's arenas and
+# exposes every alloc/free to libc, which caused RSS to grow ~840 KB/10s
+# continuously even though no objects were actually being leaked.
+# pymalloc + gc.set_threshold(200,5,2) + malloc_trim handles this correctly.
 
 [Install]
 WantedBy=multi-user.target
