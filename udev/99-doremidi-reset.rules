@@ -1,0 +1,16 @@
+# /etc/udev/rules.d/99-doremidi-reset.rules
+#
+# Automatically reset the DOREMiDi MPC-20-30C4 USB MIDI pedal controller
+# on connect. The device (VID 1a86, PID 752d) consistently gets urb status
+# -32 (EPIPE) on first enumeration and needs a USB reset to come up cleanly.
+#
+# Install:
+#   sudo cp udev/99-doremidi-reset.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#
+# RUN+= spawns the script in the background via nohup so udev's 180s
+# event handler timeout doesn't kill it mid-sleep.
+
+ACTION=="add", SUBSYSTEM=="usb", \
+    ATTR{idVendor}=="1a86", ATTR{idProduct}=="752d", \
+    RUN+="/bin/bash -c 'nohup /home/ahab/dualsense-eurorack-midi/scripts/reset-doremidi.sh > /dev/null 2>&1 &'"
