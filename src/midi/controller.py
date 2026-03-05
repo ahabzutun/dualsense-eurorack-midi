@@ -106,19 +106,45 @@ class MIDIController:
 
         # Create pydualsense controller for LED control
         self.ds = pydualsense()
+
+        # PERF: patch sendReport BEFORE init() so the thread starts throttled.
+        #
+        # pydualsense.sendReport() is a tight while loop with NO sleep — it blocks
+        # on device.read() until each HID report arrives (~250Hz on USB) then
+        # immediately calls prepareReport() + writeReport(). Each iteration allocates
+        # 2 lists (inReport + outReport) = 500+ list allocations/sec.
+        # Measured at 245 KB/10s = ~88 MB/hr of pymalloc arena growth.
+        #
+        # Fix: replace with an identical loop that adds time.sleep(0.02) at the end
+        # of each cycle, capping the rate at 50Hz. LED and haptic response are
+        # imperceptible above ~20Hz so 50Hz is more than sufficient.
+        #
+        # We patch the instance attribute BEFORE init() because init() does:
+        #   self.report_thread = threading.Thread(target=self.sendReport)
+        # Python evaluates self.sendReport at Thread() construction time, so our
+        # instance attribute shadows the class method and the thread picks up the
+        # patched version automatically.
+        import types as _types
+
+        def _throttled_send_report(ds_self):
+            while ds_self.ds_thread:
+                try:
+                    inReport = ds_self.device.read(ds_self.input_report_length)
+                    ds_self.readInput(inReport)      # no-op'd below
+                    outReport = ds_self.prepareReport()
+                    ds_self.writeReport(outReport)
+                except IOError:
+                    ds_self.connected = False
+                    break
+                except AttributeError:
+                    break
+                time.sleep(0.02)  # 50Hz cap — 5× fewer allocations than stock 250Hz
+
+        self.ds.sendReport = _types.MethodType(_throttled_send_report, self.ds)
         self.ds.init()
 
-        # PERF: pydualsense.sendReport() is a single thread that both reads the
-        # HID report from hidraw0 AND writes LED/haptic state back to it. It calls
-        # readInput() 250x/sec to parse the full controller state into Python objects.
-        # We use evdev for all input — we never read pydualsense's parsed state —
-        # so those 250 parse cycles per second are pure waste, and the short-lived
-        # objects they create are the source of the ~8 MB/min heap growth we measured.
-        #
-        # Fix: replace readInput with a no-op lambda. The sendReport thread keeps
-        # running (so LED setColorI() and setLeftMotor() writes still work), and
-        # device.read() still drains the kernel HID buffer, but no Python state
-        # objects are built or discarded.
+        # Also no-op readInput so the remaining 50Hz reads don't build Python state.
+        # We use evdev for all input — pydualsense's parsed state is never consumed.
         self.ds.readInput = lambda inReport: None
 
         # Harmonic strummer for PlayStation button
