@@ -127,10 +127,19 @@ def main():
     if _pedal_port_index is not None:
         pedal_in.open_port(_pedal_port_index)
         def _pedal_callback(message, data=None):
-            """Record pedal CC into the active loop when recording."""
+            """Record pedal CC into the active loop when recording.
+            Remap to current instrument channel so playback goes to the right destination."""
             midi_bytes, _ = message
             loop_state = channel_manager.get_current_loop_state()
-            loop_state.record_message(midi_bytes)
+            if loop_state.recording and len(midi_bytes) >= 1:
+                # Remap channel byte to current DualSense instrument channel
+                status   = midi_bytes[0]
+                msg_type = status & 0xF0
+                target_ch = controller_obj.current_channel - 1  # 0-indexed
+                remapped = [msg_type | target_ch] + list(midi_bytes[1:])
+                loop_state.record_message(remapped)
+            elif loop_state.recording:
+                loop_state.record_message(list(midi_bytes))
         pedal_in.set_callback(_pedal_callback)
     else:
         print("⚠️  Pedal not found — pedal CCs will not be recorded into loops")
