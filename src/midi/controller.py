@@ -322,7 +322,7 @@ class MIDIController:
                 int(b * brightness)
             )
 
-            stop_event.wait(timeout=0.05)  # 50ms update rate
+            stop_event.wait(timeout=0.2)  # 5Hz — 4× less USB HID writes (was 20Hz/50ms, caused 35% CPU on LED thread)
 
     def send_held_button_ccs(self, midiout):
         """Send repeated CC messages for held buttons (helps MIDI learn)"""

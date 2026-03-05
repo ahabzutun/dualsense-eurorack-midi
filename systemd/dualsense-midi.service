@@ -12,6 +12,11 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONBUFFERED=1
+# PYTHONMALLOC=malloc: bypass Python's internal pymalloc arena allocator and use
+# libc malloc directly. This makes malloc_trim() able to reclaim the full heap
+# instead of only the small fraction that pymalloc has already returned to libc.
+# Without this, RSS grew ~170 MB/hr despite gc.collect() + malloc_trim() calls.
+Environment=PYTHONMALLOC=malloc
 
 [Install]
 WantedBy=multi-user.target

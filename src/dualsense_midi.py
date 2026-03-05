@@ -49,8 +49,11 @@ _last_motion_time = 0.0
 # Used for OS-level draining (no Python objects created).
 _MOTION_EVENT_SIZE = 24
 
-# Heap trim interval: return freed pages to OS every 30 seconds.
-_TRIM_INTERVAL   = 30.0
+# Heap trim interval: return freed pages to OS every 10 seconds.
+# With PYTHONMALLOC=malloc in the systemd env, malloc_trim() now operates on
+# the full process heap (not just the small fraction pymalloc returned to libc).
+# Tightened from 30s to 10s since the trim is now genuinely effective.
+_TRIM_INTERVAL   = 10.0
 _last_trim_time  = 0.0
 
 def main():
