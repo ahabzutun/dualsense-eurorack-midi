@@ -109,7 +109,33 @@ def main():
     midiout.open_virtual_port("DualSense_Controller")
     port_name = "DualSense_Controller (Virtual)"
 
-    print(f"✅ MIDI Output: {port_name}\n")
+    print(f"✅ MIDI Output: {port_name}")
+
+    # ===== STEP 3b: Open DOReMIDI/CH345 pedal as loop input =====
+    # Pedal messages are forwarded live by the passthrough service.
+    # We also open the pedal here so its CCs get recorded into the looper.
+    pedal_in = rtmidi.MidiIn()
+    pedal_in.ignore_types(sysex=True, timing=True, active_sense=True)
+    _pedal_port_index = None
+    for i in range(pedal_in.get_port_count()):
+        name = pedal_in.get_port_name(i)
+        if "DOREMiDi" in name or "CH345" in name:
+            _pedal_port_index = i
+            print(f"✅ Pedal input: {name}")
+            break
+
+    if _pedal_port_index is not None:
+        pedal_in.open_port(_pedal_port_index)
+        def _pedal_callback(message, data=None):
+            """Record pedal CC into the active loop when recording."""
+            midi_bytes, _ = message
+            loop_state = channel_manager.get_current_loop_state()
+            loop_state.record_message(midi_bytes)
+        pedal_in.set_callback(_pedal_callback)
+    else:
+        print("⚠️  Pedal not found — pedal CCs will not be recorded into loops")
+        pedal_in = None
+
 
     if controller_available:
         print("🎮 DualSense → 🎹 MIDI → 🎛️ Passthrough Service")
@@ -715,6 +741,10 @@ def main():
 
             controller_obj.cleanup()
             clock_source.stop()
+
+            if pedal_in is not None:
+                pedal_in.close_port()
+                del pedal_in
 
             if controller:
                 controller.close()
