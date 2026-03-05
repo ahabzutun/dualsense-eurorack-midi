@@ -87,6 +87,11 @@ class MIDIHub:
                 found_outputs['SSP'] = (i, port_name)
             elif "NerdSEQ" in port_name:
                 found_outputs['NerdSEQ'] = (i, port_name)
+            elif "USB MIDI" in port_name and 'NerdSEQ' not in found_outputs:
+                # NerdSEQ sometimes enumerates with generic "USB MIDI" name
+                # instead of "XOR NerdSEQ" after reboot. Accept as fallback
+                # only if a proper NerdSEQ port hasn't already been found.
+                found_outputs['NerdSEQ'] = (i, port_name)
 
         current_names = set(found_outputs.keys())
         changed = current_names != self._last_output_names
@@ -243,7 +248,7 @@ class MIDIHub:
           NerdSEQ input  → SSP only  (avoid echo loop back to NerdSEQ itself)
           Everything else → all outputs (SSP + NerdSEQ)
         """
-        is_nerdseq_source = "NerdSEQ" in port_name
+        is_nerdseq_source = "NerdSEQ" in port_name or "USB MIDI" in port_name
         is_pedal_source   = "CH345" in port_name or "DOREMiDi" in port_name
 
         def callback(message, data):
