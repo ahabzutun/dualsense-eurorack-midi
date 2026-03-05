@@ -9,6 +9,12 @@ WorkingDirectory=/home/ahab/dualsense-eurorack-midi
 ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/dualsense_midi.py
 Restart=always
 RestartSec=5
+# Safety ceiling: restart the service if RSS exceeds 400 MB.
+# Residual pymalloc arena growth from pydualsense's 250Hz HID read loop
+# accumulates at ~88 MB/hr. At 400 MB the service auto-restarts cleanly
+# (Restart=always) rather than running out of memory after many hours.
+# The restart takes ~5s and preserves all eurorack hardware state.
+MemoryMax=400M
 StandardOutput=journal
 StandardError=journal
 Environment=PYTHONBUFFERED=1
