@@ -177,7 +177,19 @@ class ClockSource:
                 print("[ClockSource] External MIDI Stop received")
 
     def _internal_clock_loop(self):
-        """Generate internal clock ticks based on BPM"""
+        """Generate internal clock ticks based on BPM.
+
+        PERF: The original implementation used time.sleep(0.001) unconditionally,
+        waking 1000x/sec regardless of whether the internal clock was needed.
+        Each wakeup acquired self.lock and called time.perf_counter() twice,
+        creating and discarding Python objects at a rate that filled one 256 KB
+        pymalloc arena every ~10 seconds — measured at 256 KB/10s = ~93 MB/hr.
+
+        Fix: sleep adaptively.
+          - External clock active → sleep 100ms between timeout checks (10/sec).
+          - Internal clock active → sleep precisely until the next tick (~48/sec
+            at 120 BPM), keeping timing accurate without busy-waiting between ticks.
+        """
         quarter_note_interval = 60.0 / self.internal_bpm  # Seconds per quarter note
         tick_interval = quarter_note_interval / 24  # 24ppqn
 
@@ -198,24 +210,35 @@ class ClockSource:
                     if self.on_sync_change:
                         self.on_sync_change(False)
 
-            if not using_external and self.is_playing:
-                # Generate internal clock
-                if current_time >= next_tick:
-                    tick_count += 1
+            if using_external:
+                # External clock is handling timing — nothing to generate.
+                # Sleep long to minimise wakeups and Python object churn.
+                time.sleep(0.1)
+                continue
 
-                    # Notify on quarter note boundaries
-                    if tick_count % 24 == 0:
-                        self._notify_subscribers(tick_count // 24)
+            if not self.is_playing:
+                time.sleep(0.1)
+                continue
 
-                    # Calculate next tick time
-                    next_tick += tick_interval
+            # Internal clock: fire tick if due, then sleep until the next one.
+            if current_time >= next_tick:
+                tick_count += 1
 
-                    # Prevent drift
-                    if next_tick < current_time:
-                        next_tick = current_time + tick_interval
+                # Notify on quarter note boundaries
+                if tick_count % 24 == 0:
+                    self._notify_subscribers(tick_count // 24)
 
-            # Small sleep to prevent CPU spinning
-            time.sleep(0.001)
+                # Advance next_tick; catch up if we drifted
+                next_tick += tick_interval
+                if next_tick < current_time:
+                    next_tick = current_time + tick_interval
+
+            # Sleep precisely until the next tick (not a fixed 1ms).
+            # At 120 BPM this is ~20ms/wakeup instead of 1ms — 20x fewer
+            # Python object allocations per second from this thread.
+            sleep_time = next_tick - time.perf_counter()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
     def _notify_subscribers(self, beat_count: int):
         """Notify all subscribers of a clock tick"""
