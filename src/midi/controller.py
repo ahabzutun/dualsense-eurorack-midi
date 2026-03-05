@@ -12,7 +12,7 @@ FIX: LED pulse thread leak - start_led_pulse() was spawning new Thread objects
 import time
 import threading
 import math
-from pydualsense import pydualsense, PlayerID
+from .dualsense_hid import DualSenseHID, PlayerID
 from .harmonic_strummer import HarmonicStrummer
 
 from config.mappings import CC_MAP, NRPN_MAP, NRPN_MOTION_THRESHOLD, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
@@ -104,15 +104,10 @@ class MIDIController:
         self.led_pulse_active = False           # kept for external state checks
         self._current_pulse_stop = threading.Event()
 
-        # Create pydualsense controller for LED control
-        self.ds = pydualsense()
+        # Create DualSense HID output driver (LED, player dots, haptic motors).
+        # Replaces pydualsense — see midi/dualsense_hid.py for details.
+        self.ds = DualSenseHID()
         self.ds.init()
-
-        # PERF: no-op readInput to stop pydualsense parsing HID state 250x/sec.
-        # sendReport() reads + writes each cycle — we must let the read happen
-        # (drains the kernel HID buffer and keeps writeReport timing correct),
-        # but we don't need the parsed state since all input comes via evdev.
-        self.ds.readInput = lambda inReport: None
 
         # Harmonic strummer for PlayStation button
         self.strummer = HarmonicStrummer(
