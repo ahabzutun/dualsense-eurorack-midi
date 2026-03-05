@@ -140,7 +140,9 @@ class DualSenseHID:
     def init(self) -> None:
         """Open the HID device and start the background write thread."""
         path = self._find_hidraw()
-        self._fd = os.open(path, os.O_RDWR)  # HID driver requires O_RDWR even for write-only use
+        # O_RDWR required by the HID driver even though we only write.
+        # O_NONBLOCK so that drain reads in _write_loop never block.
+        self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
         print(f"[DualSenseHID] ✅ Opened {path} for output")
         self._running = True
         self._dirty   = True
@@ -193,9 +195,24 @@ class DualSenseHID:
     def _write_loop(self) -> None:
         """
         Background thread: write the HID report whenever state changes.
-        Sleeps 20ms between polls — zero I/O and zero allocation when idle.
+        Sleeps 20ms between polls — zero allocation when state is unchanged.
+
+        Also drains incoming HID reports from the kernel read buffer each cycle.
+        The playstation kernel driver sends ~250 reports/sec into our fd's read
+        buffer. If left unread, this buffer grows indefinitely in kernel space
+        and shows up as RSS growth. The drain read discards the data immediately
+        since all input comes via evdev.
         """
         while self._running:
+            # Drain incoming HID data — non-blocking, discard immediately
+            if self._fd is not None:
+                try:
+                    os.read(self._fd, 256)
+                except BlockingIOError:
+                    pass  # nothing to read, that's fine
+                except OSError:
+                    pass
+
             with self._lock:
                 if self._dirty:
                     self._build_report()

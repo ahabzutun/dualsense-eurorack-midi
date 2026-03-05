@@ -17,7 +17,7 @@ RestartSec=5
 MemoryMax=400M
 StandardOutput=journal
 StandardError=journal
-Environment=PYTHONBUFFERED=1
+Environment=PYTHONUNBUFFERED=1
 # NOTE: PYTHONMALLOC=malloc was tested here and REVERTED.
 # tracemalloc confirmed the Python heap is stable after ~60s warmup — growth
 # was entirely evdev InputEvent objects recycled within pymalloc arenas (never
