@@ -39,6 +39,7 @@ echo "$DEVNAME" > /sys/bus/usb/drivers/usb/unbind 2>/dev/null
 sleep 1
 echo "$DEVNAME" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
 sleep 2
+<<<<<<< Updated upstream
 
 # Re-read device number — it changes after rebind
 DEV=$(cat "$DEVICE_PATH/devnum" 2>/dev/null)
@@ -60,6 +61,10 @@ except Exception as e:
 
 sleep 2
 
+=======
+echo "1a86 752d" > /sys/bus/usb/drivers/snd-usb-audio/new_id 2>/dev/null
+sleep 1
+>>>>>>> Stashed changes
 if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
     echo "reset-doremidi: ✅ done" | systemd-cat -t reset-doremidi
 else

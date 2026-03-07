@@ -253,7 +253,7 @@ class MIDIHub:
 
         def callback(message, data):
             try:
-                midi_message, deltatime = message
+                midi_message, deltatime = message            
 
                 # ── Diagnostic mode: log raw bytes, skip forwarding ──────────
                 if self.DIAGNOSTIC_MODE and ("16n" in port_name or "fader" in port_name.lower()):
