@@ -137,12 +137,17 @@ class DualSenseHID:
                 continue
         return "/dev/hidraw0"  # fallback
 
-    def init(self) -> None:
-        """Open the HID device and start the background write thread."""
+    def init(self) -> bool:
+        """Open the HID device and start the background write thread.
+        Returns True on success, False if device not found (caller should retry)."""
         path = self._find_hidraw()
-        # O_RDWR required by the HID driver even though we only write.
-        # O_NONBLOCK so that drain reads in _write_loop never block.
-        self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        try:
+            # O_RDWR required by the HID driver even though we only write.
+            # O_NONBLOCK so that drain reads in _write_loop never block.
+            self._fd = os.open(path, os.O_RDWR | os.O_NONBLOCK)
+        except OSError as e:
+            print(f"[DualSenseHID] ⚠️  Could not open {path}: {e}")
+            return False
         print(f"[DualSenseHID] ✅ Opened {path} for output")
         self._running = True
         self._dirty   = True
@@ -152,6 +157,7 @@ class DualSenseHID:
             name="DualSenseHID-writer"
         )
         self._thread.start()
+        return True
 
     def close(self) -> None:
         """Stop the write thread and close the HID device."""

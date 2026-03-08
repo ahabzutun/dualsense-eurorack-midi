@@ -1,7 +1,7 @@
 [Unit]
 Description=Midi Passthrough Service
 After=sound.target doremidi-bridge.service
-Requires=doremidi-bridge.service
+Wants=doremidi-bridge.service
 
 [Service]
 Type=simple

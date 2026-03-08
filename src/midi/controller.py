@@ -106,8 +106,10 @@ class MIDIController:
 
         # Create DualSense HID output driver (LED, player dots, haptic motors).
         # Replaces pydualsense — see midi/dualsense_hid.py for details.
+        # init() returns False if hidraw device not found; caller should check
+        # self.ds_available before calling LED/haptic methods.
         self.ds = DualSenseHID()
-        self.ds.init()
+        self.ds_available = self.ds.init()
 
         # Harmonic strummer for PlayStation button
         self.strummer = HarmonicStrummer(

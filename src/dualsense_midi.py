@@ -98,17 +98,19 @@ def main():
     # The reconnect thread mirrors the same hot-plug pattern already used in
     # midi_passthrough.py's monitor_loop().
 
-    def _find_pedal_port():
+    # Create scanner ONCE and reuse — never re-create in the hot-plug loop.
+    # Creating a new rtmidi.MidiIn() every 2 seconds leaks ALSA sequencer
+    # clients because Python's GC delays C++ destructor calls. Accumulated
+    # clients hit the 64-client kernel limit and break all MIDI services.
+    _pedal_scanner = rtmidi.MidiIn()
+
+    def _find_pedal_port(scanner):
         """Scan current ALSA ports and return (index, name) for the pedal, or (None, None)."""
-        scanner = rtmidi.MidiIn()
-        result = (None, None)
         for i in range(scanner.get_port_count()):
             n = scanner.get_port_name(i)
             if "DOREMiDi" in n or "CH345" in n:
-                result = (i, n)
-                break
-        del scanner
-        return result
+                return (i, n)
+        return (None, None)
 
     def _pedal_callback(message, data=None):
         """Record pedal CC into the active loop when recording.
@@ -125,7 +127,7 @@ def main():
             loop_state.record_message(list(midi_bytes))
 
     # Initial scan
-    _initial_idx, _initial_name = _find_pedal_port()
+    _initial_idx, _initial_name = _find_pedal_port(_pedal_scanner)
     _pedal_holder = [None]  # list so _reconnect_pedal thread can mutate it
 
     if _initial_idx is not None:
@@ -153,7 +155,7 @@ def main():
         while True:
             time.sleep(2.0)
             try:
-                found_idx, found_name = _find_pedal_port()
+                found_idx, found_name = _find_pedal_port(_pedal_scanner)
                 current = _pedal_holder[0]
 
                 if found_idx is None and current is not None:
