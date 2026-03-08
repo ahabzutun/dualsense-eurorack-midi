@@ -1,14 +1,12 @@
 [Unit]
 Description=Midi Passthrough Service
-After=sound.target doremidi-bridge.service
-Wants=doremidi-bridge.service
+After=sound.target
 
 [Service]
 Type=simple
 User=ahab
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/ahab/dualsense-eurorack-midi
-ExecStartPre=/bin/sleep 6
 ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/midi_passthrough.py
 Restart=always
 RestartSec=5
