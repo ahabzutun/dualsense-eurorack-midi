@@ -77,7 +77,18 @@ class MIDIHub:
         try:
             available = self.output_scanner.get_ports()
         except Exception as e:
-            print(f"⚠️  Cannot scan outputs: {e}")
+            print(f"⚠️  Cannot scan outputs: {e} — clearing stale outputs for clean reconnect")
+            # Force-close all current outputs so the next successful scan
+            # reconnects cleanly rather than leaving broken ports open.
+            with self.lock:
+                for name in list(self.outputs.keys()):
+                    midiout = self.outputs.pop(name)
+                    try:
+                        midiout.close_port()
+                    except Exception:
+                        pass
+                    del midiout
+            self._last_output_names = set()
             return
 
         found_outputs = {}
@@ -134,7 +145,17 @@ class MIDIHub:
         try:
             available = self.input_scanner.get_ports()
         except Exception as e:
-            print(f"⚠️  Cannot scan inputs: {e}")
+            print(f"⚠️  Cannot scan inputs: {e} — clearing stale inputs for clean reconnect")
+            with self.lock:
+                for port_name in list(self.inputs.keys()):
+                    midiin = self.inputs.pop(port_name)
+                    try:
+                        midiin.cancel_callback()
+                        midiin.close_port()
+                    except Exception:
+                        pass
+                    del midiin
+            self._last_input_names = set()
             return
 
         found_inputs = {}
