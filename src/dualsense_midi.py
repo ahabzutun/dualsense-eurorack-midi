@@ -686,10 +686,31 @@ def main():
             print("✅ Clean exit!")
 
     else:
-        # No controller - just keep virtual port alive
+        # No controller found at startup — keep virtual port alive and rescan.
+        # The service starts before evdev input devices are fully enumerated
+        # after boot. Rather than dying silently, we poll every 3 seconds and
+        # restart main() the moment the DualSense appears.
+        print("⏳ Rescanning for DualSense every 3 seconds...")
         try:
             while True:
-                time.sleep(1)
+                time.sleep(3)
+                found = [evdev.InputDevice(p) for p in evdev.list_devices()]
+                has_controller = any("DualSense" in d.name and
+                                     "Motion" not in d.name and
+                                     "Touchpad" not in d.name
+                                     for d in found)
+                for d in found:
+                    try:
+                        d.close()
+                    except Exception:
+                        pass
+                if has_controller:
+                    print("🎮 DualSense detected — restarting main loop...")
+                    controller_obj.cleanup()
+                    clock_source.stop()
+                    del midiout
+                    main()  # restart cleanly from the top
+                    return
         except KeyboardInterrupt:
             print("\n\n👋 Shutting down...")
             controller_obj.cleanup()
