@@ -708,6 +708,18 @@ def main():
                     print("🎮 DualSense detected — restarting main loop...")
                     controller_obj.cleanup()
                     clock_source.stop()
+                    # Clean up pedal port before recursing — otherwise the old
+                    # _reconnect_pedal thread keeps the port open and the new
+                    # main() can't attach its callback, silently breaking loop recording.
+                    pedal = _pedal_holder[0]
+                    if pedal is not None:
+                        try:
+                            pedal.cancel_callback()
+                            pedal.close_port()
+                        except Exception:
+                            pass
+                        del pedal
+                        _pedal_holder[0] = None
                     del midiout
                     main()  # restart cleanly from the top
                     return
