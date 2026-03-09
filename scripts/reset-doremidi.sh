@@ -11,7 +11,7 @@
 LOCKFILE="/tmp/reset-doremidi.lock"
 if [ -f "$LOCKFILE" ]; then
     age=$(( $(date +%s) - $(stat -c %Y "$LOCKFILE" 2>/dev/null || echo 0) ))
-    if [ "$age" -lt 30 ]; then
+    if [ "$age" -lt 60 ]; then
         exit 0
     fi
 fi
@@ -19,10 +19,27 @@ touch "$LOCKFILE"
 
 sleep 2
 
-echo "reset-doremidi: power-cycling hub 1-1 port 1 via uhubctl" | systemd-cat -t reset-doremidi
-uhubctl -l 1-1 -p 1 -a cycle -d 2 2>&1 | systemd-cat -t reset-doremidi
+# Record the current ALSA client ID before power cycle (may be stale/absent)
+OLD_CLIENT=$(aconnect -l 2>/dev/null | grep -i "doremidi" | grep -o "client [0-9]*" | grep -o "[0-9]*" | head -1)
 
-# Poll aconnect until DOREMiDi ALSA port appears (up to 15 seconds)
+echo "reset-doremidi: power-cycling hub 1-1 port 1 (old ALSA client: ${OLD_CLIENT:-none})" | systemd-cat -t reset-doremidi
+
+# Power off for 5 seconds — CH345 needs time to fully discharge
+uhubctl -l 1-1 -p 1 -a off 2>&1 | systemd-cat -t reset-doremidi
+sleep 5
+uhubctl -l 1-1 -p 1 -a on 2>&1 | systemd-cat -t reset-doremidi
+
+# Wait for OLD client to disappear first (up to 5s)
+if [ -n "$OLD_CLIENT" ]; then
+    for i in $(seq 1 5); do
+        sleep 1
+        if ! aconnect -l 2>/dev/null | grep -q "client $OLD_CLIENT:"; then
+            break
+        fi
+    done
+fi
+
+# Now poll for NEW working ALSA client (up to 15s)
 FOUND=0
 for i in $(seq 1 15); do
     sleep 1
@@ -33,7 +50,7 @@ for i in $(seq 1 15); do
 done
 
 if [ "$FOUND" = "1" ]; then
-    sleep 2  # let ALSA client stabilize before passthrough rescans
+    sleep 2
     echo "reset-doremidi: ✅ done (${i}s) — restarting midi-passthrough" | systemd-cat -t reset-doremidi
     systemctl restart midi-passthrough.service
 else
