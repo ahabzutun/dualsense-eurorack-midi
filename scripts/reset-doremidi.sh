@@ -42,6 +42,7 @@ echo "$DEVNAME" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
 sleep 3
 
 if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
+    sleep 2  # let ALSA client stabilize before passthrough rescans
     echo "reset-doremidi: ✅ done — restarting midi-passthrough" | systemd-cat -t reset-doremidi
     systemctl restart midi-passthrough.service
 else
