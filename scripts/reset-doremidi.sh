@@ -30,7 +30,8 @@ echo "$DEVNAME" > /sys/bus/usb/drivers/usb/bind 2>/dev/null
 sleep 3
 
 if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
-    echo "reset-doremidi: ✅ done" | systemd-cat -t reset-doremidi
+    echo "reset-doremidi: ✅ done — restarting midi-passthrough" | systemd-cat -t reset-doremidi
+    systemctl restart midi-passthrough.service
 else
     echo "reset-doremidi: ⚠️  MIDI port missing after reset" | systemd-cat -t reset-doremidi
 fi
