@@ -4,6 +4,18 @@
 # Called by udev when the DOREMiDi MPC-20-30C4 (VID 1a86 PID 752d) connects.
 # The CH345 chip gets urb status -32 (EPIPE) on first enumeration.
 # An unbind/rebind cycle re-triggers snd-usb-midi probe and clears the stall.
+#
+# LOCK: The unbind/rebind below triggers another udev ADD event which would
+# re-fire this script immediately. The lock file prevents that second run.
+
+LOCKFILE="/tmp/reset-doremidi.lock"
+if [ -f "$LOCKFILE" ]; then
+    age=$(( $(date +%s) - $(stat -c %Y "$LOCKFILE" 2>/dev/null || echo 0) ))
+    if [ "$age" -lt 30 ]; then
+        exit 0
+    fi
+fi
+touch "$LOCKFILE"
 
 sleep 2
 
