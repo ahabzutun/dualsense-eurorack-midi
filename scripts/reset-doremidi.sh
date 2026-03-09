@@ -20,16 +20,22 @@ touch "$LOCKFILE"
 sleep 2
 
 echo "reset-doremidi: power-cycling hub 1-1 port 1 via uhubctl" | systemd-cat -t reset-doremidi
-
 uhubctl -l 1-1 -p 1 -a cycle -d 2 2>&1 | systemd-cat -t reset-doremidi
 
-# Wait for device to re-enumerate and driver to bind
-sleep 4
+# Poll aconnect until DOREMiDi ALSA port appears (up to 15 seconds)
+FOUND=0
+for i in $(seq 1 15); do
+    sleep 1
+    if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
+        FOUND=1
+        break
+    fi
+done
 
-if aconnect -l 2>/dev/null | grep -qi "doremidi"; then
+if [ "$FOUND" = "1" ]; then
     sleep 2  # let ALSA client stabilize before passthrough rescans
-    echo "reset-doremidi: ✅ done — restarting midi-passthrough" | systemd-cat -t reset-doremidi
+    echo "reset-doremidi: ✅ done (${i}s) — restarting midi-passthrough" | systemd-cat -t reset-doremidi
     systemctl restart midi-passthrough.service
 else
-    echo "reset-doremidi: ⚠️  MIDI port missing after power cycle" | systemd-cat -t reset-doremidi
+    echo "reset-doremidi: ⚠️  MIDI port missing after 15s" | systemd-cat -t reset-doremidi
 fi
