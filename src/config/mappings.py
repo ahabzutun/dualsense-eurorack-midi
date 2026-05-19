@@ -7,8 +7,8 @@ Configuration constants for controller behavior
 CC_MAP = {
     'left_stick_x': 1,   # Mod Wheel
     'left_stick_y': 2,   # Breath
-    'right_stick_x': 74, # Filter Cutoff
-    'right_stick_y': 71, # Resonance
+    'right_stick_x': 87, # Filter Cutoff
+    'right_stick_y': 88, # Resonance
     'l2_trigger': 7,     # Volume
     'r2_trigger': 10,    # Pan
     'tilt_x': 16,        # Motion Tilt X  (kept for reference, now sent as NRPN)
@@ -64,6 +64,15 @@ GYRO_DEADZONE = 30       # Gyro must be 30+ away from center (64) to send
 # 14-bit equivalents (used for NRPN sends, center = 8192):
 TILT_DEADZONE_14BIT = 3225   # 25/64 * 8192
 GYRO_DEADZONE_14BIT = 3840   # 30/64 * 8192
+
+# MIDI channel assignment per instrument
+# Maps internal instrument number (1-3) to outgoing MIDI channel (1-16).
+# Instrument 1 uses ch15 to avoid clashing with NerdSEQ sequencer on ch1.
+INSTRUMENT_MIDI_CHANNELS = {
+    1: 15,  # instrument 1 → MIDI ch 15
+    2: 2,   # instrument 2 → MIDI ch 2
+    3: 3,   # instrument 3 → MIDI ch 3
+}
 
 # Loop recording
 LONG_PRESS_DURATION = 1.0  # 1 second for long press

@@ -15,7 +15,7 @@ import math
 from .dualsense_hid import DualSenseHID, PlayerID
 from .harmonic_strummer import HarmonicStrummer
 
-from config.mappings import CC_MAP, NRPN_MAP, NRPN_MOTION_THRESHOLD, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
+from config.mappings import CC_MAP, NRPN_MAP, NRPN_MOTION_THRESHOLD, MOTION_THRESHOLD, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION, INSTRUMENT_MIDI_CHANNELS
 
 
 class MIDIController:
@@ -75,10 +75,10 @@ class MIDIController:
         self.select_pressed = False  # BTN_SELECT (Create/Share)
         self.start_pressed = False   # BTN_START (Options)
 
-        # Write initial channel so passthrough starts in sync
+        # Write initial MIDI channel so passthrough starts in sync
         try:
             with open('/tmp/dualsense_channel', 'w') as f:
-                f.write('1')
+                f.write(str(INSTRUMENT_MIDI_CHANNELS.get(1, 1)))
         except Exception:
             pass
 
@@ -352,10 +352,11 @@ class MIDIController:
                         print(f"🎚️  {label} HELD → CC{CC_MAP[cc_key]:2d}: 127 (Ch {self.current_channel})")
 
     def _write_current_channel(self):
-        """Write current channel to shared file so passthrough can remap pedal messages."""
+        """Write current MIDI channel to shared file so passthrough can remap pedal messages."""
         try:
+            midi_ch = INSTRUMENT_MIDI_CHANNELS.get(self.current_channel, self.current_channel)
             with open('/tmp/dualsense_channel', 'w') as f:
-                f.write(str(self.current_channel))
+                f.write(str(midi_ch))
         except Exception:
             pass
 
@@ -414,7 +415,8 @@ class MIDIController:
 
     def get_midi_channel_byte(self, message_type):
         """Get MIDI status byte with current channel (channels are 0-indexed in MIDI)"""
-        return message_type + (self.current_channel - 1)
+        midi_ch = INSTRUMENT_MIDI_CHANNELS.get(self.current_channel, self.current_channel)
+        return message_type + (midi_ch - 1)
 
     def is_motion_enabled(self):
         """Return motion-enabled state for the current channel."""

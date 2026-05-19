@@ -270,6 +270,7 @@ class MIDIHub:
           Everything else → all outputs (SSP + NerdSEQ)
         """
         is_nerdseq_source = "NerdSEQ" in port_name or "USB MIDI" in port_name
+        is_grid_source    = "iii grid" in port_name
         is_pedal_source   = "CH345" in port_name or "DOREMiDi" in port_name
 
         def callback(message, data):
@@ -301,9 +302,17 @@ class MIDIHub:
                     if not self.outputs:
                         print(f"⚠️  No outputs available to forward to!")
                     for output_name, output in self.outputs.items():
-                        # NerdSEQ input must NOT be echoed back to NerdSEQ output
+                        # NerdSEQ: echo prevention
                         if is_nerdseq_source and output_name == 'NerdSEQ':
                             continue
+
+                        # Grid ch1 block: grid_bridge owns LP Mini MK3 ch1 path.
+                        # Any ch1 message from the grid via passthrough would
+                        # double-trigger LP commands causing stray lit matrix buttons.
+                        if is_grid_source and output_name == 'NerdSEQ':
+                            _g_ch = (midi_message[0] & 0x0F) + 1 if midi_message else 0
+                            if _g_ch == 1:
+                                continue
 
                         try:
                             msg_to_send = midi_message
@@ -319,9 +328,20 @@ class MIDIHub:
                                     print(f"🎚️  [16n→SSP] CC{msg_to_send[1]} {msg_to_send[2]}→{rescaled[2]}")
                                 msg_to_send = rescaled
 
+                            if output_name == 'NerdSEQ' and len(msg_to_send) >= 2:
+                                _st = msg_to_send[0]; _ch = (_st & 0x0F) + 1
+                                _ty = {0x80:'NoteOff',0x90:'NoteOn',0xB0:'CC'}.get(_st & 0xF0, hex(_st&0xF0))
+                                print(f'[DBG->NS] {port_name.split(chr(58))[0]} {_ty} ch{_ch} {list(msg_to_send[1:])}')
                             output.send_message(msg_to_send)
                         except Exception as e:
-                            print(f"⚠️  Failed to send to {output_name}: {e}")
+                            print(f"⚠️  Failed to send to {output_name}: {e} -- evicting")
+                            stale = self.outputs.pop(output_name, None)
+                            if stale is not None:
+                                try: stale.close_port()
+                                except Exception: pass
+                                del stale
+                            self._last_output_names.discard(output_name)
+                            break
             except Exception as e:
                 print(f"⚠️  Callback error for {port_name}: {e}")
 
@@ -346,10 +366,10 @@ class MIDIHub:
                 self._refresh_channel_cache()
                 self.scan_and_update_outputs()
                 self.scan_and_update_inputs()
-                time.sleep(2)
+                time.sleep(1)
             except Exception as e:
                 print(f"⚠️  Monitor error: {e}")
-                time.sleep(2)
+                time.sleep(1)
 
     def run(self):
         """Main run loop"""
