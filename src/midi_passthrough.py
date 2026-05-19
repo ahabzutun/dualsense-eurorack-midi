@@ -309,10 +309,11 @@ class MIDIHub:
                         # Grid ch1 block: grid_bridge owns LP Mini MK3 ch1 path.
                         # Any ch1 message from the grid via passthrough would
                         # double-trigger LP commands causing stray lit matrix buttons.
+                        # Block ALL grid->NerdSEQ. grid_bridge owns LP ch1.
+                        # Sweeping LFO CCs on any channel can trigger NerdSEQ
+                        # track CC mappings causing stray lit matrix buttons.
                         if is_grid_source and output_name == 'NerdSEQ':
-                            _g_ch = (midi_message[0] & 0x0F) + 1 if midi_message else 0
-                            if _g_ch == 1:
-                                continue
+                            continue
 
                         try:
                             msg_to_send = midi_message
