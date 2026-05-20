@@ -309,19 +309,17 @@ class MIDIHub:
                         # Grid ch1 block: grid_bridge owns LP Mini MK3 ch1 path.
                         # Any ch1 message from the grid via passthrough would
                         # double-trigger LP commands causing stray lit matrix buttons.
-                        # Grid->NerdSEQ: surgical filter.
-                        # - ch1 messages: BLOCK (grid_bridge owns LP Mini MK3 protocol)
-                        # - Note On/Off any channel: BLOCK (grid_bridge handles button presses)
-                        # - CC ch2+: ALLOW (faders and LFOs reach NerdSEQ safely)
-                        # Note: stray LP LED state is handled by the periodic ping in
-                        # grid_bridge, not by blocking grid CCs here.
+                        # Grid->NerdSEQ surgical filter:
+                        # - Block ch1 (LP Mini MK3 control channel, grid_bridge owns it)
+                        # - Block Note On/Off (button presses, grid_bridge handles via LP)
+                        # - Allow CC ch2+ (faders and LFOs reach NerdSEQ)
+                        # Stray LP LED state from NerdSEQ step indicators is handled
+                        # by the STALE_TIMEOUT expiry in grid_bridge, not here.
                         if is_grid_source and output_name == 'NerdSEQ':
                             _g_st = midi_message[0] if midi_message else 0
                             _g_ch = (_g_st & 0x0F) + 1
                             _g_ty = _g_st & 0xF0
-                            if _g_ch == 1:                      # LP protocol channel
-                                continue
-                            if _g_ty in (0x80, 0x90):           # Note Off / Note On
+                            if _g_ch == 1 or _g_ty in (0x80, 0x90):
                                 continue
 
                         try:
