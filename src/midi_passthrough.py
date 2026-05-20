@@ -336,10 +336,6 @@ class MIDIHub:
                                     print(f"🎚️  [16n→SSP] CC{msg_to_send[1]} {msg_to_send[2]}→{rescaled[2]}")
                                 msg_to_send = rescaled
 
-                            if output_name == 'NerdSEQ' and len(msg_to_send) >= 2:
-                                _st = msg_to_send[0]; _ch = (_st & 0x0F) + 1
-                                _ty = {0x80:'NoteOff',0x90:'NoteOn',0xB0:'CC'}.get(_st & 0xF0, hex(_st&0xF0))
-                                print(f'[DBG->NS] {port_name.split(chr(58))[0]} {_ty} ch{_ch} {list(msg_to_send[1:])}')
                             output.send_message(msg_to_send)
                         except Exception as e:
                             print(f"⚠️  Failed to send to {output_name}: {e} -- evicting")
