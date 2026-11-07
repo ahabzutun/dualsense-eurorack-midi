@@ -4,6 +4,7 @@ Handles both internal BPM clock and external MIDI clock sync from NerdSEQ.
 """
 
 import threading
+import gc
 import time
 from typing import Optional, Callable, List
 import rtmidi
@@ -43,27 +44,23 @@ class ClockSource:
 
         # MIDI input for clock sync
         self.midi_in = None
+        self._scanner = rtmidi.MidiIn()    # persistent self._scanner (never recreate; each rtmidi.MidiIn() leaks an ALSA client)
         self._connected_port_name = None   # Track which port we have open
         self._hotplug_thread: Optional[threading.Thread] = None
         self._setup_midi_clock_listener()
 
     def _find_nerdseq_port(self):
-        """Return (index, name) of the NerdSEQ MIDI port, or (None, None)."""
-        probe = None
+        """Return (index, name) of the NerdSEQ MIDI port, or (None, None).
+        Reuses the persistent self._scanner; never creates a new rtmidi.MidiIn()
+        here — each one leaks an ALSA seq client (not released on del/gc)."""
         try:
-            probe = rtmidi.MidiIn()
-            ports = probe.get_ports()
+            ports = self._scanner.get_ports()
             for idx, name in enumerate(ports):
                 if 'nerdseq' in name.lower():
                     return idx, name
             return None, None
         except Exception:
             return None, None
-        finally:
-            # CRITICAL: always delete the probe — every rtmidi.MidiIn() allocates
-            # an ALSA sequencer client. Leaking these exhausts the 256-client limit.
-            if probe is not None:
-                del probe
 
     def _setup_midi_clock_listener(self):
         """Open the NerdSEQ MIDI port and start receiving clock. Safe to call
@@ -119,6 +116,7 @@ class ClockSource:
             # Skip scan if already connected — no need to probe
             if self._connected_port_name is None:
                 self._setup_midi_clock_listener()
+            gc.collect()   # reclaim GC-delayed rtmidi probe clients
             time.sleep(15.0)
 
     def _midi_clock_callback(self, message, data):

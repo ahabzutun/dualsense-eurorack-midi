@@ -44,10 +44,19 @@ class MIDIController:
         self.last_quantize_subdivision = 4  # Default to 1/4 when first enabled
         self._last_quantize_toggle_time = 0.0  # Debounce: ignore Y changes right after click
 
-        # LEFT STICK SLICE BANKING
-        self.slice_bank = 0           # Current bank (0-7 for 128 slices total)
-        self.slices_per_bank = 16     # Slices per bank
-        self.max_banks = 7            # 8 banks total (0-7) = 128 MIDI values
+        # LEFT STICK SLICE BANKING (within-block navigation, 0-127)
+        self.slice_bank = 0           # D-pad ←→ : chunk 0-7 (×16)
+        self.slices_per_bank = 16     # Left stick X : fine 0-15 within chunk
+        self.max_banks = 7            # 8 chunks (0-7) × 16 = 128 per block
+
+        # SAMPLE BLOCK (coarse layer) — Create/Option select one of 8 blocks of
+        # 128 slices. Absolute slice = block*128 + bank*16 + fine spans the full
+        # 1024-slice chain and is sent as a single 14-bit NRPN so NerdSEQ can
+        # translate it to I2C for the ER-301 grain player.
+        self.sample_block = 0         # 0-7 → block * 128
+        self.max_blocks = 7           # 8 blocks (0-7)
+        self.current_fine_slice = 0   # last left-stick fine position (0-15)
+        self.last_grain_slice = -1    # dedup gate (absolute slice 0-1023)
 
         # Motion control toggle and loop recording
         # Per-channel: one flag per channel so enabling motion on ch1 doesn't
@@ -131,6 +140,66 @@ class MIDIController:
         absolute_slice = (self.slice_bank * self.slices_per_bank) + slice_in_bank
         midi_value = min(absolute_slice, 127)
         return midi_value
+
+    def update_fine_slice(self, stick_value):
+        """Store the left-stick fine position (0..slices_per_bank-1) — the
+        within-chunk index. Combined with slice_bank and sample_block this
+        forms the absolute 0-1023 grain slice."""
+        self.current_fine_slice = int((stick_value / 255.0) * (self.slices_per_bank - 1))
+
+    def compute_grain_slice(self):
+        """Absolute grain slice 0-1023 = block*128 + bank*16 + fine."""
+        within_block = self.slice_bank * self.slices_per_bank + self.current_fine_slice
+        within_block = min(within_block, 127)
+        absolute = self.sample_block * 128 + within_block
+        return min(absolute, 1023)
+
+    def send_grain_slice(self, midiout):
+        """Emit the absolute grain slice (0-1023) as a single 14-bit NRPN.
+        The slice index is scaled to the FULL 14-bit range (0-16383) so that
+        NerdSEQ — which auto-detects 14-bit NRPN and rescales it to its internal
+        0-4095 — spans the entire ER-301 slice chain rather than just the bottom
+        fraction. NerdSEQ forwards it over I2C (SC.CV) to the ER-301. Deduped on
+        the slice index; recorded into the active loop as the 4-message NRPN."""
+        absolute = self.sample_block * 128 + min(
+            self.slice_bank * self.slices_per_bank + self.current_fine_slice, 127)
+        absolute = min(absolute, 1023)
+        if absolute == self.last_grain_slice:
+            return
+        self.last_grain_slice = absolute
+        value14 = (absolute * 16383) // 1023        # 0-1023 → 0-16383 full scale
+        self.send_nrpn(midiout, NRPN_MAP['grain_slice'], value14)
+        loop_state = self.channel_mgr.get_current_loop_state()
+        if loop_state.recording:
+            ch = self.get_midi_channel_byte(0xB0)
+            p = NRPN_MAP['grain_slice']
+            for msg in ([ch, 99, (p >> 7) & 0x7F], [ch, 98, p & 0x7F],
+                        [ch, 6, (value14 >> 7) & 0x7F], [ch, 38, value14 & 0x7F]):
+                loop_state.record_message(msg)
+        print(f"🎛️  Grain slice → NRPN {NRPN_MAP['grain_slice']}: slice {absolute:4d}/1023 "
+              f"→ 14-bit {value14:5d}  [block {self.sample_block} · chunk {self.slice_bank} · fine {self.current_fine_slice:2d}]")
+
+    def handle_block_change(self, midiout):
+        """Create/Option select the coarse 128-sample block.
+        Options (START) → next block (+1); Create (SELECT) → previous (-1);
+        both together → reset to block 0. Clamped to 0..max_blocks."""
+        if self.select_pressed and self.start_pressed:
+            self.sample_block = 0
+            print(f"\n🔢 SAMPLE BLOCK reset → 0 (slices 0-127)\n")
+        elif self.start_pressed and not self.select_pressed:
+            if self.sample_block < self.max_blocks:
+                self.sample_block += 1
+            base = self.sample_block * 128
+            print(f"\n🔢 SAMPLE BLOCK ▲ {self.sample_block} (slices {base}-{base + 127})\n")
+            self.ds.setRightMotor(100); time.sleep(0.05); self.ds.setRightMotor(0)
+        elif self.select_pressed and not self.start_pressed:
+            if self.sample_block > 0:
+                self.sample_block -= 1
+            base = self.sample_block * 128
+            print(f"\n🔢 SAMPLE BLOCK ▼ {self.sample_block} (slices {base}-{base + 127})\n")
+            self.ds.setLeftMotor(100); time.sleep(0.05); self.ds.setLeftMotor(0)
+        self.send_grain_slice(midiout)
+
 
     def handle_dpad_left(self):
         """Decrease slice bank (left arrow)"""

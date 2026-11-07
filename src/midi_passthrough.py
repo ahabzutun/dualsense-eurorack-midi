@@ -15,6 +15,12 @@ FIX: rtmidi MidiIn objects were not having their callbacks cancelled before
 
 #!/usr/bin/env python3
 import rtmidi
+import gc
+try:
+    import osc_out          # OpenMW OSC tap (adds no MIDI clients)
+except Exception as _e:
+    osc_out = None
+    print(f"osc_out tap not loaded: {_e}")
 import time
 import threading
 
@@ -276,6 +282,11 @@ class MIDIHub:
         def callback(message, data):
             try:
                 midi_message, deltatime = message            
+                if osc_out is not None:        # fire OpenMW OSC for every message
+                    try:
+                        osc_out.handle(midi_message)
+                    except Exception:
+                        pass
 
                 # ── Diagnostic mode: log raw bytes, skip forwarding ──────────
                 if self.DIAGNOSTIC_MODE and ("16n" in port_name or "fader" in port_name.lower()):
@@ -370,6 +381,10 @@ class MIDIHub:
                 self._refresh_channel_cache()
                 self.scan_and_update_outputs()
                 self.scan_and_update_inputs()
+                self._gc_tick = getattr(self, "_gc_tick", 0) + 1
+                if self._gc_tick >= 5:   # every ~5s: reclaim GC-delayed rtmidi ALSA clients (load bursts)
+                    self._gc_tick = 0
+                    gc.collect()
                 time.sleep(1)
             except Exception as e:
                 print(f"⚠️  Monitor error: {e}")

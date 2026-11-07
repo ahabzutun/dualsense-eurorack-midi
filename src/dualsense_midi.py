@@ -8,7 +8,7 @@ import gc
 import os
 import ctypes
 import threading
-from config.mappings import CC_MAP, NOTE_MAP, NRPN_MAP, STICK_DEADZONE, MOTION_THRESHOLD, STICK_CENTER, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION
+from config.mappings import CC_MAP, NOTE_MAP, NRPN_MAP, STICK_DEADZONE, MOTION_THRESHOLD, STICK_CENTER, MOTION_SMOOTHING, TILT_DEADZONE_14BIT, GYRO_DEADZONE_14BIT, LONG_PRESS_DURATION, TRIGGER_DEADZONE
 from state.freeze import FreezeState
 from state.loop import LoopState
 from state.channel_manager import ChannelManager
@@ -402,14 +402,14 @@ def main():
                                 elif event.code == 314:  # BTN_SELECT (Create/Share)
                                     if event.value == 1:
                                         controller_obj.select_pressed = True
-                                        controller_obj.check_channel_switch(midiout)
+                                        controller_obj.handle_block_change(midiout)
                                     else:
                                         controller_obj.select_pressed = False
 
                                 elif event.code == 315:  # BTN_START (Options)
                                     if event.value == 1:
                                         controller_obj.start_pressed = True
-                                        controller_obj.check_channel_switch(midiout)
+                                        controller_obj.handle_block_change(midiout)
                                     else:
                                         controller_obj.start_pressed = False
 
@@ -460,14 +460,8 @@ def main():
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
                                     cc_val, _ = channel_manager.get_left_stick_values(raw_val, channel_manager.current_left_y)
                                     stick_val = int((cc_val / 127.0) * 255)
-                                    banked_cc_val = controller_obj.calculate_slice_with_bank(stick_val)
-                                    if controller_obj.should_send_cc(CC_MAP['left_stick_x'], banked_cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['left_stick_x'], banked_cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"🕹️  Left X  → CC{CC_MAP['left_stick_x']:2d}: {banked_cc_val:3d} [Bank {controller_obj.slice_bank}] (Ch {controller_obj.current_channel})")
+                                    controller_obj.update_fine_slice(stick_val)
+                                    controller_obj.send_grain_slice(midiout)
 
                                 elif event.code == ecodes.ABS_Y:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
@@ -503,7 +497,7 @@ def main():
                                         print(f"🕹️  Right Y → CC{CC_MAP['right_stick_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_Z:
-                                    raw_val = controller_obj.scale_value(event.value, 0, 255)
+                                    raw_val = 0 if event.value <= TRIGGER_DEADZONE else controller_obj.scale_value(event.value, TRIGGER_DEADZONE, 255)
                                     cc_val = channel_manager.get_l2_value(raw_val)
                                     if controller_obj.should_send_cc(CC_MAP['l2_trigger'], cc_val):
                                         midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['l2_trigger'], cc_val]
@@ -514,7 +508,7 @@ def main():
                                         print(f"🎚️  L2     → CC{CC_MAP['l2_trigger']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_RZ:
-                                    raw_val = controller_obj.scale_value(event.value, 0, 255)
+                                    raw_val = 0 if event.value <= TRIGGER_DEADZONE else controller_obj.scale_value(event.value, TRIGGER_DEADZONE, 255)
                                     cc_val = channel_manager.get_r2_value(raw_val)
                                     if controller_obj.should_send_cc(CC_MAP['r2_trigger'], cc_val):
                                         midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['r2_trigger'], cc_val]
@@ -527,8 +521,10 @@ def main():
                                 elif event.code == ecodes.ABS_HAT0X:
                                     if event.value == -1:
                                         controller_obj.handle_dpad_left()
+                                        controller_obj.send_grain_slice(midiout)
                                     elif event.value == 1:
                                         controller_obj.handle_dpad_right()
+                                        controller_obj.send_grain_slice(midiout)
 
                                 elif event.code == ecodes.ABS_HAT0Y:
                                     if event.value == -1:

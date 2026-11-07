@@ -14,14 +14,16 @@ CC_MAP = {
     'tilt_x': 16,        # Motion Tilt X  (kept for reference, now sent as NRPN)
     'tilt_y': 17,        # Motion Tilt Y  (kept for reference, now sent as NRPN)
     'twist': 18,         # Motion Twist   (kept for reference, now sent as NRPN)
-    'touchpad_x': 20,    # Touchpad X
-    'touchpad_y': 21,    # Touchpad Y
+    'touchpad_x': 30,    # Touchpad X
+    'touchpad_y': 31,    # Touchpad Y
     'btn_south': 14,     # X button (✕) trigger (General Purpose)
     'btn_east': 15,      # O button (○) trigger (General Purpose)
     'btn_north': 22,     # △ button trigger (General Purpose)
     'btn_west': 23,      # □ button trigger (General Purpose)
     'dpad_vertical': 11,   # D-pad Up/Down (Expression)
     'dpad_horizontal': 13, # D-pad Left/Right (Effect Control 1)
+    'sample_block': 12,    # Create/Option → coarse 128-block (0-7) → NerdSEQ I2C
+    'grain_within': 3,     # D-pad+stick → within-block slice (0-127) → NerdSEQ I2C
 }
 
 # NRPN mapping for high-resolution motion sensor output (14-bit, 0-16383)
@@ -31,6 +33,7 @@ NRPN_MAP = {
     'tilt_x': 0,   # Motion Tilt X → NRPN 0
     'tilt_y': 1,   # Motion Tilt Y → NRPN 1
     'twist':  2,   # Motion Twist  → NRPN 2
+    'grain_slice': 3,  # ER-301 grain slice 0-1023 (14-bit) → NerdSEQ → I2C
 }
 
 # Minimum 14-bit value change before sending NRPN (filters noise at rest).
@@ -69,10 +72,12 @@ GYRO_DEADZONE_14BIT = 3840   # 30/64 * 8192
 # Maps internal instrument number (1-3) to outgoing MIDI channel (1-16).
 # Instrument 1 uses ch15 to avoid clashing with NerdSEQ sequencer on ch1.
 INSTRUMENT_MIDI_CHANNELS = {
-    1: 15,  # instrument 1 → MIDI ch 15
-    2: 2,   # instrument 2 → MIDI ch 2
-    3: 3,   # instrument 3 → MIDI ch 3
+    1: 12,  # instrument 1 → MIDI ch 12
+    2: 13,  # instrument 2 → MIDI ch 13
+    3: 14,  # instrument 3 → MIDI ch 14
 }
+
+TRIGGER_DEADZONE = 10   # Raw ADC units below which trigger is treated as fully released (0)
 
 # Loop recording
 LONG_PRESS_DURATION = 1.0  # 1 second for long press
