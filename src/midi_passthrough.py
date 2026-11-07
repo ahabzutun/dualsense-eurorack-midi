@@ -29,7 +29,8 @@ class MIDIHub:
     def __init__(self):
         self.outputs = {}
         self.inputs = {}
-        self.skip_devices = ["f_midi", "Midi Through"]
+        self.skip_devices = ["f_midi", "Midi Through", "XIAO-SSP"]  # SSP's own MIDI out is not routed
+        self._out_port_names = {}   # output key -> ALSA port name currently open
         self.running = True
         self.lock = threading.Lock()
 
@@ -58,6 +59,18 @@ class MIDIHub:
         self.RESCALE_CC_MAX   = 95          # last fader CC
         self.SSP_CC_MAX       = 127         # 127 = no compression; full fader = 1.0 (0dB on PMIX)
                                             # Lower this only if modulation adds on top of a non-zero base
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Teletype (i2c2midi) output coalescing ─────────────────────────────
+        # i2c2midi only stores the latest value per CC and Teletype polls it every
+        # few tens of ms, so CC / channel-pressure / pitch-bend floods (16n sweeps,
+        # DualSense gyro) are reduced to the latest value per controller and
+        # flushed every TT_FLUSH_INTERVAL. Notes, clock etc. are sent immediately.
+        # Keeps the 115200-baud XIAO link clear. SSP/NerdSEQ are not affected.
+        self.TT_COALESCE_ENABLED = True
+        self.TT_FLUSH_INTERVAL   = 0.010     # seconds
+        self._tt_pending = {}
+        self._tt_lock = threading.Lock()
         # ─────────────────────────────────────────────────────────────────────
 
         # Create scanners ONCE and reuse them (never re-create these)
@@ -100,8 +113,16 @@ class MIDIHub:
         found_outputs = {}
 
         for i, port_name in enumerate(available):
-            if "f_midi" in port_name:
+            if "XIAO-SSP" in port_name:
+                # XIAO host-to-host bridge -> Percussa SSP (preferred over the gadget port,
+                # survives Pi reboots without the SSP losing its MIDI device)
                 found_outputs['SSP'] = (i, port_name)
+            elif "f_midi" in port_name:
+                if 'SSP' not in found_outputs:   # gadget port only when no XIAO-SSP bridge
+                    found_outputs['SSP'] = (i, port_name)
+            elif "XIAO" in port_name:
+                # Seeed XIAO host-to-host bridge -> i2c2midi USB -> Teletype
+                found_outputs['Teletype'] = (i, port_name)
             elif "NerdSEQ" in port_name:
                 found_outputs['NerdSEQ'] = (i, port_name)
             elif "USB MIDI" in port_name and 'NerdSEQ' not in found_outputs:
@@ -114,10 +135,17 @@ class MIDIHub:
         changed = current_names != self._last_output_names
 
         with self.lock:
-            # Close outputs that are no longer available
+            # Close outputs that are no longer available, or whose port changed
             for name in list(self.outputs.keys()):
-                if name not in found_outputs:
-                    print(f"❌ Output disconnected: {name}")
+                moved = (name in found_outputs and
+                         self._out_port_names.get(name) != found_outputs[name][1])
+                if name not in found_outputs or moved:
+                    if moved:
+                        print(f"🔀 Output {name} moving to {found_outputs[name][1]}")
+                        changed = True
+                    else:
+                        print(f"❌ Output disconnected: {name}")
+                    self._out_port_names.pop(name, None)
                     midiout = self.outputs.pop(name)
                     try:
                         midiout.close_port()
@@ -137,6 +165,7 @@ class MIDIHub:
                     try:
                         midiout.open_port(port_num)
                         self.outputs[name] = midiout
+                        self._out_port_names[name] = port_name
                         print(f"✅ Output connected: {port_name}")
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
@@ -268,16 +297,54 @@ class MIDIHub:
         new_status = msg_type | ((target_channel - 1) & 0x0F)
         return [new_status] + list(midi_message[1:])
 
+    def _tt_coalesce(self, msg):
+        """Queue continuous messages for Teletype; return True if queued."""
+        if not self.TT_COALESCE_ENABLED or len(msg) < 2:
+            return False
+        msg_type = msg[0] & 0xF0
+        if msg_type == 0xB0 and len(msg) >= 3:
+            key = (msg[0], msg[1])          # per channel + controller
+        elif msg_type in (0xD0, 0xE0):
+            key = (msg[0],)                 # per channel
+        else:
+            return False
+        with self._tt_lock:
+            self._tt_pending[key] = list(msg)
+        return True
+
+    def tt_flush_loop(self):
+        """Send the latest queued CC/pressure/bend values to Teletype."""
+        while self.running:
+            time.sleep(self.TT_FLUSH_INTERVAL)
+            with self._tt_lock:
+                if not self._tt_pending:
+                    continue
+                pending = list(self._tt_pending.values())
+                self._tt_pending.clear()
+            with self.lock:
+                out = self.outputs.get('Teletype')
+                if out is None:
+                    continue
+                for m in pending:
+                    try:
+                        out.send_message(m)
+                    except Exception as e:
+                        print(f"⚠️  Failed to flush to Teletype: {e}")
+                        break
+
     def make_callback(self, port_name):
         """Create a callback that forwards MIDI to all outputs.
 
         Routing rules:
-          NerdSEQ input  → SSP only  (avoid echo loop back to NerdSEQ itself)
-          Everything else → all outputs (SSP + NerdSEQ)
+          NerdSEQ input  → all outputs except NerdSEQ (echo prevention)
+          Teletype input (XIAO) → all outputs except Teletype (echo prevention)
+          Everything else → all outputs (SSP + Teletype + NerdSEQ if present)
+          CC / pressure / pitch bend to Teletype are coalesced (see TT_COALESCE_*)
         """
         is_nerdseq_source = "NerdSEQ" in port_name or "USB MIDI" in port_name
         is_grid_source    = "iii grid" in port_name
         is_pedal_source   = "CH345" in port_name or "DOREMiDi" in port_name
+        is_teletype_source = "XIAO" in port_name and "XIAO-SSP" not in port_name
 
         def callback(message, data):
             try:
@@ -317,6 +384,11 @@ class MIDIHub:
                         if is_nerdseq_source and output_name == 'NerdSEQ':
                             continue
 
+                        # Teletype: echo prevention (its own output must not
+                        # loop back into i2c2midi's MIDI-in store)
+                        if is_teletype_source and output_name == 'Teletype':
+                            continue
+
                         # Grid ch1 block: grid_bridge owns LP Mini MK3 ch1 path.
                         # Any ch1 message from the grid via passthrough would
                         # double-trigger LP commands causing stray lit matrix buttons.
@@ -346,6 +418,9 @@ class MIDIHub:
                                 if len(rescaled) > 2 and len(msg_to_send) > 2 and rescaled[2] != msg_to_send[2]:
                                     print(f"🎚️  [16n→SSP] CC{msg_to_send[1]} {msg_to_send[2]}→{rescaled[2]}")
                                 msg_to_send = rescaled
+
+                            if output_name == 'Teletype' and self._tt_coalesce(msg_to_send):
+                                continue
 
                             output.send_message(msg_to_send)
                         except Exception as e:
@@ -402,6 +477,9 @@ class MIDIHub:
         # Start monitoring thread
         monitor_thread = threading.Thread(target=self.monitor_loop, daemon=True)
         monitor_thread.start()
+
+        tt_thread = threading.Thread(target=self.tt_flush_loop, daemon=True)
+        tt_thread.start()
 
         print("\n🔄 Ready! Devices can be plugged/unplugged anytime.")
         print("Press Ctrl+C to stop\n")

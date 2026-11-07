@@ -12,3 +12,6 @@ env/
 # IDE
 .vscode/
 .idea/
+
+# PlatformIO
+.pio/

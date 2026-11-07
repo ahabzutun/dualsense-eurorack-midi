@@ -106,11 +106,41 @@ def main():
 
     def _find_pedal_port(scanner):
         """Scan current ALSA ports and return (index, name) for the pedal, or (None, None)."""
-        for i in range(scanner.get_port_count()):
-            n = scanner.get_port_name(i)
-            if "DOREMiDi" in n or "CH345" in n:
-                return (i, n)
+        try:
+            for i, n in enumerate(scanner.get_ports()):
+                if "DOREMiDi" in n or "CH345" in n:
+                    return (i, n)
+        except Exception:
+            pass
         return (None, None)
+
+    import os as _os, re as _re
+    _PEDAL_CLIENT_NAME = f"DS Pedal In {_os.getpid()}"   # unique ALSA client name for our input
+
+    def _pedal_input_alive():
+        """True if our pedal input still has a live ALSA subscription. The subscription
+        disappears when the adapter re-enumerates, even if the port name comes back
+        unchanged — which used to leave a dead input open (pedal silently not recorded)."""
+        try:
+            with open("/proc/asound/seq/clients") as f:
+                txt = f.read()
+        except OSError:
+            return True                                        # can't tell — assume alive
+        for block in _re.split(r"\n(?=Client\s+\d+ :)", txt):
+            head = block.split("\n", 1)[0]
+            if f'"{_PEDAL_CLIENT_NAME}"' in head and "Connected From:" in block:
+                return True
+        return False
+
+    def _close_pedal_input(midiin):
+        """Close a pedal input; each step on its own so one failure can't skip the rest."""
+        if midiin is None:
+            return
+        for step in ("cancel_callback", "close_port", "delete"):   # delete() frees the ALSA client now
+            try:
+                getattr(midiin, step)()
+            except Exception:
+                pass
 
     def _pedal_callback(message, data=None):
         """Record pedal CC into the active loop when recording.
@@ -126,70 +156,76 @@ def main():
         elif loop_state.recording:
             loop_state.record_message(list(midi_bytes))
 
-    # Initial scan
-    _initial_idx, _initial_name = _find_pedal_port(_pedal_scanner)
-    _pedal_holder = [None]  # list so _reconnect_pedal thread can mutate it
+    # Exactly ONE pedal input per main():
+    #  - opened by NAME, looked up in the new client's own port list (an index from the
+    #    scanner could point at a different port if the list changed in between)
+    #  - re-opened when the port name changes or our subscription is gone
+    #  - the monitor thread is stopped via _pedal_stop before main() restarts itself;
+    #    previously the old thread kept running and opened a SECOND input next to the
+    #    new main()'s one, so every pedal event was recorded twice (once per restart).
+    _pedal_holder = [None]                 # current rtmidi.MidiIn for the pedal, or None
+    _pedal_name = [None]                   # ALSA port name it is connected to
+    _pedal_lock = threading.Lock()
+    _pedal_stop = threading.Event()
 
-    if _initial_idx is not None:
-        _first_in = rtmidi.MidiIn()
-        _first_in.ignore_types(sysex=True, timing=True, active_sense=True)
+    def _open_pedal_input(name):
+        new_in = rtmidi.MidiIn(name=_PEDAL_CLIENT_NAME)
+        new_in.ignore_types(sysex=True, timing=True, active_sense=True)
         try:
-            _first_in.open_port(_initial_idx)
-            _first_in.set_callback(_pedal_callback)
-            _pedal_holder[0] = _first_in
-            print(f"✅ Pedal input: {_initial_name}")
+            idx = next(i for i, n in enumerate(new_in.get_ports()) if n == name)
+            new_in.open_port(idx)
+            new_in.set_callback(_pedal_callback)
+            return new_in
         except Exception as e:
-            print(f"⚠️  Could not open pedal port: {e}")
-            del _first_in
-    else:
-        print("⚠️  Pedal not found at startup — will keep scanning for it...")
+            print(f"⚠️  Could not open pedal port {name}: {e}")
+            _close_pedal_input(new_in)
+            return None
+
+    def _sync_pedal(startup=False):
+        """Make sure exactly one live pedal input is open (none while unplugged)."""
+        _, found_name = _find_pedal_port(_pedal_scanner)
+        with _pedal_lock:
+            if _pedal_stop.is_set():
+                return
+            current = _pedal_holder[0]
+            if current is not None and found_name == _pedal_name[0] and _pedal_input_alive():
+                return                                         # same port, still live
+            if current is not None:
+                _close_pedal_input(current)
+                _pedal_holder[0] = None
+                _pedal_name[0] = None
+                if found_name is None:
+                    print("❌ Pedal disconnected — waiting for reconnect...")
+            if found_name is not None:
+                new_in = _open_pedal_input(found_name)
+                if new_in is not None:
+                    _pedal_holder[0] = new_in
+                    _pedal_name[0] = found_name
+                    print(f"✅ Pedal {'input' if startup else 'reconnected'}: {found_name}")
+            elif startup:
+                print("⚠️  Pedal not found at startup — will keep scanning for it...")
 
     def _reconnect_pedal():
-        """Hot-plug monitor for the DOReMIDI pedal. Runs as a daemon thread.
-
-        Checks every 2 seconds whether the pedal port exists in ALSA.
-        - If the port appears and _pedal_holder[0] is None → open and attach callback.
-        - If the port disappears and _pedal_holder[0] is set → close and clear.
-        This mirrors the same pattern used by midi_passthrough.py's monitor_loop().
-        """
-        while True:
-            time.sleep(2.0)
+        """Hot-plug monitor for the pedal: every 2 s until _pedal_stop is set."""
+        while not _pedal_stop.wait(2.0):
             try:
-                found_idx, found_name = _find_pedal_port(_pedal_scanner)
-                current = _pedal_holder[0]
-
-                if found_idx is None and current is not None:
-                    # Pedal disappeared
-                    try:
-                        current.cancel_callback()
-                        current.close_port()
-                    except Exception:
-                        pass
-                    del current
-                    _pedal_holder[0] = None
-                    print("❌ Pedal disconnected — waiting for reconnect...")
-
-                elif found_idx is not None and current is None:
-                    # Pedal (re)appeared
-                    new_in = rtmidi.MidiIn()
-                    new_in.ignore_types(sysex=True, timing=True, active_sense=True)
-                    try:
-                        new_in.open_port(found_idx)
-                        new_in.set_callback(_pedal_callback)
-                        _pedal_holder[0] = new_in
-                        print(f"✅ Pedal reconnected: {found_name}")
-                    except Exception as e:
-                        print(f"⚠️  Could not reconnect pedal: {e}")
-                        try:
-                            new_in.cancel_callback()
-                        except Exception:
-                            pass
-                        del new_in
-
+                _sync_pedal()
             except Exception as e:
                 print(f"⚠️  Pedal monitor error: {e}")
 
-    threading.Thread(target=_reconnect_pedal, daemon=True).start()
+    def _shutdown_pedal():
+        """Stop this main()'s pedal monitor thread and close its input."""
+        _pedal_stop.set()
+        if _pedal_thread.is_alive() and _pedal_thread is not threading.current_thread():
+            _pedal_thread.join(timeout=3.0)
+        with _pedal_lock:
+            _close_pedal_input(_pedal_holder[0])
+            _pedal_holder[0] = None
+            _pedal_name[0] = None
+
+    _sync_pedal(startup=True)
+    _pedal_thread = threading.Thread(target=_reconnect_pedal, daemon=True)
+    _pedal_thread.start()
 
     # ===== Print startup info =====
     if controller_available:
@@ -660,16 +696,8 @@ def main():
             controller_obj.cleanup()
             clock_source.stop()
 
-            # ── Pedal cleanup: use _pedal_holder, not a stale local reference ──
-            pedal_in = _pedal_holder[0]
-            if pedal_in is not None:
-                try:
-                    pedal_in.cancel_callback()
-                    pedal_in.close_port()
-                except Exception:
-                    pass
-                del pedal_in
-                _pedal_holder[0] = None
+            # ── Pedal cleanup: stop the monitor thread and close the input ──
+            _shutdown_pedal()
 
             if controller:
                 controller.close()
@@ -704,18 +732,10 @@ def main():
                     print("🎮 DualSense detected — restarting main loop...")
                     controller_obj.cleanup()
                     clock_source.stop()
-                    # Clean up pedal port before recursing — otherwise the old
-                    # _reconnect_pedal thread keeps the port open and the new
-                    # main() can't attach its callback, silently breaking loop recording.
-                    pedal = _pedal_holder[0]
-                    if pedal is not None:
-                        try:
-                            pedal.cancel_callback()
-                            pedal.close_port()
-                        except Exception:
-                            pass
-                        del pedal
-                        _pedal_holder[0] = None
+                    # Stop this main()'s pedal monitor and close its input before
+                    # recursing — otherwise the old thread revives the pedal next to
+                    # the new main()'s input (every pedal event recorded twice).
+                    _shutdown_pedal()
                     del midiout
                     main()  # restart cleanly from the top
                     return
