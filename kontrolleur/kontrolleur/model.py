@@ -48,6 +48,35 @@ HOLD_CHOICES = [a for a in ACTIONS if a != "midi"]
 CHORD_CHOICES = [a for a in ACTIONS if a not in ("midi", "none")]
 
 
+# Axes (config/controls.py AXES): what each analog / step axis does
+AXIS_OF = {   # input id -> AXES name on the SSH host
+    "left_stick_x": "left_x", "left_stick_y": "left_y", "right_stick_x": "right_x", "right_stick_y": "right_y",
+    "l2_trigger": "l2", "r2_trigger": "r2", "touchpad_x": "touch_x", "touchpad_y": "touch_y",
+    "dpad_horizontal": "dpad_x", "dpad_vertical": "dpad_y", "nrpn_tilt_x": "tilt_x", "nrpn_tilt_y": "tilt_y",
+    "nrpn_twist": "twist",
+}
+AXES = list(AXIS_OF.values())
+STEP_AXES = ("dpad_x", "dpad_y")
+DEFAULT_AXES = {"left_x": "slice_fine", "left_y": "midi", "right_x": "midi", "right_y": "midi", "l2": "midi", "r2": "midi",
+                "touch_x": "loop_scrub", "touch_y": "quantize_grid", "dpad_x": "slice_section", "dpad_y": "midi",
+                "tilt_x": "midi", "tilt_y": "midi", "twist": "midi"}
+AXIS_FUNCS = ["midi", "none", "slice_fine", "slice_section", "slice_block", "loop_scrub", "quantize_grid"]
+STEP_FUNCS = ["midi", "none", "slice_section", "slice_block"]
+AXIS_TOKEN = {"slice_fine": "SLICE", "slice_section": "SECTION", "slice_block": "BLOCK", "loop_scrub": "SCRUB",
+              "quantize_grid": "Q-GRID"}
+
+# One list of functions per control (what the inspector offers). 'er_*' = MIDI routed to the ER-301.
+FUNC_TITLE = {
+    "none": "Nothing", "er_cv": "ER-301 CV", "er_trigger": "ER-301 trigger", "er_lfo_rate": "LFO rate",
+    "er_lfo_reset": "LFO reset", "er_octave": "Octave (pitch CV)", "midi": "MIDI only (not to the ER-301)",
+    "slice_fine": "Grain slice: slice in section", "slice_section": "Grain slice: section", "slice_block": "Grain slice: block",
+    "loop_scrub": "Loop: playback position", "quantize_grid": "Loop: quantize grid",
+}
+ER_ROLE = {"er_cv": CV, "er_trigger": TRIGGER, "er_lfo_rate": LFO_RATE, "er_lfo_reset": LFO_RESET, "er_octave": OCTAVE,
+           "midi": OFF}
+ROLE_ER = {v: k for k, v in ER_ROLE.items()}
+
+
 def fires_on_release(a: str) -> bool:
     return a in ("loop_record", "loop_play", "loop_clear")
 
@@ -129,7 +158,8 @@ class GroupDef:
     inputs: Tuple[InputDef, ...]
 
 
-AXIS = (OFF, CV, LFO_RATE)
+AXIS = (OFF, CV, TRIGGER, LFO_RATE)
+STEP = (OFF, CV, OCTAVE)
 BUTTON = (OFF, TRIGGER, CV, LFO_RESET)
 
 
@@ -145,24 +175,26 @@ def _nrpn(name, n, label):
     return InputDef("nrpn_" + name, label, "nrpn", name, n, (OFF, CV))
 
 
-BUTTON_HINT = "Tap and hold can do different things. Set the tap to “MIDI → ER-301” to route the button like a trigger."
+BUTTON_HINT = "Pick what a tap does, and optionally something else when it's held."
+STICK_HINT = "Springs back to the centre (64 ≈ 5 V) when released."
 
 GROUPS: List[GroupDef] = [
-    GroupDef("l2", "L2", "Analog trigger: 0–127 → 0–10 V.", (_cc("l2_trigger", 7, "Pressure", AXIS),)),
+    GroupDef("l2", "L2", "Analog trigger, 0–127. As LFO rate: released = stopped, fully pressed = fastest.",
+             (_cc("l2_trigger", 7, "Pressure", AXIS),)),
     GroupDef("l1", "L1", BUTTON_HINT, (_btn("btn_l1", 24, "l1"),)),
-    GroupDef("r2", "R2", "Analog trigger. As LFO rate: released = LFO stopped, fully pressed = fastest.",
+    GroupDef("r2", "R2", "Analog trigger, 0–127. As LFO rate: released = stopped, fully pressed = fastest.",
              (_cc("r2_trigger", 10, "Pressure", AXIS),)),
     GroupDef("r1", "R1", BUTTON_HINT, (_btn("btn_r1", 25, "r1"),)),
-    GroupDef("dpad", "D-pad", "↕ sends 8 steps (as Octave it shifts the pitch CV). ↔ picks the 16-slice section, or sends CC steps.",
-             (_cc("dpad_vertical", 11, "Up / down", (OFF, CV, OCTAVE)),
-              _cc("dpad_horizontal", 13, "Left / right", (OFF, CV)))),
-    GroupDef("leftStick", "Left stick", "X picks the slice inside the 16-slice section, or sends a CC. Springs back to the centre (64 ≈ 5 V).",
+    GroupDef("dpad", "D-pad", "Steps up / down. As MIDI each direction pair sends 8 steps; grain slice functions step one section / block.",
+             (_cc("dpad_vertical", 11, "Up / down", STEP),
+              _cc("dpad_horizontal", 13, "Left / right", STEP))),
+    GroupDef("leftStick", "Left stick", STICK_HINT,
              (_cc("left_stick_x", 1, "X axis", AXIS), _cc("left_stick_y", 2, "Y axis", AXIS),
               _btn("btn_l3", 20, "l3", "Click (L3)"))),
-    GroupDef("rightStick", "Right stick", "Springs back to the centre (64 ≈ 5 V) when released.",
+    GroupDef("rightStick", "Right stick", STICK_HINT,
              (_cc("right_stick_x", 87, "X axis", AXIS), _cc("right_stick_y", 88, "Y axis", AXIS),
               _btn("btn_r3", 21, "r3", "Click (R3)"))),
-    GroupDef("touchpad", "Touchpad", "X also scrubs a playing loop, Y picks the quantize grid. Both keep their value when you lift the finger.",
+    GroupDef("touchpad", "Touchpad", "Works while a finger is on it; keeps its value when you lift the finger.",
              (_cc("touchpad_x", 30, "X position", AXIS), _cc("touchpad_y", 31, "Y position", AXIS),
               _btn("btn_touchpad", 9, "touchpad", "Click"))),
     GroupDef("create", "Create", BUTTON_HINT, (_btn("btn_create", 26, "create"),)),
@@ -173,9 +205,9 @@ GROUPS: List[GroupDef] = [
     GroupDef("circle", "○ Circle", BUTTON_HINT, (_btn("btn_east", 15, "circle"),)),
     GroupDef("cross", "✕ Cross", BUTTON_HINT, (_btn("btn_south", 14, "cross"),)),
     GroupDef("square", "□ Square", BUTTON_HINT, (_btn("btn_west", 23, "square"),)),
-    GroupDef("motion", "Motion", "Gyro / tilt as 14-bit values → 0–10 V in fine steps. Sent while motion control is on.",
+    GroupDef("motion", "Motion", "Tilt and twist, active while motion control is on (give “Motion on / off” to a button or combo). As MIDI they are 14-bit.",
              (_nrpn("tilt_x", 0, "Tilt X"), _nrpn("tilt_y", 1, "Tilt Y"), _nrpn("twist", 2, "Twist"))),
-    GroupDef("slice", "Grain slice", "One 14-bit CV for 1024 slices: block of 128 (Create / Options by default) + section of 16 (D-pad ↔) + slice (left stick X).",
+    GroupDef("slice", "Grain slice", "Slice 0–1023 = block × 128 + section × 16 + slice, sent as one 14-bit CV. Give the grain slice functions to any controls, then pick its ER-301 port here.",
              (_nrpn("grain_slice", 3, "Slice 0–1023"),)),
 ]
 GROUP = {g.id: g for g in GROUPS}
@@ -264,8 +296,7 @@ class Mapping:
         self.externals: List[ExternalRoute] = []
         self.funcs: Dict[str, ButtonFunc] = default_funcs()
         self.chords: List[Chord] = default_chords()
-        self.dpad_horizontal = "slice_section"
-        self.left_stick_x = "slice_fine"
+        self.axes: Dict[str, str] = dict(DEFAULT_AXES)
 
     # ── functions ──
     def fn(self, button: str) -> ButtonFunc:
@@ -282,14 +313,69 @@ class Mapping:
         f.hold = a
         self.funcs[button] = f
 
+    # legacy names (controls.py DPAD_HORIZONTAL / LEFT_STICK_X for older DualSense scripts)
+    @property
+    def dpad_horizontal(self) -> str:
+        return "slice_section" if self.axes.get("dpad_x") == "slice_section" else "midi"
+
+    @property
+    def left_stick_x(self) -> str:
+        return "slice_fine" if self.axes.get("left_x") == "slice_fine" else "midi"
+
+    def axis_fn(self, i: InputDef) -> Optional[str]:
+        a = AXIS_OF.get(i.id)
+        return self.axes.get(a, DEFAULT_AXES[a]) if a else None
+
     def sends_midi(self, i: InputDef) -> bool:
         if i.button:
             return self.fn(i.button).tap == "midi"
-        if i.id == "dpad_horizontal":
-            return self.dpad_horizontal == "midi"
-        if i.id == "left_stick_x":
-            return self.left_stick_x == "midi"
+        a = AXIS_OF.get(i.id)
+        if a:
+            return self.axes.get(a, DEFAULT_AXES[a]) == "midi"
         return True
+
+    # ── one function per control ──
+    def choices(self, i: InputDef) -> List[str]:
+        if i.button:
+            return ["none"] + [ROLE_ER[r] for r in i.roles if r != OFF] + ["midi"] + \
+                   [a for a in ACTIONS if a not in ("none", "midi")]
+        a = AXIS_OF.get(i.id)
+        if a is None:                                  # grain slice output
+            return ["none", "er_cv"]
+        er = [ROLE_ER[r] for r in i.roles if r != OFF]
+        funcs = STEP_FUNCS if a in STEP_AXES else AXIS_FUNCS
+        return ["none"] + er + ["midi"] + [f for f in funcs if f not in ("midi", "none")]
+
+    def choice(self, i: InputDef) -> str:
+        if i.button:
+            f = self.fn(i.button)
+            return ROLE_ER.get(self.role(i), "midi") if f.tap == "midi" else f.tap
+        a = AXIS_OF.get(i.id)
+        if a is None:
+            return "er_cv" if self.role(i) == CV else "none"
+        f = self.axes.get(a, DEFAULT_AXES[a])
+        return ROLE_ER.get(self.role(i), "midi") if f == "midi" else f
+
+    def set_choice(self, i: InputDef, key: str):
+        a = AXIS_OF.get(i.id)
+        if key in ER_ROLE:
+            if i.button:
+                self.set_tap("midi", i.button)
+            elif a:
+                self.axes[a] = "midi"
+            self.set_role(ER_ROLE[key], i)
+            return
+        if key == "none" and not i.button and a is None:
+            self.roles[i.id] = OFF                     # grain slice output off
+            return
+        self.roles[i.id] = OFF
+        if i.button:
+            self.set_tap(key, i.button)
+        elif a:
+            self.axes[a] = key
+
+    def func_title(self, key: str) -> str:
+        return FUNC_TITLE.get(key) or ACTION_TITLE.get(key, key)
 
     # ── routing access ──
     def role(self, i: InputDef) -> str:
@@ -344,25 +430,46 @@ class Mapping:
             return f"TRIG › CV {self.port(i)}" if self.triggers_as_cv else f"TR {self.port(i)}"
         return {LFO_RATE: "LFO RATE", LFO_RESET: "LFO RESET", OCTAVE: "OCTAVE"}[r]
 
+    def _midi_token(self, i: InputDef) -> Tuple[str, tuple]:
+        r = self.effective_role(i)
+        if r != OFF:
+            return self.route_token(i), ("route", r)
+        n = self.number(i)
+        return (f"NRPN {n}" if i.kind == "nrpn" else f"CC {n}"), ("midi",)
+
     def tokens(self, i: InputDef) -> List[Tuple[str, tuple]]:
-        """What a control does, for the drawing: [(text, kind)], kind = ('off',) | ('route', role) | ('function',)."""
+        """What a control does, for the drawing: [(text, kind)], kind = ('route', role) | ('midi',) | ('function',).
+        Empty when nothing is assigned."""
         if i.button:
             f = self.fn(i.button)
             out = []
             if f.tap == "midi":
-                r = self.effective_role(i)
-                out.append((self.route_token(i), ("off",) if r == OFF else ("route", r)))
-            else:
-                out.append((ACTION_TOKEN[f.tap], ("off",) if f.tap == "none" else ("function",)))
+                out.append(self._midi_token(i))
+            elif f.tap != "none":
+                out.append((ACTION_TOKEN[f.tap], ("function",)))
             if f.hold != "none":
                 out.append(("HOLD " + ACTION_TOKEN[f.hold], ("function",)))
             return out
-        if i.id == "dpad_horizontal" and self.dpad_horizontal != "midi":
-            return [("SECTION ±", ("function",))]
-        if i.id == "left_stick_x" and self.left_stick_x != "midi":
-            return [("SLICE", ("function",))]
-        r = self.effective_role(i)
-        return [(self.route_token(i), ("off",) if r == OFF else ("route", r))]
+        a = AXIS_OF.get(i.id)
+        if a is None:                                  # grain slice output
+            return [self._midi_token(i)] if self.effective_role(i) != OFF else []
+        f = self.axes.get(a, DEFAULT_AXES[a])
+        if f == "none":
+            return []
+        if f == "midi":
+            return [self._midi_token(i)]
+        tok = AXIS_TOKEN[f] + (" ±" if a in STEP_AXES else "")
+        return [(tok, ("function",))]
+
+    def shown(self, i: InputDef) -> List[Tuple[str, tuple]]:
+        """Tokens worth showing on the drawing: ER-301 routes and functions (not 'MIDI only')."""
+        return [t for t in self.tokens(i) if t[1][0] != "midi"]
+
+    def assigned(self, i: InputDef) -> bool:
+        return bool(self.shown(i))
+
+    def midi_only(self, i: InputDef) -> bool:
+        return not self.assigned(i) and bool(self.tokens(i))
 
     # ── port overview ──
     def port_map(self) -> List[PortUse]:
@@ -471,12 +578,17 @@ class Mapping:
                 f[name] = ButtonFunc(tap if tap in ACTIONS else "none", hold if hold in ACTIONS else "none")
             self.funcs = f
             self.chords = [Chord(x[0], x[1], x[2]) for x in c.get("chords") or [] if len(x) == 3 and x[2] in ACTIONS]
-            self.dpad_horizontal = c.get("dpad_horizontal", "slice_section")
-            self.left_stick_x = c.get("left_stick_x", "slice_fine")
+            axes = dict(DEFAULT_AXES)
+            axes["dpad_x"] = c.get("dpad_horizontal", "slice_section")
+            axes["left_x"] = c.get("left_stick_x", "slice_fine")
+            for k, v in (c.get("axes") or {}).items():
+                if k in axes and v in AXIS_FUNCS:
+                    axes[k] = v
+            self.axes = axes
         else:
             self.controls_on_pi = e.get("controls_error") is not None
             self.funcs, self.chords = default_funcs(), default_chords()
-            self.dpad_horizontal, self.left_stick_x = "slice_section", "slice_fine"
+            self.axes = dict(DEFAULT_AXES)
 
     # ── write er301_routes.py ──
     def _ctl(self, i: InputDef) -> str:
@@ -610,8 +722,17 @@ class Mapping:
         for c in self.chords:
             s += f"    ('{c.a}', '{c.b}', '{c.action}'),\n"
         s += "]\n\n"
-        s += f"DPAD_HORIZONTAL = '{self.dpad_horizontal}'   # 'slice_section' (16-slice sections) or 'midi' (CC steps)\n"
-        s += f"LEFT_STICK_X = '{self.left_stick_x}'         # 'slice_fine' (slice within the section) or 'midi' (CC)\n"
+        s += ("# What each axis does: 'midi' (its own CC / NRPN, route it in er301_routes.py), 'none', 'slice_fine',\n"
+              "# 'slice_section', 'slice_block' (grain slice), 'loop_scrub' (playing loop position), 'quantize_grid'.\n"
+              "# The D-pad steps: 'midi', 'none', 'slice_section', 'slice_block'. Tilt / twist only while motion is on.\n"
+              "AXES = {\n")
+        for a in AXES:
+            key = f"'{a}':"
+            s += "    " + key + " " * max(1, 11 - len(key)) + f"'{self.axes.get(a, DEFAULT_AXES[a])}',\n"
+        s += "}\n\n"
+        s += "# For DualSense scripts from before AXES:\n"
+        s += f"DPAD_HORIZONTAL = '{self.dpad_horizontal}'\n"
+        s += f"LEFT_STICK_X = '{self.left_stick_x}'\n"
         return s
 
     # ── CC → CV routes of other devices (16n faders, pedals, EC4 encoders) ──
@@ -634,6 +755,41 @@ class Mapping:
                 del self.externals[k]
         elif port is not None:
             self.externals.append(ExternalRoute(EXT_CV, channel, str(cc), port))
+
+    # ── routes of other devices: CV, trigger (CC ≥ 64 = high) or note → trigger ──
+    def ext_route(self, channel: int, number: int, note: bool = False) -> Optional[ExternalRoute]:
+        kinds = (EXT_NOTE,) if note else (EXT_CV, EXT_TRIGGER)
+        for e in self.externals:
+            if e.kind in kinds and e.channel == channel and _int_or_none(e.control) == number:
+                return e
+        return None
+
+    def set_ext_route(self, channel: int, number: int, kind: Optional[str], port: Optional[int] = None, note: bool = False):
+        """kind None removes the route; otherwise sets kind (and port, or keeps / picks a free one)."""
+        e = self.ext_route(channel, number, note)
+        if kind is None:
+            if e is not None:
+                self.externals.remove(e)
+            return
+        if e is None:
+            self.externals.append(ExternalRoute(kind, channel, str(number), port or self.first_free_port()))
+        else:
+            e.kind = kind
+            if port is not None:
+                e.port = port
+
+    def move_ext_route(self, old: Tuple[int, int], new: Tuple[int, int], note: bool = False):
+        """A device control changed channel / number: its route goes along."""
+        if old == new:
+            return
+        e = self.ext_route(old[0], old[1], note)
+        if e is not None and self.ext_route(new[0], new[1], note) is None:
+            e.channel, e.control = new[0], str(new[1])
+
+    def route_label(self, e: ExternalRoute) -> str:
+        if e.kind in (EXT_CV, EXT_NRPN):
+            return f"CV {e.port}"
+        return f"TRIG › CV {e.port}" if self.triggers_as_cv else f"TR {e.port}"
 
     def problems(self) -> List[str]:
         p = []
@@ -667,6 +823,7 @@ class Mapping:
             "funcs": {k: {"tap": v.tap, "hold": v.hold} for k, v in self.funcs.items()},
             "chords": [{"a": c.a, "b": c.b, "action": c.action} for c in self.chords],
             "dpadHorizontal": self.dpad_horizontal, "leftStickX": self.left_stick_x, "longPress": self.long_press,
+            "axes": dict(self.axes),
         }
 
     def restore(self, s: dict):
@@ -685,5 +842,10 @@ class Mapping:
                 f[k] = ButtonFunc(v["tap"], v["hold"])
         self.funcs = f
         self.chords = [Chord(c["a"], c["b"], c["action"]) for c in s["chords"] if c["action"] in ACTIONS]
-        self.dpad_horizontal, self.left_stick_x = s["dpadHorizontal"], s["leftStickX"]
+        axes = dict(DEFAULT_AXES)
+        axes["dpad_x"], axes["left_x"] = s.get("dpadHorizontal", "slice_section"), s.get("leftStickX", "slice_fine")
+        for k, v in (s.get("axes") or {}).items():
+            if k in axes and v in AXIS_FUNCS:
+                axes[k] = v
+        self.axes = axes
         self.long_press = float(s["longPress"])

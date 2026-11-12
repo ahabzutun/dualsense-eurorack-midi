@@ -11,6 +11,7 @@ from ..devices import EC4_MODES, EC4_PUSH_TYPES, EC4_SCALES, EC4_TYPES, ec4_high
 from ..stage import GrowingDrawing
 from ..store import NotesStore
 from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
+from .common import route_card, route_pill
 from .dualsense import _op
 
 LCD = QColor.fromRgbF(0.55, 0.95, 0.75)
@@ -63,7 +64,10 @@ class EC4Drawing(GrowingDrawing):
         ctx = self.ctx
         sel = ctx.ec4_enc == idx
         g = Theme.grow
-        port = ctx.mapping.fader_port(enc["channel"], enc["number"]) if enc["type"] == "cc" else None
+        m = ctx.mapping
+        pill = route_pill(m, enc["channel"], enc["number"], size=9) if enc["type"] == "cc" else None
+        pu = enc["push"]
+        push_pill = route_pill(m, pu["channel"], pu["number"], pu["type"] == "note", 9) if pu["type"] in ("cc", "note") else None
         t = enc["type"]
         col = Theme.function if t.startswith("cc_rel") else (Theme.trig if t in ("note", "pc") else Theme.cv)
         name = enc["name"].strip() or "—"
@@ -75,15 +79,19 @@ class EC4Drawing(GrowingDrawing):
         line = D.Row([D.Text(f"ch{enc['channel']}", f, Theme.dim), D.Text(num, f, Theme.ink)], 4)
         items = [lcd, knob, line]
         note = ctx.notes.note(NotesStore.ec4(ctx.ec4_setup, ctx.ec4_group, idx))
-        push = None if enc["push"]["type"] == "off" else f"push: {enc['push']['type']}"
-        if port is not None or note or push:
-            extra = []
-            if port is not None or not note:
-                extra.append(D.Text(f"CV {port}" if port is not None else (push or ""), Theme.font(9, BOLD, "mono"),
-                                    Theme.dim if port is None else Theme.cv))
-            if note:
-                extra.append(D.note_badge(note, 9, (126 if port is None else 80) * g))
-            items.append(D.Row(extra, 5))
+        push = None if pu["type"] == "off" else f"push: {pu['type']}"
+        extra = []
+        if pill is not None:
+            extra.append(pill)
+        if push_pill is not None:
+            extra += [D.Text("⏎", Theme.font(9, BOLD, "mono"), Theme.dim), push_pill]
+        if not extra and push and not note:
+            extra.append(D.Text(push, Theme.font(9, BOLD, "mono"), Theme.dim))
+        if note:
+            used = sum(x.size()[0] for x in extra) + 5 * len(extra)
+            extra.append(D.note_badge(note, 9, max(40.0, 126 * g - used)))
+        if extra:
+            items.append(D.Row(extra, 4))
         content = D.Box(D.Col(items, 6), w=140 * g, pad=0)
         content = D.Box(content, w=140 * g, h=content.h + 16)
 
@@ -129,14 +137,8 @@ def _encs(ctx):
 
 def move_route(ctx, k: int, ch: int, num: int):
     old = _encs(ctx)[k]
-    m = ctx.mapping
-    if old["type"] != "cc" or (old["channel"], old["number"]) == (ch, num):
-        return
-    p = m.fader_port(old["channel"], old["number"])
-    if p is None:
-        return
-    m.set_fader_port(old["channel"], old["number"], None)
-    m.set_fader_port(ch, num, p)
+    if old["type"] == "cc":
+        ctx.mapping.move_ext_route((old["channel"], old["number"]), (ch, num))
 
 
 def set_ch(ctx, k, ch):
@@ -182,18 +184,9 @@ def encoder_editor(ctx, col: QVBoxLayout):
     card.add(W.switch_row("Link to the next encoder", e["link"], lambda v: sete("link", v)))
     col.addWidget(card)
     if e["type"] == "cc":
-        card = W.Card("Send to ER-301", Theme.cv)
-        port = m.fader_port(e["channel"], e["number"])
-
-        def route(on):
-            m.set_fader_port(e["channel"], e["number"], m.first_free_port() if on else None)
-            ctx.changed(True)
-
-        card.add(W.switch_row("Route through the i2c2midi", port is not None, route))
-        if port is not None:
-            card.add(W.row("SC.CV port", W.NumberField(port, 1, 99, lambda v: (m.set_fader_port(e["channel"], e["number"], v), ctx.changed()))))
-        card.add(W.hint("Needs the EC4 on SSH (the MIDI hub on the SSH host passes its MIDI to the i2c2midi). The route is stored with the ER-301 routing, so it applies in every setup that sends this channel + CC."))
-        col.addWidget(card)
+        col.addWidget(route_card(ctx, lambda: (_encs(ctx)[sel]["channel"], _encs(ctx)[sel]["number"]),
+                                 "Needs the EC4 on SSH (the MIDI hub on the SSH host passes its MIDI to the i2c2midi). The route "
+                                 "is stored with the ER-301 routing, so it applies in every setup that sends this channel + CC."))
 
     def ch_all():
         ch = _encs(ctx)[sel]["channel"]
@@ -220,6 +213,11 @@ def push_editor(ctx, col: QVBoxLayout):
     col.addWidget(W.NoteField(ctx.notes.raw(key), lambda t: ctx.set_note(key, t), "Note · push button"))
 
     def setp(k, v, rebuild=False):
+        if k in ("channel", "number") and p["type"] in ("cc", "note"):        # the ER-301 route goes along
+            new = (v, p["number"]) if k == "channel" else (p["channel"], v)
+            ctx.mapping.move_ext_route((p["channel"], p["number"]), new, p["type"] == "note")
+        if k == "type" and p["type"] in ("cc", "note") and v != p["type"]:
+            ctx.mapping.set_ext_route(p["channel"], p["number"], None, note=p["type"] == "note")
         p[k] = v
         ctx.changed(rebuild)
 
@@ -240,6 +238,11 @@ def push_editor(ctx, col: QVBoxLayout):
         card.add(W.row("Group" if p["type"] == "group" else "Setup",
                        W.NumberField(p["number"] + 1, 1, 16, lambda v: setp("number", max(0, min(15, v - 1))))))
     col.addWidget(card)
+    if p["type"] in ("cc", "note"):
+        hint = ("Pressed sends the upper value, released the lower one: for a trigger keep upper ≥ 64 and lower below."
+                if p["type"] == "cc" else "The trigger is high while the push button is held.")
+        col.addWidget(route_card(ctx, lambda: (p["channel"], p["number"]), hint + " Needs the EC4 on SSH.",
+                                 note=p["type"] == "note", title="Push → ER-301"))
 
 
 def names_editor(ctx, col: QVBoxLayout):

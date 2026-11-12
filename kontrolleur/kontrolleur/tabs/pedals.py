@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
-from PySide6.QtWidgets import QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
 
 from .. import draw as D
 from .. import widgets as W
@@ -12,6 +12,7 @@ from ..devices import (PEDAL_LABEL, PEDAL_SHORT, hub_channel, pedal_choices, ped
 from ..stage import Drawing
 from ..store import NotesStore
 from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
+from .common import route_card, route_pill
 from .dualsense import _op
 
 TYPE_NAME = {"expression": "Expression pedal", "switch": "Switch pedal", "hihat": "Hi-hat pedal"}
@@ -88,12 +89,13 @@ class PedalDrawing(Drawing):
         rows = []
         for s in active[:5]:
             k = s["kind"]
-            port = ctx.mapping.fader_port(hub_channel(s["channel"], ctx.mapping), s["number"]) if k == "cc" else None
+            pill = route_pill(ctx.mapping, hub_channel(s["channel"], ctx.mapping), s["number"], k == "note", 10) \
+                if k in ("cc", "note") else None
             f = Theme.font(10, SEMIBOLD, "mono")
             items = [D.Text(f"ch{s['channel']}", f, Theme.dim),
                      D.Text(f"{PEDAL_SHORT.get(k, k)}{s['number']}" if pedal_has_number(k) else PEDAL_SHORT.get(k, k), f, Theme.ink)]
-            if port is not None:
-                items.append(D.Pill(D.Text(f"CV {port}", f, Theme.cv), 4, 0, Theme.c("cv", 0.14)))
+            if pill is not None:
+                items.append(pill)
             n = ctx.notes.note(NotesStore.pedal(i, s["slot"]))
             if n:
                 items.append(D.note_badge(n, 9, 80 * Theme.grow))
@@ -225,8 +227,8 @@ def slot_card(ctx, input_i: int, slot: int):
     card = W.Card(f"Message {slot + 1}", Theme.cv)
 
     def set_kind(k):
-        if s["kind"] == "cc" and k != "cc":
-            m.set_fader_port(hub_channel(s["channel"], m), s["number"], None)
+        if s["kind"] in ("cc", "note") and k != s["kind"]:
+            m.set_ext_route(hub_channel(s["channel"], m), s["number"], None, note=s["kind"] == "note")
         s["kind"] = k
         if k == "pitchbend":
             s["start"], s["end"] = 0, 16383
@@ -237,8 +239,8 @@ def slot_card(ctx, input_i: int, slot: int):
         ctx.changed(True)
 
     def remove():
-        if s["kind"] == "cc":
-            m.set_fader_port(hub_channel(s["channel"], m), s["number"], None)
+        if s["kind"] in ("cc", "note"):
+            m.set_ext_route(hub_channel(s["channel"], m), s["number"], None, note=s["kind"] == "note")
         s["on"] = False
         ctx.changed(True)
 
@@ -249,12 +251,8 @@ def slot_card(ctx, input_i: int, slot: int):
 
     def move(channel, number):
         """Changing channel / CC moves an existing ER-301 route along with it."""
-        if s["kind"] == "cc":
-            old_ch, new_ch = hub_channel(s["channel"], m), hub_channel(channel, m)
-            p = m.fader_port(old_ch, s["number"])
-            if p is not None and (old_ch, s["number"]) != (new_ch, number):
-                m.set_fader_port(old_ch, s["number"], None)
-                m.set_fader_port(new_ch, number, p)
+        if s["kind"] in ("cc", "note"):
+            m.move_ext_route((hub_channel(s["channel"], m), s["number"]), (hub_channel(channel, m), number), s["kind"] == "note")
         s["channel"], s["number"] = channel, number
         ctx.changed()
 
@@ -271,17 +269,17 @@ def slot_card(ctx, input_i: int, slot: int):
     if t == "switch":
         opts = [(0, "Momentary"), (1, "Toggle")] + ([(s["mode"], f"Other ({s['mode']})")] if s["mode"] > 1 else [])
         card.add(W.row("Mode", W.Picker(opts, s["mode"], lambda v: (s.__setitem__("mode", v), ctx.changed()), 130)))
-    if kind == "cc":
-        ch = hub_channel(s["channel"], m)
-        port = m.fader_port(ch, s["number"])
-
-        def route(on):
-            m.set_fader_port(hub_channel(s["channel"], m), s["number"], m.first_free_port() if on else None)
-            ctx.changed(True)
-
-        card.add(W.switch_row("Send to the ER-301", port is not None, route))
-        if port is not None:
-            card.add(W.row("SC.CV port", W.NumberField(port, 1, 99, lambda v: (m.set_fader_port(hub_channel(s["channel"], m), s["number"], v), ctx.changed()))))
-            card.add(W.hint(f"The MIDI hub moves pedal messages on channel 1 to the DualSense channel ({m.channel}); the route follows that."
-                            if s["channel"] == 1 else f"Routed on channel {s['channel']}."))
+    if kind in ("cc", "note"):
+        hint = (f"The MIDI hub moves pedal messages on channel 1 to the DualSense channel ({m.channel}); the route follows that."
+                if s["channel"] == 1 else f"Routed on channel {s['channel']}.")
+        if t == "switch" and kind == "cc":
+            hint += " A switch makes a good trigger: set released → pressed to 0 → 127."
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        v.addWidget(card)
+        v.addWidget(route_card(ctx, lambda: (hub_channel(s["channel"], m), s["number"]),
+                               hint, note=kind == "note", title=f"Message {slot + 1} → ER-301"))
+        return wrap
     return card

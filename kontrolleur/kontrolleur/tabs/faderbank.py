@@ -11,6 +11,7 @@ from ..devices import CURVE_PRESETS, curve_apply, curve_name
 from ..stage import GrowingDrawing
 from ..store import NotesStore
 from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
+from .common import route_card, route_pill
 from .dualsense import _op
 
 
@@ -44,7 +45,7 @@ class FaderbankDrawing(GrowingDrawing):
         ctx = self.ctx
         f = ctx.bank.faders[i]
         sel = ctx.fader_sel == i
-        port = ctx.mapping.fader_port(f["usb_channel"], f["usb_cc"])
+        pill = route_pill(ctx.mapping, f["usb_channel"], f["usb_cc"], max_w=56 * Theme.grow)
         col = Theme.cv if f["curve"] == 64 else Theme.function
         g = Theme.grow
         w = 56 * g
@@ -57,8 +58,8 @@ class FaderbankDrawing(GrowingDrawing):
             D.Text(f"ch{f['usb_channel']}", Theme.font(10, SEMIBOLD, "mono"), Theme.dim, max_w=w, min_scale=0.7),
             D.Text(f"CC{f['usb_cc']}{'ʰ' if f['usb_14bit'] else ''}", Theme.font(11, BOLD, "mono"), Theme.ink, max_w=w, min_scale=0.7),
         ]
-        if port is not None:
-            small.append(D.Pill(D.Text(f"CV {port}", Theme.font(10, BOLD, "mono"), Theme.cv), 5, 2, Theme.c("cv", 0.14)))
+        if pill is not None:
+            small.append(pill)
         else:
             small.append(D.Text("—", Theme.font(10, BOLD, "mono"), Theme.dim))
         n = ctx.notes.note(NotesStore.fader(i))
@@ -107,10 +108,7 @@ def set_usb(ctx, k: int, ch: int, cc: int):
     """Changing the USB channel / CC moves an existing ER-301 route along with it."""
     bank, m = ctx.bank, ctx.mapping
     old = bank.faders[k]
-    p = m.fader_port(old["usb_channel"], old["usb_cc"])
-    if p is not None and (old["usb_channel"], old["usb_cc"]) != (ch, cc):
-        m.set_fader_port(old["usb_channel"], old["usb_cc"], None)
-        m.set_fader_port(ch, cc, p)
+    m.move_ext_route((old["usb_channel"], old["usb_cc"]), (ch, cc))
     bank.faders[k]["usb_channel"] = ch
     bank.faders[k]["usb_cc"] = cc
 
@@ -188,23 +186,9 @@ def fader_editor(ctx, col: QVBoxLayout):
                     W.small_button("CCs ascending from here", cc_up, base >= 0 and base + 15 <= 127), stretch_end=True))
     col.addWidget(card)
 
-    card = W.Card("Send to ER-301", Theme.cv)
-    port = m.fader_port(f["usb_channel"], f["usb_cc"])
-
-    def route(on):
-        fx = bank.faders[sel]
-        m.set_fader_port(fx["usb_channel"], fx["usb_cc"], m.first_free_port() if on else None)
-        ctx.changed(True)
-
-    card.add(W.switch_row("Route through the i2c2midi", port is not None, route))
-    if port is not None:
-        def set_port(v):
-            fx = bank.faders[sel]
-            m.set_fader_port(fx["usb_channel"], fx["usb_cc"], v)
-            ctx.changed()
-        card.add(W.row("SC.CV port", W.NumberField(port, 1, 99, set_port)))
-    card.add(W.hint("Needs the 16n on SSH (its USB MIDI goes through the MIDI hub on the SSH host to the i2c2midi). 0–127 → 0–10 V; with 14-bit only the MSB is used for now."))
-    col.addWidget(card)
+    col.addWidget(route_card(ctx, lambda: (bank.faders[sel]["usb_channel"], bank.faders[sel]["usb_cc"]),
+                             "Needs the 16n on SSH (its USB MIDI goes through the MIDI hub on the SSH host to the i2c2midi). "
+                             "With 14-bit only the MSB is used for now."))
 
     card = W.Card("TRS MIDI")
     card.add(W.row("Channel", W.NumberField(f["trs_channel"], 1, 16, lambda v: setf("trs_channel", v))))

@@ -43,23 +43,29 @@ def describe(ctx, ref: tuple) -> List[Source]:
         cc = int(control)
     except ValueError:
         cc = None
-    if kind in ("cc", "trigger") and cc is not None:
-        for i, f in enumerate(ctx.bank.faders):
-            if f["usb_channel"] == ch and f["usb_cc"] == cc:
-                out.append(Source("16n", f"fader {i + 1}", notes.note(NotesStore.fader(i))))
+    note = kind == "note"
+    if kind in ("cc", "trigger", "note") and cc is not None:
+        if not note:
+            for i, f in enumerate(ctx.bank.faders):
+                if f["usb_channel"] == ch and f["usb_cc"] == cc:
+                    out.append(Source("16n", f"fader {i + 1}", notes.note(NotesStore.fader(i))))
+        want = "note" if note else "cc"
         for inp in ctx.pedals.inputs:
             for s in inp["slots"]:
-                if s["on"] and s["kind"] == "cc" and s["number"] == cc and hub_channel(s["channel"], ctx.mapping) == ch:
+                if s["on"] and s["kind"] == want and s["number"] == cc and hub_channel(s["channel"], ctx.mapping) == ch:
                     out.append(Source("MPC-20", f"{pedal_name(inp['input'])} · message {s['slot'] + 1}",
                                       notes.note(NotesStore.pedal(inp["input"], s["slot"]))))
         hits = []
         for si, su in enumerate(ctx.ec4.setups):
             for gi, g in enumerate(su["groups"]):
                 for ei, e in enumerate(g["encoders"]):
-                    if e["type"] == "cc" and e["channel"] == ch and e["number"] == cc:
-                        n = e["name"].strip()
-                        hits.append(Source("EC4", f"{su['name'].strip()} · {g['name'].strip()} · {n or f'enc {ei + 1}'}",
-                                           notes.note(NotesStore.ec4(si, gi, ei))))
+                    n = e["name"].strip()
+                    where = f"{su['name'].strip()} · {g['name'].strip()} · {n or f'enc {ei + 1}'}"
+                    if not note and e["type"] == "cc" and e["channel"] == ch and e["number"] == cc:
+                        hits.append(Source("EC4", where, notes.note(NotesStore.ec4(si, gi, ei))))
+                    pu = e["push"]
+                    if pu["type"] == want and pu["channel"] == ch and pu["number"] == cc:
+                        hits.append(Source("EC4", where + " push", notes.note(NotesStore.ec4_push(si, gi, ei))))
         if hits:
             out.append(hits[0] if len(hits) == 1 else Source("EC4", hits[0].detail + f" +{len(hits) - 1} more", hits[0].note))
     if not out:
@@ -370,9 +376,9 @@ def pitch_lfo_panel(ctx, col: QVBoxLayout):
         def pick(iid):
             cur = m.input_with(role)
             if cur:
-                m.roles[cur.id] = M.OFF
+                m.set_choice(cur, "midi")
             if iid:
-                m.set_role(role, M.INPUT[iid])
+                m.set_choice(M.INPUT[iid], "er_lfo_rate" if role == M.LFO_RATE else "er_lfo_reset")
             ctx.changed(True)
         return pick
 
