@@ -24,7 +24,7 @@ from .model import Mapping
 from .stage import Stage
 from .theme import BOLD, HEAVY, SEMIBOLD, REGULAR, Theme
 
-MODES = [("dualsense", "DualSense"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("er301", "ER-301")]
+MODES = [("dualsense", "DualSense"), ("pi", "Pi"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("er301", "ER-301")]
 ROUTED = ("faderbank", "pedals", "ec4")
 ROUTE_KEY = {"faderbank": "fader16OnPi", "pedals": "pedalsOnPi", "ec4": "ec4OnPi"}
 ICON = Path(__file__).resolve().parent / "icon.png"
@@ -55,6 +55,8 @@ class Main(QMainWindow):
         self.ec4_setup = self.ec4_group = self.ec4_enc = 0
         self.er_port: Optional[str] = None
         self.er_view = "CV"            # which ER-301 ports the matrix shows: CV / TR
+        self.pi_sel = os.environ.get("KONTROLLEUR_PI_SELECT", "mod_slice")   # Pi tab: mod_<module> | src_<device>
+        self.pi_add = {}               # Pi tab: the “Patch a controller” form
         self.mode = os.environ.get("KONTROLLEUR_MODE") or self.s.value("deviceMode", "dualsense")
         if self.mode not in dict(MODES):
             self.mode = "dualsense"
@@ -107,10 +109,11 @@ class Main(QMainWindow):
 
     # ── pages ──
     def _build_pages(self):
-        from .tabs import dualsense, ec4, er301, faderbank, pedals
+        from .tabs import dualsense, ec4, er301, faderbank, pedals, pi
         self.tabs = {}
         specs = {
             "dualsense": (dualsense.ControllerDrawing, ["Control", "Combos", "Overview"], dualsense.build_panel),
+            "pi": (pi.PiDrawing, ["Patch"], pi.build_panel),
             "faderbank": (faderbank.FaderbankDrawing, ["Fader", "Device"], faderbank.build_panel),
             "pedals": (pedals.PedalDrawing, ["Pedal", "Device"], pedals.build_panel),
             "ec4": (ec4.EC4Drawing, ["Encoder", "Push", "Names"], ec4.build_panel),
@@ -315,6 +318,8 @@ class Main(QMainWindow):
             self.load_pedals()
         elif mode == "ec4" and not self.ec4.loaded:
             self.load_ec4_cache()
+        elif mode == "pi" and not self.ec4.loaded:
+            self.load_ec4_cache(quiet=True)      # names of the EC4 controls patched to Pi functions
         self.inspector.rebuild()
 
     def set_route(self, on_ssh: bool):
@@ -337,6 +342,8 @@ class Main(QMainWindow):
             self.load_ec4_cache()
             self.load_routing(quiet=True)
         else:
+            if self.mode == "pi":
+                self.load_ec4_cache(quiet=True)
             self.load_routing()
         snap = os.environ.get("KONTROLLEUR_SNAPSHOT")
         if snap:
@@ -604,7 +611,7 @@ class Main(QMainWindow):
         self.run(fn, done)
 
     # ── EC4 ──
-    def load_ec4_cache(self):
+    def load_ec4_cache(self, quiet: bool = False):
         if self.offline and (Path(self.offline) / "ec4-last.json").exists():
             self.ec4.apply(self._fixture("ec4-last.json"))
             self.ec4.received_at = dt.datetime.fromtimestamp((Path(self.offline) / "ec4-last.json").stat().st_mtime)
@@ -613,6 +620,10 @@ class Main(QMainWindow):
             ok = store.load_ec4_cache(self.ec4)
         if ok:
             self.synced_ec4 = self.ec4.fingerprint
+        if quiet:
+            self.refresh_all()
+            return
+        if ok:
             when = self.ec4.received_at.strftime("%-d %b %Y at %H:%M") if self.ec4.received_at else "earlier"
             self.set_status("info", f"Showing the EC4 setups received {when}. Press “Receive” to fetch them again.")
         else:

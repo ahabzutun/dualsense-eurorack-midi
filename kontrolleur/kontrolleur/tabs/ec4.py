@@ -11,7 +11,7 @@ from ..devices import EC4_MODES, EC4_PUSH_TYPES, EC4_SCALES, EC4_TYPES, ec4_high
 from ..stage import GrowingDrawing
 from ..store import NotesStore
 from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
-from .common import route_card, route_pill
+from .common import pi_card, pi_pill, route_card, route_pill
 from .dualsense import _op
 
 LCD = QColor.fromRgbF(0.55, 0.95, 0.75)
@@ -83,8 +83,13 @@ class EC4Drawing(GrowingDrawing):
         extra = []
         if pill is not None:
             extra.append(pill)
-        if push_pill is not None:
-            extra += [D.Text("⏎", Theme.font(9, BOLD, "mono"), Theme.dim), push_pill]
+        pp = pi_pill(m, "ec4", enc["channel"], "cc", enc["number"], 9) if enc["type"] == "cc" else None
+        if pp is not None:
+            extra.append(pp)
+        ppp = pi_pill(m, "ec4", pu["channel"], pu["type"], pu["number"], 9) if pu["type"] in ("cc", "note") else None
+        if push_pill is not None or ppp is not None:
+            extra.append(D.Text("⏎", Theme.font(9, BOLD, "mono"), Theme.dim))
+            extra += [x for x in (push_pill, ppp) if x is not None]
         if not extra and push and not note:
             extra.append(D.Text(push, Theme.font(9, BOLD, "mono"), Theme.dim))
         if note:
@@ -139,6 +144,7 @@ def move_route(ctx, k: int, ch: int, num: int):
     old = _encs(ctx)[k]
     if old["type"] == "cc":
         ctx.mapping.move_ext_route((old["channel"], old["number"]), (ch, num))
+        ctx.mapping.move_pi("ec4", "cc", (old["channel"], old["number"]), (ch, num))
 
 
 def set_ch(ctx, k, ch):
@@ -187,6 +193,8 @@ def encoder_editor(ctx, col: QVBoxLayout):
         col.addWidget(route_card(ctx, lambda: (_encs(ctx)[sel]["channel"], _encs(ctx)[sel]["number"]),
                                  "Needs the EC4 on SSH (the MIDI hub on the SSH host passes its MIDI to the i2c2midi). The route "
                                  "is stored with the ER-301 routing, so it applies in every setup that sends this channel + CC."))
+        col.addWidget(pi_card(ctx, "ec4", lambda: (_encs(ctx)[sel]["channel"], "cc", _encs(ctx)[sel]["number"]),
+                              "Needs the EC4 on SSH."))
 
     def ch_all():
         ch = _encs(ctx)[sel]["channel"]
@@ -216,8 +224,10 @@ def push_editor(ctx, col: QVBoxLayout):
         if k in ("channel", "number") and p["type"] in ("cc", "note"):        # the ER-301 route goes along
             new = (v, p["number"]) if k == "channel" else (p["channel"], v)
             ctx.mapping.move_ext_route((p["channel"], p["number"]), new, p["type"] == "note")
+            ctx.mapping.move_pi("ec4", p["type"], (p["channel"], p["number"]), new)
         if k == "type" and p["type"] in ("cc", "note") and v != p["type"]:
             ctx.mapping.set_ext_route(p["channel"], p["number"], None, note=p["type"] == "note")
+            ctx.mapping.drop_pi("ec4", p["channel"], p["type"], p["number"])
         p[k] = v
         ctx.changed(rebuild)
 
@@ -243,6 +253,7 @@ def push_editor(ctx, col: QVBoxLayout):
                 if p["type"] == "cc" else "The trigger is high while the push button is held.")
         col.addWidget(route_card(ctx, lambda: (p["channel"], p["number"]), hint + " Needs the EC4 on SSH.",
                                  note=p["type"] == "note", title="Push → ER-301"))
+        col.addWidget(pi_card(ctx, "ec4", lambda: (p["channel"], p["type"], p["number"]), "Needs the EC4 on SSH."))
 
 
 def names_editor(ctx, col: QVBoxLayout):

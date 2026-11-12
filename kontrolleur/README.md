@@ -6,6 +6,7 @@ Raspberry Pi OS) and **macOS**; Python + Qt (PySide6).
 | Tab | Device | How it talks to it |
 |---|---|---|
 | DualSense | PS5 controller on the SSH host | `er301_routes.py` + `controls.py` over SSH (`scripts/er301_routes_tool.py`) |
+| Pi | the Pi's own functions (Slice-Selekteur, Loop-Rekordeur, LFO, DualSense extras) | patched from the DualSense, 16n, pedals or EC4: `controls.py` (`MIDI_INPUTS`) + `er301_routes.py` |
 | 16n | 16n faderbank (fork with curves) | `scripts/fader16_tool.py`, over SSH or on a cable to this computer |
 | Pedals | DOREMiDi MPC-20 | `scripts/mpc20_tool.py`, over SSH or on a cable |
 | EC4 | Faderfox EC4 | `scripts/ec4_tool.py`, over SSH or on a cable (transfers are started on the EC4) |

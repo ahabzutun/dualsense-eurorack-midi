@@ -389,22 +389,39 @@ def lfo_card(ctx) -> W.Card:
 
     card = W.Card("Trigger LFO", Theme.special)
 
+    from .pi import source_label
+
     def lfo_pick(role):
+        attr = "lfo_rate_src" if role == M.LFO_RATE else "lfo_reset_src"
+
         def pick(iid):
+            if iid == "ext":
+                return
             cur = m.input_with(role)
             if cur:
                 m.set_choice(cur, "midi")
+            setattr(m, attr, None)
             if iid:
                 m.set_choice(M.INPUT[iid], "er_lfo_rate" if role == M.LFO_RATE else "er_lfo_reset")
             ctx.changed(True)
         return pick
 
-    rate = m.input_with(M.LFO_RATE)
-    reset = m.input_with(M.LFO_RESET)
-    card.add(W.row("Rate control", W.Picker([("", "none (LFO off)")] + [(i.id, M.input_title(i)) for i in M.ALL_INPUTS if M.LFO_RATE in i.roles],
-                                            rate.id if rate else "", lfo_pick(M.LFO_RATE), 190)))
-    card.add(W.row("Phase reset", W.Picker([("", "none")] + [(i.id, M.input_title(i)) for i in M.ALL_INPUTS if M.LFO_RESET in i.roles],
-                                           reset.id if reset else "", lfo_pick(M.LFO_RESET), 190)))
+    def opts(role, none_text):
+        src = m.lfo_rate_src if role == M.LFO_RATE else m.lfo_reset_src
+        o = [("", none_text)] + [(i.id, "DualSense · " + M.input_title(i)) for i in M.ALL_INPUTS if role in i.roles]
+        if src:
+            o.append(("ext", f"{M.PI_DEVICE_TITLE[src[0]]} · {source_label(ctx, src[0], src[1], 'cc', src[2])}"))
+        cur = m.input_with(role)
+        return o, ("ext" if src else (cur.id if cur else ""))
+
+    o, cur = opts(M.LFO_RATE, "none (LFO off)")
+    card.add(W.row("Rate control", W.Picker(o, cur, lfo_pick(M.LFO_RATE), 190)))
+    o, cur = opts(M.LFO_RESET, "none")
+    card.add(W.row("Phase reset", W.Picker(o, cur, lfo_pick(M.LFO_RESET), 190)))
+    card.add(W.hint(f"Listens on MIDI channel {m.lfo_channel}. A 16n fader, a pedal or an EC4 control: Pi tab → LFO → Patch a controller."))
+    lp = m.lfo_problem()
+    if lp:
+        card.add(W.label("⚠︎ " + lp, 11, REGULAR, "ui", Theme.trig, wrap=True))
     card.add(W.divider())
     card.add(W.row("Output", W.Segmented([(True, "SC.CV"), (False, "SC.TR")], m.triggers_as_cv,
                                          lambda v: seta("triggers_as_cv", v, True))))

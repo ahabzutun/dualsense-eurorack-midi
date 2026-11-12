@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional, Tuple
 
+from PySide6.QtGui import QColor
+
 from .. import draw as D
 from .. import model as M
 from .. import widgets as W
@@ -54,4 +56,45 @@ def route_card(ctx, where: Callable[[], Tuple[int, int]], hint: str, note: bool 
             card.add(W.hint("High while the value is 64 or more" + (" (10 V on an SC.CV port)." if m.triggers_as_cv else ".")
                             + " Triggers go to " + m.trigger_port_name + " ports: ER-301 tab → Pitch & LFO → Output."))
     card.add(W.hint(hint))
+    return card
+
+
+# ── Pi functions (config/controls.py MIDI_INPUTS) ──────────────────────────────────────────────
+
+def pi_pill(m: M.Mapping, device: str, ch: int, kind: str, num: int, size: float = 10,
+            max_w: Optional[float] = None) -> Optional[D.Item]:
+    """'SECTION' / 'REC' / 'LFO RATE' on the drawing when the control runs a Pi function, or None."""
+    from .pi import PORT_OF, module_color, token
+    f = m.pi_fn(device, ch, kind, num)
+    if f == "none":
+        return None
+    col = module_color(PORT_OF[f][0]) if f in PORT_OF else Theme.function
+    t = D.Text("π " + token(f), Theme.font(size, BOLD, "mono"), col, max_w=None if max_w is None else max_w - 10, min_scale=0.6)
+    fill = QColor(col)
+    fill.setAlphaF(0.14)
+    return D.Pill(t, 5, 1.5, fill)
+
+
+def pi_card(ctx, device: str, where: Callable[[], Tuple[int, str, int]], hint: str = "") -> W.Card:
+    """Picker for the Pi function of one control. `where()` gives (channel as sent, 'cc' | 'note', number)."""
+    from .pi import func_title
+    m = ctx.mapping
+    ch, kind, num = where()
+    cur = m.pi_fn(device, ch, kind, num)
+    card = W.Card("Pi function", Theme.function if cur != "none" else None)
+
+    def pick(f):
+        c, k, n = where()
+        m.set_pi_fn(device, c, k, n, f)
+        ctx.changed(True)
+
+    card.add(W.Picker([(f, func_title(f)) for f in m.pi_choices(kind)], cur, pick))
+    if cur in M.INPUT_ACTIONS and kind == "cc":
+        card.add(W.hint("Fires when the value goes to 64 or above."))
+    elif cur in ("er_lfo_rate", "er_lfo_reset"):
+        card.add(W.hint("Goes to the i2c2midi's trigger LFO (ER-301 tab → Pitch & LFO)."))
+    card.add(W.hint((hint + " " if hint else "") + "The DualSense script on the Pi runs it in addition to the MIDI going on to the "
+                    "i2c2midi. All patches: Pi tab."))
+    if not m.controls_on_pi:
+        card.add(W.hint("⚠︎ The SSH host doesn't have the button functions installed yet."))
     return card

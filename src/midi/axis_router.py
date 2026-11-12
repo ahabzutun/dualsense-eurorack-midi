@@ -34,6 +34,10 @@ class AxisRouter:
         if f == "midi":
             send_midi()
             return
+        self.apply(f, cc_val, axis)
+
+    def apply(self, f, cc_val, axis=""):
+        """Run a continuous function with a value 0-127 (also used for 16n / EC4 / pedal CCs)."""
         c = self.c
         if f == "slice_fine":
             c.update_fine_slice(int(cc_val * 255 / 127))

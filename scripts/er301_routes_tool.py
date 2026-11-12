@@ -48,7 +48,8 @@ def export():
                 c = controls_config.load()
                 result["controls"] = {"buttons": c["buttons"], "chords": [list(x) for x in c["chords"]],
                                       "dpad_horizontal": c["dpad_horizontal"], "left_stick_x": c["left_stick_x"],
-                                      "axes": c.get("axes")}
+                                      "axes": c.get("axes"),
+                                      "midi_inputs": [list(x) for x in c.get("midi_inputs", [])]}
             except controls_config.ControlsError as e:
                 result["controls_error"] = str(e)
         cfg = er301_config._load(ROUTES, "mapper_routes")

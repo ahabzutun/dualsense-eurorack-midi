@@ -66,6 +66,21 @@ AXIS_FUNCTIONS = {
 }
 STEP_FUNCTIONS = ("midi", "none", "slice_section", "slice_block")
 
+# MIDI from the other controllers -> the same functions (Pi tab in Kontrolleur).
+#   MIDI_INPUTS = [(device, channel, "cc" | "note", number, function), ...]
+# device: a key of INPUT_DEVICES. Their MIDI still reaches the i2c2midi as before; these entries
+# only add a Pi function on top. A CC can drive a continuous function (its value 0-127) or an
+# action; an action fires when the value goes from below 64 to 64 or above (note on = 127,
+# note off = 0), so footswitches, EC4 push buttons and notes work as buttons.
+INPUT_DEVICES = {               # device -> ALSA port name contains one of these
+    "16n":   ("16n",),
+    "pedal": ("DOREMiDi", "CH345"),
+    "ec4":   ("EC4",),
+}
+CONTINUOUS_FUNCTIONS = tuple(f for f in AXIS_FUNCTIONS if f not in ("midi", "none"))
+INPUT_ACTIONS = tuple(a for a in ACTIONS if a not in ("midi", "none"))
+INPUT_FUNCTIONS = CONTINUOUS_FUNCTIONS + INPUT_ACTIONS
+
 DEFAULTS = {
     "buttons": {
         "cross": {"tap": "midi", "hold": None}, "circle": {"tap": "midi", "hold": None},
@@ -83,6 +98,7 @@ DEFAULTS = {
     "axes": {"left_x": "slice_fine", "left_y": "midi", "right_x": "midi", "right_y": "midi", "l2": "midi", "r2": "midi",
              "touch_x": "loop_scrub", "touch_y": "quantize_grid", "dpad_x": "slice_section", "dpad_y": "midi",
              "tilt_x": "midi", "tilt_y": "midi", "twist": "midi"},
+    "midi_inputs": [],
 }
 
 
@@ -104,11 +120,32 @@ def _action(value, where, allow_midi=True):
     return value
 
 
+def _midi_inputs(raw):
+    _check(isinstance(raw, (list, tuple)), "MIDI_INPUTS must be a list")
+    out, seen = [], set()
+    for e in raw:
+        _check(isinstance(e, (tuple, list)) and len(e) == 5,
+               f"MIDI_INPUTS: {e!r} must be (device, channel, 'cc' | 'note', number, function)")
+        dev, ch, kind, num, fn = e
+        _check(dev in INPUT_DEVICES, f"MIDI_INPUTS {e!r}: unknown device {dev!r} (known: {', '.join(INPUT_DEVICES)})")
+        _check(isinstance(ch, int) and 1 <= ch <= 16, f"MIDI_INPUTS {e!r}: channel must be 1-16")
+        _check(kind in ("cc", "note"), f"MIDI_INPUTS {e!r}: kind must be 'cc' or 'note'")
+        _check(isinstance(num, int) and 0 <= num <= 127, f"MIDI_INPUTS {e!r}: number must be 0-127")
+        _check(fn in INPUT_FUNCTIONS, f"MIDI_INPUTS {e!r}: unknown function {fn!r} (known: {', '.join(INPUT_FUNCTIONS)})")
+        _check(kind == "cc" or fn in INPUT_ACTIONS, f"MIDI_INPUTS {e!r}: a note can only trigger an action")
+        key = (dev, ch, kind, num)
+        _check(key not in seen, f"MIDI_INPUTS: {dev} ch {ch} {kind} {num} is used twice")
+        seen.add(key)
+        out.append((dev, ch, kind, num, fn))
+    return out
+
+
 def load(path=CONTROLS_PATH):
     """Return the checked controls as a dict (see DEFAULTS). Raises ControlsError."""
     if not os.path.exists(path):
         d = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
         d["buttons"] = {n: dict(v) for n, v in DEFAULTS["buttons"].items()}
+        d["midi_inputs"] = []
         return d
     try:
         spec = importlib.util.spec_from_file_location("controls_live", path)
@@ -157,7 +194,9 @@ def load(path=CONTROLS_PATH):
             axes[name] = fn
     dh = "slice_section" if axes["dpad_x"] == "slice_section" else "midi"
     lx = "slice_fine" if axes["left_x"] == "slice_fine" else "midi"
-    return {"buttons": buttons, "chords": chords, "dpad_horizontal": dh, "left_stick_x": lx, "axes": axes}
+    midi_inputs = _midi_inputs(getattr(mod, "MIDI_INPUTS", []) or [])
+    return {"buttons": buttons, "chords": chords, "dpad_horizontal": dh, "left_stick_x": lx, "axes": axes,
+            "midi_inputs": midi_inputs}
 
 
 def mtime(path=CONTROLS_PATH):

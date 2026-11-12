@@ -35,3 +35,10 @@ CHORDS = [
 
 DPAD_HORIZONTAL = 'slice_section'   # 'slice_section' (16-slice sections) or 'midi' (CC steps)
 LEFT_STICK_X = 'slice_fine'         # 'slice_fine' (slice within the section) or 'midi' (CC)
+
+# MIDI from the other controllers -> the same functions: (device, channel, 'cc' | 'note', number, function).
+# device: '16n', 'pedal' (MPC-20 via DOREMiDi) or 'ec4'; channel as the device sends it. A CC drives a
+# continuous function with its value, or fires an action when it goes to 64 or above (notes: note on).
+# Example: ('16n', 16, 'cc', 82, 'slice_section'), ('pedal', 2, 'cc', 109, 'loop_record')
+MIDI_INPUTS = [
+]

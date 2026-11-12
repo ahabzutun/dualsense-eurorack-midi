@@ -12,7 +12,7 @@ from ..devices import (PEDAL_LABEL, PEDAL_SHORT, hub_channel, pedal_choices, ped
 from ..stage import Drawing
 from ..store import NotesStore
 from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
-from .common import route_card, route_pill
+from .common import pi_card, pi_pill, route_card, route_pill
 from .dualsense import _op
 
 TYPE_NAME = {"expression": "Expression pedal", "switch": "Switch pedal", "hihat": "Hi-hat pedal"}
@@ -96,6 +96,9 @@ class PedalDrawing(Drawing):
                      D.Text(f"{PEDAL_SHORT.get(k, k)}{s['number']}" if pedal_has_number(k) else PEDAL_SHORT.get(k, k), f, Theme.ink)]
             if pill is not None:
                 items.append(pill)
+            pp = pi_pill(ctx.mapping, "pedal", s["channel"], k, s["number"], 10) if k in ("cc", "note") else None
+            if pp is not None:
+                items.append(pp)
             n = ctx.notes.note(NotesStore.pedal(i, s["slot"]))
             if n:
                 items.append(D.note_badge(n, 9, 80 * Theme.grow))
@@ -229,6 +232,7 @@ def slot_card(ctx, input_i: int, slot: int):
     def set_kind(k):
         if s["kind"] in ("cc", "note") and k != s["kind"]:
             m.set_ext_route(hub_channel(s["channel"], m), s["number"], None, note=s["kind"] == "note")
+            m.drop_pi("pedal", s["channel"], s["kind"], s["number"])
         s["kind"] = k
         if k == "pitchbend":
             s["start"], s["end"] = 0, 16383
@@ -241,6 +245,7 @@ def slot_card(ctx, input_i: int, slot: int):
     def remove():
         if s["kind"] in ("cc", "note"):
             m.set_ext_route(hub_channel(s["channel"], m), s["number"], None, note=s["kind"] == "note")
+            m.drop_pi("pedal", s["channel"], s["kind"], s["number"])
         s["on"] = False
         ctx.changed(True)
 
@@ -253,6 +258,7 @@ def slot_card(ctx, input_i: int, slot: int):
         """Changing channel / CC moves an existing ER-301 route along with it."""
         if s["kind"] in ("cc", "note"):
             m.move_ext_route((hub_channel(s["channel"], m), s["number"]), (hub_channel(channel, m), number), s["kind"] == "note")
+            m.move_pi("pedal", s["kind"], (s["channel"], s["number"]), (channel, number))
         s["channel"], s["number"] = channel, number
         ctx.changed()
 
@@ -281,5 +287,6 @@ def slot_card(ctx, input_i: int, slot: int):
         v.addWidget(card)
         v.addWidget(route_card(ctx, lambda: (hub_channel(s["channel"], m), s["number"]),
                                hint, note=kind == "note", title=f"Message {slot + 1} → ER-301"))
+        v.addWidget(pi_card(ctx, "pedal", lambda: (s["channel"], s["kind"], s["number"])))
         return wrap
     return card

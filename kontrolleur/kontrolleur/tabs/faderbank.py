@@ -11,7 +11,7 @@ from ..devices import CURVE_PRESETS, curve_apply, curve_name
 from ..stage import GrowingDrawing
 from ..store import NotesStore
 from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
-from .common import route_card, route_pill
+from .common import pi_card, pi_pill, route_card, route_pill
 from .dualsense import _op
 
 
@@ -58,10 +58,13 @@ class FaderbankDrawing(GrowingDrawing):
             D.Text(f"ch{f['usb_channel']}", Theme.font(10, SEMIBOLD, "mono"), Theme.dim, max_w=w, min_scale=0.7),
             D.Text(f"CC{f['usb_cc']}{'ʰ' if f['usb_14bit'] else ''}", Theme.font(11, BOLD, "mono"), Theme.ink, max_w=w, min_scale=0.7),
         ]
+        pp = pi_pill(ctx.mapping, "16n", f["usb_channel"], "cc", f["usb_cc"], 9.5, w)
         if pill is not None:
             small.append(pill)
-        else:
+        elif pp is None:
             small.append(D.Text("—", Theme.font(10, BOLD, "mono"), Theme.dim))
+        if pp is not None:
+            small.append(pp)
         n = ctx.notes.note(NotesStore.fader(i))
         if n:
             small.append(D.note_badge(n, 8.5, w, 2))
@@ -109,6 +112,7 @@ def set_usb(ctx, k: int, ch: int, cc: int):
     bank, m = ctx.bank, ctx.mapping
     old = bank.faders[k]
     m.move_ext_route((old["usb_channel"], old["usb_cc"]), (ch, cc))
+    m.move_pi("16n", "cc", (old["usb_channel"], old["usb_cc"]), (ch, cc))
     bank.faders[k]["usb_channel"] = ch
     bank.faders[k]["usb_cc"] = cc
 
@@ -189,6 +193,8 @@ def fader_editor(ctx, col: QVBoxLayout):
     col.addWidget(route_card(ctx, lambda: (bank.faders[sel]["usb_channel"], bank.faders[sel]["usb_cc"]),
                              "Needs the 16n on SSH (its USB MIDI goes through the MIDI hub on the SSH host to the i2c2midi). "
                              "With 14-bit only the MSB is used for now."))
+    col.addWidget(pi_card(ctx, "16n", lambda: (bank.faders[sel]["usb_channel"], "cc", bank.faders[sel]["usb_cc"]),
+                          "Needs the 16n on SSH."))
 
     card = W.Card("TRS MIDI")
     card.add(W.row("Channel", W.NumberField(f["trs_channel"], 1, 16, lambda v: setf("trs_channel", v))))

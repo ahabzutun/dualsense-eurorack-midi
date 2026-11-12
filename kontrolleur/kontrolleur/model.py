@@ -77,6 +77,44 @@ ER_ROLE = {"er_cv": CV, "er_trigger": TRIGGER, "er_lfo_rate": LFO_RATE, "er_lfo_
 ROLE_ER = {v: k for k, v in ER_ROLE.items()}
 
 
+# ── MIDI from the other controllers → Pi functions (config/controls.py MIDI_INPUTS) ──────────────
+
+PI_DEVICES = [("16n", "16n"), ("pedal", "Pedals"), ("ec4", "EC4")]
+PI_DEVICE_TITLE = dict(PI_DEVICES)
+CONT_FUNCS = ["slice_fine", "slice_section", "slice_block", "loop_scrub", "quantize_grid"]
+INPUT_ACTIONS = [a for a in ACTIONS if a not in ("none", "midi")]
+LFO_FUNCS = ["er_lfo_rate", "er_lfo_reset"]
+
+
+@dataclass
+class MidiInput:
+    device: str          # '16n' | 'pedal' | 'ec4'
+    channel: int         # as the device sends it (before the MIDI hub)
+    kind: str            # 'cc' | 'note'
+    number: int
+    function: str        # CONT_FUNCS or INPUT_ACTIONS
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+
+    @property
+    def key(self) -> tuple:
+        return (self.device, self.channel, self.kind, self.number)
+
+
+def _src_text(src) -> str:
+    return f"{src[0]}:{src[1]}"
+
+
+def _src_parse(t, ch: int, num: int) -> Optional[tuple]:
+    """'16n:16' → ('16n', 16, num); unknown / missing: a 16n on that channel."""
+    try:
+        dev, c = str(t).split(":")
+        if dev in PI_DEVICE_TITLE:
+            return (dev, int(c), num)
+    except (ValueError, TypeError):
+        pass
+    return ("16n", ch, num)
+
+
 def fires_on_release(a: str) -> bool:
     return a in ("loop_record", "loop_play", "loop_clear")
 
@@ -297,6 +335,83 @@ class Mapping:
         self.funcs: Dict[str, ButtonFunc] = default_funcs()
         self.chords: List[Chord] = default_chords()
         self.axes: Dict[str, str] = dict(DEFAULT_AXES)
+        self.midi_inputs: List[MidiInput] = []
+        self.lfo_rate_src: Optional[tuple] = None     # (device, channel as sent, cc) when the rate comes from another device
+        self.lfo_reset_src: Optional[tuple] = None
+
+    # ── other controllers → Pi functions ──
+    def hub_ch(self, device: str, ch: int) -> int:
+        """The channel the i2c2midi sees: the MIDI hub moves pedal channel 1 to the DualSense channel."""
+        return self.channel if device == "pedal" and ch == 1 else ch
+
+    def pi_choices(self, kind: str) -> List[str]:
+        if kind == "note":
+            return ["none"] + INPUT_ACTIONS
+        return ["none"] + CONT_FUNCS + INPUT_ACTIONS + LFO_FUNCS
+
+    def pi_fn(self, device: str, ch: int, kind: str, num: int) -> str:
+        key = (device, ch, kind, num)
+        for x in self.midi_inputs:
+            if x.key == key:
+                return x.function
+        if kind == "cc":
+            if self.lfo_rate_src == (device, ch, num):
+                return "er_lfo_rate"
+            if self.lfo_reset_src == (device, ch, num):
+                return "er_lfo_reset"
+        return "none"
+
+    def set_pi_fn(self, device: str, ch: int, kind: str, num: int, f: str):
+        key = (device, ch, kind, num)
+        self.midi_inputs = [x for x in self.midi_inputs if x.key != key]
+        if self.lfo_rate_src == (device, ch, num):
+            self.lfo_rate_src = None
+        if self.lfo_reset_src == (device, ch, num):
+            self.lfo_reset_src = None
+        if f in LFO_FUNCS and kind == "cc":
+            role = LFO_RATE if f == "er_lfo_rate" else LFO_RESET
+            cur = self.input_with(role)
+            if cur is not None:
+                self.set_choice(cur, "midi")
+            if f == "er_lfo_rate":
+                self.lfo_rate_src = (device, ch, num)
+            else:
+                self.lfo_reset_src = (device, ch, num)
+        elif f in CONT_FUNCS + INPUT_ACTIONS and (kind == "cc" or f in INPUT_ACTIONS):
+            self.midi_inputs.append(MidiInput(device, ch, kind, num, f))
+
+    def move_pi(self, device: str, kind: str, old: Tuple[int, int], new: Tuple[int, int]):
+        """A device control changed channel / number: its Pi function goes along."""
+        if old == new:
+            return
+        f = self.pi_fn(device, old[0], kind, old[1])
+        if f == "none" or self.pi_fn(device, new[0], kind, new[1]) != "none":
+            return
+        self.set_pi_fn(device, old[0], kind, old[1], "none")
+        self.set_pi_fn(device, new[0], kind, new[1], f)
+
+    def drop_pi(self, device: str, ch: int, kind: str, num: int):
+        self.set_pi_fn(device, ch, kind, num, "none")
+
+    # ── trigger LFO ──
+    @property
+    def lfo_on(self) -> bool:
+        return self.lfo_rate_src is not None or self.input_with(LFO_RATE) is not None
+
+    @property
+    def lfo_channel(self) -> int:
+        s = self.lfo_rate_src
+        return self.hub_ch(s[0], s[1]) if s else self.channel
+
+    def lfo_problem(self) -> Optional[str]:
+        reset = self.lfo_reset_src
+        if reset is None and self.input_with(LFO_RESET) is not None and self.lfo_channel != self.channel:
+            return (f"LFO: the phase reset is on the DualSense (channel {self.channel}), the rate on channel {self.lfo_channel}. "
+                    "The i2c2midi listens to both on one channel.")
+        if reset is not None and self.lfo_on and self.hub_ch(reset[0], reset[1]) != self.lfo_channel:
+            return (f"LFO: the phase reset comes on channel {self.hub_ch(reset[0], reset[1])}, the rate on channel "
+                    f"{self.lfo_channel}. The i2c2midi listens to both on one channel.")
+        return None
 
     # ── functions ──
     def fn(self, button: str) -> ButtonFunc:
@@ -388,6 +503,10 @@ class Mapping:
         return self.ports.get(i.id, 1)
 
     def set_role(self, r: str, i: InputDef):
+        if r == LFO_RATE:
+            self.lfo_rate_src = None
+        elif r == LFO_RESET:
+            self.lfo_reset_src = None
         if role_exclusive(r):
             for k, v in list(self.roles.items()):
                 if v == r:
@@ -493,7 +612,7 @@ class Mapping:
                 add(tk, self.port(i), who + " (trigger)", ("dualsense", who, i.id, True))
         if self.pitch_enabled:
             add("CV", self.pitch_port, "Pitch V/Oct", ("builtin", "Pitch V/Oct"))
-        if self.input_with(LFO_RATE) is not None:
+        if self.lfo_on:
             add(tk, self.lfo_port, "LFO", ("builtin", "LFO"))
         for e in self.externals:
             what = "note" if e.kind == EXT_NOTE else ("NRPN" if e.kind == EXT_NRPN else "CC")
@@ -512,6 +631,7 @@ class Mapping:
             self.long_press = float(e["long_press"])
         self.channel = e.get("channel") or 2
         self.roles, self.ports, self.externals = {}, {}, []
+        self.lfo_rate_src = self.lfo_reset_src = None
 
         def resolve(c, kind):
             if isinstance(c, int):
@@ -562,10 +682,18 @@ class Mapping:
             self.lfo_min_hz = float(lf["min_hz"]) if lf.get("min_hz") is not None else 0.25
             self.lfo_max_hz = float(lf["max_hz"]) if lf.get("max_hz") is not None else 40.0
             self.lfo_pulse_ms = lf.get("pulse_ms") if lf.get("pulse_ms") is not None else 5
-            if lf.get("rate_control") is not None:
-                claim({"channel": self.channel, "control": lf["rate_control"], "port": 0}, "cc", LFO_RATE)
-            if lf.get("reset_control") is not None:
-                claim({"channel": self.channel, "control": lf["reset_control"], "port": 0}, "cc", LFO_RESET)
+            lch = lf.get("channel") or self.channel
+            for k, role, src_key, attr in (("rate_control", LFO_RATE, "source", "lfo_rate_src"),
+                                           ("reset_control", LFO_RESET, "reset_source", "lfo_reset_src")):
+                c = lf.get(k)
+                if c is None:
+                    continue
+                if lf.get(src_key) is None and lch == self.channel and \
+                        claim({"channel": self.channel, "control": c, "port": 0}, "cc", role):
+                    continue
+                num = resolve(c, "cc")
+                if num is not None:
+                    setattr(self, attr, _src_parse(lf.get(src_key), lch, num))
         self.triggers_as_cv = e.get("triggers_as_cv", True) if e.get("triggers_as_cv") is not None else True
 
         c = e.get("controls")
@@ -585,8 +713,13 @@ class Mapping:
                 if k in axes and v in AXIS_FUNCS:
                     axes[k] = v
             self.axes = axes
+            self.midi_inputs = []
+            for x in c.get("midi_inputs") or []:
+                if len(x) == 5 and x[0] in PI_DEVICE_TITLE and x[2] in ("cc", "note") and x[4] in CONT_FUNCS + INPUT_ACTIONS:
+                    self.midi_inputs.append(MidiInput(x[0], int(x[1]), x[2], int(x[3]), x[4]))
         else:
             self.controls_on_pi = e.get("controls_error") is not None
+            self.midi_inputs = []
             self.funcs, self.chords = default_funcs(), default_chords()
             self.axes = dict(DEFAULT_AXES)
 
@@ -680,10 +813,18 @@ class Mapping:
 
         s += "# Trigger LFO: rate control 0 = stopped, 1–127 = min_hz … max_hz (exponential).\n"
         rate = self.input_with(LFO_RATE)
-        if rate:
+        if rate or self.lfo_rate_src:
             reset = self.input_with(LFO_RESET)
-            rs = self._ctl(reset) if reset else "None"
-            s += f"LFO = dict(port={self.lfo_port}, rate_control={self._ctl(rate)}, reset_control={rs},\n"
+            rs = str(self.lfo_reset_src[2]) if self.lfo_reset_src else (self._ctl(reset) if reset else "None")
+            rc = str(self.lfo_rate_src[2]) if self.lfo_rate_src else self._ctl(rate)
+            s += f"LFO = dict(port={self.lfo_port}, rate_control={rc}, reset_control={rs},\n"
+            if self.lfo_rate_src or self.lfo_reset_src:
+                extra = [f"channel={self.lfo_channel}"]
+                if self.lfo_rate_src:
+                    extra.append(f"source='{_src_text(self.lfo_rate_src)}'")
+                if self.lfo_reset_src:
+                    extra.append(f"reset_source='{_src_text(self.lfo_reset_src)}'")
+                s += "           " + ", ".join(extra) + ",   # rate / reset from another controller\n"
             s += f"           min_hz={'%g' % self.lfo_min_hz}, max_hz={'%g' % self.lfo_max_hz}, pulse_ms={self.lfo_pulse_ms})\n\n"
         else:
             s += "LFO = None\n\n"
@@ -733,6 +874,13 @@ class Mapping:
         s += "# For DualSense scripts from before AXES:\n"
         s += f"DPAD_HORIZONTAL = '{self.dpad_horizontal}'\n"
         s += f"LEFT_STICK_X = '{self.left_stick_x}'\n"
+        s += ("\n# MIDI from the other controllers → the same functions: (device, channel, 'cc' | 'note', number, function).\n"
+              "# device: '16n', 'pedal' (MPC-20 via DOREMiDi) or 'ec4'; channel as the device sends it. A CC drives a\n"
+              "# continuous function with its value, or fires an action when it goes to 64 or above (notes: note on).\n"
+              "MIDI_INPUTS = [\n")
+        for x in sorted(self.midi_inputs, key=lambda x: ([d for d, _ in PI_DEVICES].index(x.device), x.channel, x.kind, x.number)):
+            s += f"    ('{x.device}', {x.channel}, '{x.kind}', {x.number}, '{x.function}'),\n"
+        s += "]\n"
         return s
 
     # ── CC → CV routes of other devices (16n faders, pedals, EC4 encoders) ──
@@ -795,6 +943,9 @@ class Mapping:
         p = []
         if self.lfo_min_hz < 0.01 or self.lfo_max_hz > 163.83 or self.lfo_min_hz > self.lfo_max_hz:
             p.append("LFO range must be 0.01 ≤ min ≤ max ≤ 163.83 Hz.")
+        lp = self.lfo_problem()
+        if lp:
+            p.append(lp)
         for c in self.chords:
             if c.a == c.b:
                 p.append(f"Combo {button_label(c.a)} + {button_label(c.b)} needs two different buttons.")
@@ -824,6 +975,9 @@ class Mapping:
             "chords": [{"a": c.a, "b": c.b, "action": c.action} for c in self.chords],
             "dpadHorizontal": self.dpad_horizontal, "leftStickX": self.left_stick_x, "longPress": self.long_press,
             "axes": dict(self.axes),
+            "midiInputs": [[x.device, x.channel, x.kind, x.number, x.function] for x in self.midi_inputs],
+            "lfoRateSrc": list(self.lfo_rate_src) if self.lfo_rate_src else None,
+            "lfoResetSrc": list(self.lfo_reset_src) if self.lfo_reset_src else None,
         }
 
     def restore(self, s: dict):
@@ -849,3 +1003,7 @@ class Mapping:
                 axes[k] = v
         self.axes = axes
         self.long_press = float(s["longPress"])
+        self.midi_inputs = [MidiInput(x[0], x[1], x[2], x[3], x[4]) for x in s.get("midiInputs") or []
+                            if len(x) == 5 and x[0] in PI_DEVICE_TITLE and x[4] in CONT_FUNCS + INPUT_ACTIONS]
+        self.lfo_rate_src = tuple(s["lfoRateSrc"]) if s.get("lfoRateSrc") else None
+        self.lfo_reset_src = tuple(s["lfoResetSrc"]) if s.get("lfoResetSrc") else None

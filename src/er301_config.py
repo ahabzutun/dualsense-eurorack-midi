@@ -126,7 +126,9 @@ def build(routes_path=ROUTES_PATH, mappings_path=MAPPINGS_PATH):
         _check(1 <= lo <= hi <= 16383, "LFO needs 0.01 ≤ min_hz ≤ max_hz ≤ 163.83")
         pulse = lfo.get("pulse_ms", 5)
         _check(isinstance(pulse, int) and 1 <= pulse <= 127, "LFO pulse_ms must be 1–127")
-        records.append([0x21, ch, rate, rstn, port, lo >> 7, lo & 0x7F, hi >> 7, hi & 0x7F, pulse])
+        lch = lfo.get("channel", ch)      # rate / reset CCs may come from another device's channel
+        _check(isinstance(lch, int) and 1 <= lch <= 16, f"LFO channel {lch!r} must be 1–16")
+        records.append([0x21, lch, rate, rstn, port, lo >> 7, lo & 0x7F, hi >> 7, hi & 0x7F, pulse])
     else:
         records.append([0x21, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 

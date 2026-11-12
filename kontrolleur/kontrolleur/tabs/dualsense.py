@@ -85,46 +85,12 @@ def pill_keys(m: M.Mapping, i: M.InputDef):
     return [m.choice(i)] if m.assigned(i) else []
 
 
-# Functions that live on the Pi (DualSense script) or in the i2c2midi, as modules with input jacks
-MODULES = [
-    ("slice", "SLICE-SELEKTEUR", "Pi · grain slice 0–1023", "octave",
-     [("slice", "SLICE"), ("section", "SECTION"), ("block", "BLOCK")]),
-    ("loop", "LOOP-REKORDEUR", "Pi · per MIDI channel", "trig",
-     [("rec", "REC"), ("play", "PLAY"), ("delete", "DELETE"), ("scrub", "SCRUB"), ("grid", "Q-GRID"), ("quantize", "QUANTIZE")]),
-    ("lfo", "LFO", "i2c2midi · trigger LFO", "special", [("rate", "RATE"), ("reset", "RESET")]),
-]
-PORT_OF = {
-    "slice_fine": ("slice", "slice"), "slice_section": ("slice", "section"), "section_up": ("slice", "section"),
-    "section_down": ("slice", "section"), "slice_block": ("slice", "block"), "block_up": ("slice", "block"),
-    "block_down": ("slice", "block"), "block_reset": ("slice", "block"),
-    "loop_record": ("loop", "rec"), "loop_play": ("loop", "play"), "loop_clear": ("loop", "delete"),
-    "loop_scrub": ("loop", "scrub"), "quantize_grid": ("loop", "grid"), "quantize": ("loop", "quantize"),
-    "er_lfo_rate": ("lfo", "rate"), "er_lfo_reset": ("lfo", "reset"),
-}
-MOD_X, MOD_W = 1135.0, 270.0
-MOD_NAME = {"slice": "Slice-Selekteur", "loop": "Loop-Rekordeur", "lfo": "LFO"}
-
-
 def short_name(i: M.InputDef) -> str:
     g = M.group_of(i)
     if len(g.inputs) == 1:
         return g.title
     return {"X axis": f"{g.title} X", "Y axis": f"{g.title} Y", "X position": "Touch X", "Y position": "Touch Y",
             "Up / down": "D-pad ↕", "Left / right": "D-pad ↔"}.get(i.label, f"{g.title} {i.label.lower()}")
-
-
-def sources_by_port(m: M.Mapping):
-    out = {}
-    for i in M.ALL_INPUTS:
-        f = m.fn(i.button) if i.button else None
-        for k in pill_keys(m, i):
-            if k in PORT_OF:
-                hold = f is not None and f.hold == k and f.tap != k
-                out.setdefault(PORT_OF[k], []).append(short_name(i) + (" hold" if hold else ""))
-    for c in m.chords:
-        if c.action in PORT_OF:
-            out.setdefault(PORT_OF[c.action], []).append(f"{M.button_label(c.a)}+{M.button_label(c.b)}")
-    return out
 
 
 def _kind_color(kind: tuple) -> QColor:
@@ -135,9 +101,8 @@ def _kind_color(kind: tuple) -> QColor:
 
 class ControllerDrawing(Drawing):
     """Neutral drawing of the controller: a control gets its colour and a label only when
-    something is assigned to it. The Pi / i2c2midi functions sit on the right as modules;
-    patch cables run from the controls' labels to their jacks."""
-    base = (1425.0, 680.0)
+    something is assigned to it. What the Pi functions get from it: Pi tab."""
+    base = (1100.0, 640.0)
 
     def __init__(self, ctx):
         super().__init__()
@@ -171,12 +136,6 @@ class ControllerDrawing(Drawing):
         a = self.accent(g)
         return (a if a is not None else Theme.body), a is not None
 
-    def slice_used(self) -> bool:
-        return any(self.m.axis_fn(i) in ("slice_fine", "slice_section", "slice_block") for i in M.ALL_INPUTS) or \
-            any(self.m.fn(b).tap.startswith(("block_", "section_")) or self.m.fn(b).hold.startswith(("block_", "section_"))
-                for b, _ in M.BUTTONS) or any(c.action.startswith(("block_", "section_")) for c in self.m.chords) or \
-            self.m.assigned(M.GROUP["slice"].inputs[0])
-
     def paint(self, p: QPainter, w, h):
         body = self._body
         p.fillPath(body, D.vgradient(QRectF(0, 0, w, h), Theme.c("body", 0.10), Theme.c("body", 0.03)))
@@ -186,97 +145,6 @@ class ControllerDrawing(Drawing):
         self._pills, self._jacks = [], {}
         self._callouts(p)
         self._controls(p)
-        self._modules(p)
-        self._cables(p)
-
-    # ── modules ──
-    def _modules(self, p):
-        m = self.m
-        srcs = sources_by_port(m)
-        heights = [44 + 24 * len(ports) + (30 if key != "loop" else 6) for key, *_x, ports in MODULES]
-        y = 330 - (sum(heights) + 18 * (len(MODULES) - 1)) / 2
-        for (key, title, sub, colname, ports), h in zip(MODULES, heights):
-            sel = self.selected == "mod_" + key
-            col = Theme.c(colname)
-            used = any(srcs.get((key, pk)) for pk, _ in ports)
-            r = QRectF(MOD_X, y, MOD_W, h)
-            path = QPainterPath()
-            path.addRoundedRect(r, 10, 10)
-            if sel:
-                D.glow(p, path, _op(col, 0.7), 10)
-            D.draw_path(p, path, _op(col, 0.07) if used else Theme.c("body", 0.035),
-                        Theme.ink if sel else (_op(col, 0.75) if used else Theme.c("body", 0.4)), 2 if sel else 1.3)
-            D.Text(title, Theme.font(11, HEAVY, "mono"), col if used or sel else Theme.dim, tracking=1.2).paint(p, r.left() + 14, r.top() + 9)
-            D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim).paint(p, r.left() + 14, r.top() + 25)
-            ry = r.top() + 50
-            for pk, plabel in ports:
-                names = srcs.get((key, pk), [])
-                jc = QPointF(r.left(), ry + 6)
-                D.circle(p, jc, 11, col if names else Theme.bg, col if names else Theme.c("body", 0.5), 1.4)
-                if names:
-                    D.circle(p, jc, 4, Theme.bg)
-                self._jacks[(key, pk)] = jc
-                D.Text(plabel, Theme.font(10, HEAVY, "mono"), col if names else Theme.dim).paint(p, r.left() + 14, ry)
-                D.Text(" · ".join(names) if names else "—", Theme.font(9.5, SEMIBOLD), _op(Theme.ink, 0.85) if names else Theme.dim,
-                       max_w=MOD_W - 100).paint(p, r.left() + 86, ry + 1)
-                ry += 24
-            if key != "loop":
-                self._module_output(p, key, r, ry, col)
-            self.hits.add(path, lambda key=key: self.select("mod_" + key), MOD_NAME[key])
-            y += h + 18
-
-    def _module_output(self, p, key, r, ry, col):
-        m = self.m
-        if key == "slice":
-            i = M.GROUP["slice"].inputs[0]
-            on = m.effective_role(i) == M.CV
-            text = f"CV {m.port(i)}" if on else "not sent"
-            pc = Theme.cv
-        else:
-            on = m.input_with(M.LFO_RATE) is not None
-            text = (f"CV {m.lfo_port}" if m.triggers_as_cv else f"TR {m.lfo_port}") if on else "off"
-            pc = Theme.trig
-        p.strokePath(_hline(r.left() + 10, r.right() - 10, ry - 2), D.pen(Theme.c("line"), 1))
-        D.Text("OUT", Theme.font(10, HEAVY, "mono"), Theme.dim).paint(p, r.left() + 14, ry + 5)
-        pill = D.Pill(D.Text(text, Theme.font(10, BOLD, "mono"), pc if on else Theme.dim), 6, 2, _op(pc, 0.14) if on else None)
-        pill.paint(p, r.right() - 22 - pill.w, ry + 3)
-        jc = QPointF(r.right(), ry + 3 + pill.h / 2)
-        D.circle(p, jc, 11, pc if on else Theme.bg, pc if on else Theme.c("body", 0.5), 1.4)
-
-    # ── patch cables: label pill → module jack ──
-    def _cables(self, p):
-        for rect, iid, key in self._pills:
-            if key not in PORT_OF or PORT_OF[key] not in self._jacks:
-                continue
-            mod, _ = PORT_OF[key]
-            col = Theme.c(next(c for k, _t, _s, c, _p in MODULES if k == mod))
-            g = M.group_of(M.INPUT[iid]).id
-            hot = self.selected in (g, "mod_" + mod)
-            end = self._jacks[PORT_OF[key]]
-            path = QPainterPath()
-            if rect.left() >= 850:                       # right-hand labels
-                a = QPointF(rect.right() + 2, rect.center().y())
-                path.moveTo(a)
-                path.cubicTo(QPointF(a.x() + 60, a.y()), QPointF(end.x() - 60, end.y()), end)
-            elif rect.top() < 90:                        # touchpad: over the top, then down to the jack
-                a = QPointF(rect.center().x(), rect.top() - 1)
-                top = QPointF(end.x() - 30, 10)
-                path.moveTo(a)
-                path.cubicTo(QPointF(a.x(), 4), QPointF(top.x() - 200, 6), top)
-                path.cubicTo(QPointF(end.x() - 18, 14), QPointF(end.x() - 40, end.y()), end)
-            elif rect.right() <= 215:                    # left labels: down the outer edge, then under the controller
-                a = QPointF(rect.left() - 1, rect.center().y())
-                lane = 8.0
-                path.moveTo(a)
-                path.cubicTo(QPointF(a.x() - 6, a.y()), QPointF(lane, a.y()), QPointF(lane, a.y() + 14))
-                path.lineTo(lane, 630)
-                path.cubicTo(QPointF(lane, 668), QPointF(end.x() - 220, 668), end)
-            else:                                        # below the body (motion, PS / mic): under the controller
-                a = QPointF(rect.center().x(), rect.bottom() + 1)
-                path.moveTo(a)
-                path.cubicTo(QPointF(a.x(), 668), QPointF(end.x() - 220, 668), end)
-            p.strokePath(path, D.pen(_op(col, 0.9 if hot else 0.4), 2.2 if hot else 1.5))
-            D.circle(p, a, 4, _op(col, 0.95 if hot else 0.6))
 
     # ── controls ──
     def _style(self, g, path, glow_r=10):
@@ -406,20 +274,6 @@ class ControllerDrawing(Drawing):
         rows = [token_row(self.m, i, True, rec=self._pills) for i in M.GROUP[g].inputs if self.m.assigned(i)]
         self._below(p, g, icon, (352, 470), rows)
 
-    def _slice_output(self, p):
-        """The grain slice is not a control but a result: shown once something sets it."""
-        if not self.slice_used():
-            return
-        g = "slice"
-        sel = self.selected == g
-        col, on = self._colors(g)
-        fg = Theme.ink if sel else (_op(col, 0.9) if on else Theme.dim)
-        icon = D.Row([D.Custom(13, 13, lambda pp, r: D.symbol(pp, "grid", r.center(), 12, fg, 1.3)),
-                      D.Text("GRAIN SLICE", Theme.font(10, BOLD, "mono"), fg)], 6)
-        rows = [token_row(self.m, M.GROUP[g].inputs[0], True, False)] if on else \
-               [D.Text("not sent to the ER-301", Theme.font(9, SEMIBOLD, "mono"), Theme.dim)]
-        self._below(p, g, icon, (548, 470), rows)
-
     def _center_tokens(self, p):
         rows = []
         for g in ("ps", "mic"):
@@ -502,9 +356,7 @@ def _op(c: QColor, o: float) -> QColor:
 # ── inspector ───────────────────────────────────────────────────────────────────────────────────
 
 def build_panel(ctx, tab: str, col: QVBoxLayout):
-    if tab == "Control" and ctx.ds_selected.startswith("mod_"):
-        module_panel(ctx, ctx.ds_selected[4:], col)
-    elif tab == "Control":
+    if tab == "Control":
         control_panel(ctx, M.GROUP[ctx.ds_selected], col)
     elif tab == "Combos":
         combos_panel(ctx, col)
@@ -729,45 +581,3 @@ def overview_panel(ctx, col: QVBoxLayout):
         card.add(W.hint(" · ".join(midi) + ". Sent to the MIDI hub, not to the ER-301 — shown only here."))
     card.add(W.hint(f"Hold = {'%g' % m.long_press} s or longer (LONG_PRESS_DURATION in mappings.py)."))
     col.addWidget(card)
-
-
-MODULE_HINT = {
-    "slice": "Runs in the DualSense script on the Pi. The grain slice 0–1023 = block × 128 + section × 16 + slice, "
-             "sent as one 14-bit value. Give its functions to any controls (click a control, pick “Grain slice …”).",
-    "loop": "Runs in the DualSense script on the Pi. Records what the DualSense sends on the current MIDI channel and plays "
-            "it back into the MIDI hub; quantize follows the NerdSEQ clock (or 120 BPM).",
-    "lfo": "A trigger LFO inside the i2c2midi: it fires pulses at a rate set by a control (0 = stopped).",
-}
-
-
-def module_panel(ctx, key: str, col: QVBoxLayout):
-    m = ctx.mapping
-    _k, title, sub, colname, ports = next(x for x in MODULES if x[0] == key)
-    col.addWidget(W.title(MOD_NAME[key]))
-    col.addWidget(W.hint(MODULE_HINT[key]))
-    srcs = sources_by_port(m)
-    card = W.Card("Inputs", Theme.c(colname))
-    for pk, plabel in ports:
-        names = srcs.get((key, pk), [])
-        lb = W.label(plabel, 11, HEAVY, "mono", Theme.c(colname) if names else Theme.dim)
-        lb.setFixedWidth(int(84 * Theme.grow))
-        card.add(W.hbox(lb, W.label(" · ".join(names) if names else "—", 12, REGULAR, "ui",
-                                    Theme.ink if names else Theme.dim, wrap=True), stretch_end=False))
-    card.add(W.hint("Click a control on the drawing and pick one of these functions for it to patch it in."))
-    col.addWidget(card)
-    if key == "slice":
-        i = M.GROUP["slice"].inputs[0]
-        out = W.Card("Output", Theme.cv)
-        out.add(W.row("Send to", function_picker(ctx, i), SEMIBOLD))
-        if m.effective_role(i) == M.CV:
-            def set_port(v):
-                m.ports[i.id] = v
-                ctx.changed()
-            out.add(W.row("SC.CV port", W.NumberField(m.port(i), 1, 99, set_port)))
-        out.add(W.hint("0–16383 → 0–10 V in full resolution (NRPN 3 on the DualSense channel)."))
-        col.addWidget(out)
-        key_n = NotesStore.ds(i.id)
-        col.addWidget(W.NoteField(ctx.notes.raw(key_n), lambda t: ctx.set_note(key_n, t)))
-    elif key == "lfo":
-        from .er301 import lfo_card
-        col.addWidget(lfo_card(ctx))

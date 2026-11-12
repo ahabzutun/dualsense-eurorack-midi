@@ -16,6 +16,11 @@ from state.clock_source import ClockSource
 from midi.controller import MIDIController
 from midi.axis_router import AxisRouter
 try:
+    from midi.device_inputs import DeviceInputs
+except Exception as _inputs_err:      # 16n / EC4 / pedal -> Pi functions are optional
+    print(f"⚠️  MIDI inputs not available ({_inputs_err})")
+    DeviceInputs = None
+try:
     from midi.button_router import ButtonRouter, NullRouter
 except Exception as _router_err:      # a broken router must never stop the controller
     print(f"⚠️  Button router not available ({_router_err}); using built-in button behaviour")
@@ -156,10 +161,16 @@ def main():
             except Exception:
                 pass
 
+    # 16n / EC4 / pedal MIDI -> Pi functions (MIDI_INPUTS in config/controls.py).
+    # The 16n and EC4 inputs are opened by _inputs itself; the pedal's comes from the callback below.
+    _inputs = DeviceInputs(rtmidi) if DeviceInputs is not None else None
+
     def _pedal_callback(message, data=None):
         """Record pedal CC into the active loop when recording.
         Remaps to current DualSense instrument channel so playback goes to the right destination."""
         midi_bytes, _ = message
+        if _inputs is not None:
+            _inputs.feed("pedal", midi_bytes)
         loop_state = channel_manager.get_current_loop_state()
         if loop_state.recording and len(midi_bytes) >= 1:
             status   = midi_bytes[0]
@@ -236,6 +247,8 @@ def main():
             _close_pedal_input(_pedal_holder[0])
             _pedal_holder[0] = None
             _pedal_name[0] = None
+        if _inputs is not None:          # the 16n / EC4 inputs go with it
+            _inputs.shutdown()
 
     _sync_pedal(startup=True)
     _pedal_thread = threading.Thread(target=_reconnect_pedal, daemon=True)
@@ -302,6 +315,9 @@ def main():
             pass
 
         axes = AxisRouter(controller_obj, channel_manager, midiout, router)
+        if _inputs is not None:
+            _inputs.bind(router, axes)
+            _inputs.start()
 
         def _record(msg):
             loop_state = channel_manager.get_current_loop_state()
@@ -354,6 +370,8 @@ def main():
             while True:
                 r, w, x = select.select(devices_dict.keys(), [], [], 0.01)
                 router.poll()
+                if _inputs is not None:
+                    _inputs.poll()
 
                 for fd in r:
                     device = devices_dict[fd]
