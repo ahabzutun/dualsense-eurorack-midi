@@ -133,3 +133,17 @@ The CDC SET_LINE_CODING goes to interface 2 (wIndex=2), which is the CDC control
 4. **Contact Percussa** re: USB binding persistence (separate issue documented in `usb_enumeration_problems`).
 
 5. **GPIO power bypass** (pins 4+6) — eliminate USB-C splitter voltage drop, independent of DOREMiDi issue.
+---
+
+## Resolved — 2026-11-12
+
+- **Generic binding was the "only the first CC arrives" problem.** `99-ch345-midi.rules` wrote
+  `1a86 752d` to snd-usb-audio's `new_id` on every plug-in and never removed it. From the second
+  plug-in on, the dynamic ID won over the kernel's built-in CH345 quirk, the box was bound
+  generically (ALSA name "DOREMiDi MPC-20-30C4") and only the first CC of each pedal came through.
+- **Fix:** `udev/99-mpc20-midi.rules` (replaces 99-ch345-midi.rules): once per plug-in, wait 2 s
+  (the CH345 quirk binds interface 1), add the dynamic ID so interface 0 gets probed and the MIDI
+  port is created, then remove the ID again. ALSA name is "CH345"; all CCs arrive; no switch needed.
+- **Configuration** over the CDC data interface with pyusb (cdc_acm can't bind): `scripts/mpc20_tool.py`
+  (protocol notes in its docstring). Needs `udev/99-doremidi.rules` for access without root.
+- The hub crashes on 2026-11-11 came from a broken connection in the hand-built USB switch.

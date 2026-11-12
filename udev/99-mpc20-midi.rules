@@ -1,0 +1,6 @@
+# DOREMiDi MPC-20 (USB 1a86:752d, the kernel calls it "CH345").
+# Once per plug-in: briefly add a generic driver entry so Linux finishes creating the
+# MIDI port, then remove it again so the next plug-in still uses the kernel's CH345 fix.
+# Replaces 99-ch345-midi.rules (backed up in ~/backups/udev/). Installed 2026-11-12.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1a86", ATTR{idProduct}=="752d", \
+  RUN+="/bin/sh -c 'sleep 2; echo 1a86 752d > /sys/bus/usb/drivers/snd-usb-audio/new_id; sleep 1; echo 1a86 752d > /sys/bus/usb/drivers/snd-usb-audio/remove_id'"
