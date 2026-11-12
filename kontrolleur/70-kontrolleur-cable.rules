@@ -1,0 +1,4 @@
+# Kontrolleur: let the logged-in user reach devices plugged into this computer ("Cable").
+# DOREMiDi MPC-20 (CH345, config over its USB CDC interface via pyusb)
+SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="752d", TAG+="uaccess"
+# 16n faderbank (Teensy) and Faderfox EC4 are class-compliant USB MIDI: ALSA already grants the session user access.

@@ -1,0 +1,3 @@
+PySide6>=6.6
+python-rtmidi>=1.5      # 16n and EC4 on a cable
+pyusb>=1.2              # MPC-20 on a cable (Linux)
