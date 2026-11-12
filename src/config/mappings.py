@@ -20,6 +20,9 @@ CC_MAP = {
     'btn_east': 15,      # O button (○) trigger (General Purpose)
     'btn_north': 22,     # △ button trigger (General Purpose)
     'btn_west': 23,      # □ button trigger (General Purpose)
+    # Buttons that send their own CC when set to 'midi' in controls.py
+    'btn_l1': 24, 'btn_r1': 25, 'btn_l3': 20, 'btn_r3': 21,
+    'btn_create': 26, 'btn_options': 27, 'btn_ps': 28, 'btn_mic': 29, 'btn_touchpad': 9,
     'dpad_vertical': 11,   # D-pad Up/Down (Expression)
     'dpad_horizontal': 13, # D-pad Left/Right (Effect Control 1)
     'sample_block': 12,    # Create/Option → coarse 128-block (0-7) → NerdSEQ I2C

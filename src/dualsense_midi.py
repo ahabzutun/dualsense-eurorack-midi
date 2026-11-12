@@ -14,6 +14,19 @@ from state.loop import LoopState
 from state.channel_manager import ChannelManager
 from state.clock_source import ClockSource
 from midi.controller import MIDIController
+try:
+    from midi.button_router import ButtonRouter, NullRouter
+except Exception as _router_err:      # a broken router must never stop the controller
+    print(f"⚠️  Button router not available ({_router_err}); using built-in button behaviour")
+    ButtonRouter = None
+    class NullRouter:
+        dpad_horizontal = "slice_section"; left_stick_x = "slice_fine"; routes_touchpad = False
+        def handles(self, code): return False
+        def on_key(self, code, value): pass
+        def on_button(self, *a, **k): pass
+        def post(self, *a): pass
+        def poll(self): pass
+        def tick(self, *a): pass
 
 # ── Memory management setup ───────────────────────────────────────────────────
 gc.set_threshold(200, 5, 2)
@@ -276,9 +289,22 @@ def main():
             touchpad.fd: touchpad
         }
 
+        # Buttons -> actions from config/controls.py; built-in behaviour if that can't be loaded
+        router = NullRouter()
+        if ButtonRouter is not None:
+            try:
+                router = ButtonRouter(controller_obj, channel_manager, clock_source, midiout)
+            except Exception as e:
+                print(f"⚠️  controls.py could not be loaded ({e}); using built-in button behaviour")
+        try:
+            controller_obj.ds.on_mic = (lambda pressed: router.post('mic', pressed))
+        except Exception:
+            pass
+
         try:
             while True:
                 r, w, x = select.select(devices_dict.keys(), [], [], 0.01)
+                router.poll()
 
                 for fd in r:
                     device = devices_dict[fd]
@@ -296,7 +322,10 @@ def main():
                     for event in device.read():
                         if device == controller:
                             if event.type == ecodes.EV_KEY:
-                                if event.code == 310:  # BTN_TL (L1)
+                                if router.handles(event.code):
+                                    router.on_key(event.code, event.value)
+
+                                elif event.code == 310:  # BTN_TL (L1)
                                     if event.value == 1:
                                         controller_obj.l1_pressed = True
                                         controller_obj.l1_press_time = time.time()
@@ -495,9 +524,17 @@ def main():
                                 if event.code == ecodes.ABS_X:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
                                     cc_val, _ = channel_manager.get_left_stick_values(raw_val, channel_manager.current_left_y)
-                                    stick_val = int((cc_val / 127.0) * 255)
-                                    controller_obj.update_fine_slice(stick_val)
-                                    controller_obj.send_grain_slice(midiout)
+                                    if router.left_stick_x == 'midi':
+                                        if controller_obj.should_send_cc(CC_MAP['left_stick_x'], cc_val):
+                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['left_stick_x'], cc_val]
+                                            midiout.send_message(midi_msg)
+                                            loop_state = channel_manager.get_current_loop_state()
+                                            if loop_state.recording:
+                                                loop_state.record_message(midi_msg)
+                                    else:
+                                        stick_val = int((cc_val / 127.0) * 255)
+                                        controller_obj.update_fine_slice(stick_val)
+                                        controller_obj.send_grain_slice(midiout)
 
                                 elif event.code == ecodes.ABS_Y:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
@@ -555,7 +592,17 @@ def main():
                                         print(f"🎚️  R2     → CC{CC_MAP['r2_trigger']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
                                 elif event.code == ecodes.ABS_HAT0X:
-                                    if event.value == -1:
+                                    if router.dpad_horizontal == 'midi':
+                                        if event.value in (-1, 1):
+                                            step = (channel_manager.increment_horizontal_step() if event.value == 1
+                                                    else channel_manager.decrement_horizontal_step())
+                                            cc_val = channel_manager.step_to_cc_value(step)
+                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_horizontal'], cc_val]
+                                            midiout.send_message(midi_msg)
+                                            loop_state = channel_manager.get_current_loop_state()
+                                            if loop_state.recording:
+                                                loop_state.record_message(midi_msg)
+                                    elif event.value == -1:
                                         controller_obj.handle_dpad_left()
                                         controller_obj.send_grain_slice(midiout)
                                     elif event.value == 1:
@@ -643,7 +690,10 @@ def main():
                                         controller_obj.update_touchpad(0, 0, False)
 
                                 elif event.code == ecodes.BTN_LEFT:
-                                    if event.value == 1:
+                                    if router.routes_touchpad:
+                                        if event.value in (0, 1):
+                                            router.on_button('touchpad', event.value == 1)
+                                    elif event.value == 1:
                                         controller_obj.toggle_quantize()
 
                             elif event.type == ecodes.EV_ABS:
@@ -678,6 +728,7 @@ def main():
                                                 print(f"👆 Touch Y → CC{CC_MAP['touchpad_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
 
                 controller_obj.send_held_button_ccs(midiout)
+                router.tick()
 
                 gc.collect(0)
 

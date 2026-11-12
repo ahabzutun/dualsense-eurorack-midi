@@ -122,6 +122,8 @@ class DualSenseHID:
         self._thread      = None
         self._report      = bytearray(64)  # pre-allocated, reused every write
         self.light        = _DSLight(self)
+        self._mic         = False           # mic button state (from the input report)
+        self.on_mic       = None            # callback(pressed: bool), called from the HID thread
 
     @staticmethod
     def _find_hidraw() -> str:
@@ -198,6 +200,24 @@ class DualSenseHID:
         r[46] = self._g
         r[47] = self._b
 
+    def _parse_input(self, rep: bytes) -> None:
+        """Watch the mic button (buttons[2] bit 2) in the input report; report changes to on_mic."""
+        if rep[0] == 0x01 and len(rep) >= 11:      # USB
+            b = rep[10]
+        elif rep[0] == 0x31 and len(rep) >= 12:    # Bluetooth
+            b = rep[11]
+        else:
+            return
+        mic = bool(b & 0x04)
+        if mic != self._mic:
+            self._mic = mic
+            cb = self.on_mic
+            if cb is not None:
+                try:
+                    cb(mic)
+                except Exception:
+                    pass
+
     def _write_loop(self) -> None:
         """
         Background thread: write the HID report whenever state changes.
@@ -210,14 +230,17 @@ class DualSenseHID:
         since all input comes via evdev.
         """
         while self._running:
-            # Drain incoming HID data — non-blocking, discard immediately
+            # Drain incoming HID data — non-blocking. Everything else comes via evdev; only
+            # the mic button is taken from here (Linux does not report it as a key).
             if self._fd is not None:
-                try:
-                    os.read(self._fd, 256)
-                except BlockingIOError:
-                    pass  # nothing to read, that's fine
-                except OSError:
-                    pass
+                for _ in range(64):
+                    try:
+                        rep = os.read(self._fd, 256)
+                    except (BlockingIOError, OSError):
+                        break  # nothing (more) to read
+                    if not rep:
+                        break
+                    self._parse_input(rep)
 
             with self._lock:
                 if self._dirty:
