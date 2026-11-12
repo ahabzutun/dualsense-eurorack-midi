@@ -370,6 +370,23 @@ def pitch_lfo_panel(ctx, col: QVBoxLayout):
         card.add(W.hint("Pick the octave control on the D-pad (DualSense tab → Control → Octave)."))
     col.addWidget(card)
 
+    col.addWidget(lfo_card(ctx))
+
+    card = W.Card("Output")
+    card.add(W.switch_row("Triggers as SC.CV (0 / 10 V)", m.triggers_as_cv, lambda v: seta("triggers_as_cv", v, True)))
+    card.add(W.hint("Trigger ports are SC.CV ports. Use this when the ER-301 trigger input's source is an SC.CV." if m.triggers_as_cv
+                    else "Trigger ports are SC.TR ports (TR / TR.PULSE)."))
+    col.addWidget(card)
+
+
+def lfo_card(ctx) -> W.Card:
+    """The trigger LFO of the i2c2midi: rate / reset controls, output, range."""
+    m = ctx.mapping
+
+    def seta(k, v, rebuild=False):
+        setattr(m, k, v)
+        ctx.changed(rebuild)
+
     card = W.Card("Trigger LFO", Theme.special)
 
     def lfo_pick(role):
@@ -388,15 +405,16 @@ def pitch_lfo_panel(ctx, col: QVBoxLayout):
                                             rate.id if rate else "", lfo_pick(M.LFO_RATE), 190)))
     card.add(W.row("Phase reset", W.Picker([("", "none")] + [(i.id, M.input_title(i)) for i in M.ALL_INPUTS if M.LFO_RESET in i.roles],
                                            reset.id if reset else "", lfo_pick(M.LFO_RESET), 190)))
+    card.add(W.divider())
+    card.add(W.row("Output", W.Segmented([(True, "SC.CV"), (False, "SC.TR")], m.triggers_as_cv,
+                                         lambda v: seta("triggers_as_cv", v, True))))
     card.add(W.row(f"{m.trigger_port_name} port", W.NumberField(m.lfo_port, 1, 99, lambda v: seta("lfo_port", v))))
+    card.add(W.hint("SC.CV: 10 V pulses. SC.TR: trigger pulses. The i2c2midi has one setting for all triggers, so this also "
+                    "moves the other triggers (buttons, pedals, EC4 …) to " + ("SC.CV." if m.triggers_as_cv else "SC.TR.")
+                    + " A separate output per LFO needs a firmware update."))
+    card.add(W.divider())
     card.add(W.row("Slowest (Hz)", W.DecimalField(m.lfo_min_hz, 0.0, 200.0, lambda v: seta("lfo_min_hz", v))))
     card.add(W.row("Fastest (Hz)", W.DecimalField(m.lfo_max_hz, 0.0, 200.0, lambda v: seta("lfo_max_hz", v))))
     card.add(W.row("Pulse length (ms)", W.NumberField(m.lfo_pulse_ms, 1, 127, lambda v: seta("lfo_pulse_ms", v))))
     card.add(W.hint("Exponential curve: finer control at slow speeds. Pulses get shorter automatically at fast rates."))
-    col.addWidget(card)
-
-    card = W.Card("Output")
-    card.add(W.switch_row("Triggers as SC.CV (0 / 10 V)", m.triggers_as_cv, lambda v: seta("triggers_as_cv", v, True)))
-    card.add(W.hint("Trigger ports are SC.CV ports. Use this when the ER-301 trigger input's source is an SC.CV." if m.triggers_as_cv
-                    else "Trigger ports are SC.TR ports (TR / TR.PULSE)."))
-    col.addWidget(card)
+    return card
