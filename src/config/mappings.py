@@ -75,7 +75,7 @@ GYRO_DEADZONE_14BIT = 3840   # 30/64 * 8192
 # Maps internal instrument number (1-3) to outgoing MIDI channel (1-16).
 # Instrument 1 uses ch15 to avoid clashing with NerdSEQ sequencer on ch1.
 INSTRUMENT_MIDI_CHANNELS = {
-    1: 12,  # instrument 1 → MIDI ch 12
+    1: 2,   # instrument 1 → MIDI ch 2 (i2c2midi routes ch 2 straight to the ER-301)
     2: 13,  # instrument 2 → MIDI ch 13
     3: 14,  # instrument 3 → MIDI ch 14
 }

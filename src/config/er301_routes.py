@@ -18,6 +18,11 @@ CV = [
     ('l2_trigger', 8),            # L2 → SC.CV 8
     ('right_stick_x', 4),         # Right stick x axis → SC.CV 4
     ('right_stick_y', 9),         # Right stick y axis → SC.CV 9
+    (16, 80, 4),                  # ch 16 CC 80 → SC.CV 4
+    (16, 81, 5),                  # ch 16 CC 81 → SC.CV 5
+    (5, 5, 4),                    # ch 5 CC 5 → SC.CV 4
+    (2, 105, 10),                 # ch 2 CC 105 → SC.CV 10
+    (2, 109, 13),                 # ch 2 CC 109 → SC.CV 13
 ]
 
 # 14-bit NRPN → SC.CV   (0–16383 → 0–10 V, full resolution)
@@ -32,7 +37,7 @@ TRIGGERS = [
 
 # Note held → trigger port. These notes do not change the pitch.
 NOTE_TRIGGERS = [
-    (72, 12),                     # Touchpad click → SC.CV 12
+    (2, 72, 12),                  # ch 2 note 72 → SC.CV 12
 ]
 
 # Notes on CHANNEL → V/Oct. The octave control adds steps of semitones_per_step.

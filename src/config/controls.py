@@ -1,8 +1,8 @@
 """
 What the DualSense buttons do. Read by the DualSense script; changes apply within a second.
-The DualSense Mapper app on the Mac writes this file, you can also edit it by hand.
+Written by DualSense Mapper on the Mac. You can still edit it by hand; the app reads it back.
 
-tap  = short press   (actions marked 'release' fire when you let go)
+tap  = short press   (loop actions fire when you let go)
 hold = held for LONG_PRESS_DURATION (mappings.py) or longer, decided when you let go
 'midi' = the button sends its own CC (127 pressed / 0 released): route it to the ER-301
          in er301_routes.py. Buttons: cross circle triangle square l1 r1 l3 r3 create
