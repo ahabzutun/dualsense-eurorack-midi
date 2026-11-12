@@ -55,7 +55,5 @@ Configuration files are the same on both systems (and the same as the old Swift 
 files instead of the devices; `KONTROLLEUR_SNAPSHOT=out.png` (+ `KONTROLLEUR_MODE`, `_TAB`, `_SIZE`, `_SCALE`,
 `_FONT`, `_PRESET`) renders the window to a PNG and quits. Works with `QT_QPA_PLATFORM=offscreen`.
 
-## The old Mac app
-
-`Package.swift`, `Sources/` and `scripts/make_app.sh` are the previous SwiftUI version. It writes the same
-files and configurations; it stays here until the Qt version has replaced it everywhere.
+`scripts/` holds the app icon (`make_icon.py` draws it). The SwiftUI version this replaced is in the git
+history (removed after commit f1ca7b6).
