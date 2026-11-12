@@ -8,6 +8,10 @@
 //  - higher UART baud rate (must match on both boards)
 //  - SysEx and system common messages pass through (validated)
 //  - visible LED pulse per forwarded packet (the old toggle was invisible for even counts)
+//  - self-recovery: a hardware watchdog resets the board if the loop ever stops for 2 s, and
+//    the board resets itself if its USB host hasn't configured it for 10 s (the "only the
+//    green power LED" state after a host reboot or power dip). On start-up the yellow LED
+//    blinks 3x after a watchdog reset and 2x after a self-reset (also after flashing).
 #include <Arduino.h>
 #include <MIDIUSB.h>
 
@@ -17,6 +21,7 @@
 
 static const uint32_t BYTE_GAP_US  = 1000;  // 4 bytes take ~350 us at 115200 baud
 static const uint32_t LED_PULSE_MS = 15;
+static const uint32_t USB_UNCONFIGURED_RESET_MS = 10000;
 
 static uint8_t  buf[4];
 static uint8_t  buf_n        = 0;
@@ -28,6 +33,42 @@ static uint32_t led_off_at   = 0;
 static void led_pulse() {
   if (!led_lit) { digitalWrite(LED_BUILTIN, !led_idle); led_lit = true; }
   led_off_at = millis() + LED_PULSE_MS;
+}
+
+// ── watchdog ────────────────────────────────────────────────────────────────
+// GCLK2 (unused by the Arduino core) = OSCULP32K / 32 = 1024 Hz → WDT period 2048 = 2 s.
+static void wdt_start() {
+  GCLK->GENDIV.reg  = GCLK_GENDIV_ID(2) | GCLK_GENDIV_DIV(4);            // 2^(4+1) = 32
+  GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(2) | GCLK_GENCTRL_GENEN |
+                      GCLK_GENCTRL_SRC_OSCULP32K | GCLK_GENCTRL_DIVSEL;
+  while (GCLK->STATUS.bit.SYNCBUSY) {}
+  GCLK->CLKCTRL.reg = GCLK_CLKCTRL_ID_WDT | GCLK_CLKCTRL_CLKEN | GCLK_CLKCTRL_GEN_GCLK2;
+  WDT->CTRL.reg = 0;
+  while (WDT->STATUS.bit.SYNCBUSY) {}
+  WDT->CONFIG.reg = WDT_CONFIG_PER_2K;
+  WDT->CTRL.reg = WDT_CTRL_ENABLE;
+  while (WDT->STATUS.bit.SYNCBUSY) {}
+}
+
+static inline void wdt_feed() {
+  if (!WDT->STATUS.bit.SYNCBUSY) WDT->CLEAR.reg = WDT_CLEAR_CLEAR_KEY;
+}
+
+// Reset if the USB host hasn't configured us for a while (bus reset clears the configuration).
+static uint32_t usb_ok_at = 0;
+static void usb_health() {
+  const uint32_t now = millis();
+  if (USBDevice.configured()) { usb_ok_at = now; return; }
+  if (now - usb_ok_at > USB_UNCONFIGURED_RESET_MS) NVIC_SystemReset();
+}
+
+static void show_reset_cause() {
+  const uint8_t rc = PM->RCAUSE.reg;
+  const int blinks = (rc & PM_RCAUSE_WDT) ? 3 : (rc & PM_RCAUSE_SYST) ? 2 : 0;
+  for (int i = 0; i < blinks; i++) {
+    digitalWrite(LED_BUILTIN, !led_idle); delay(120);
+    digitalWrite(LED_BUILTIN, led_idle);  delay(120);
+  }
 }
 
 static void led_service() {
@@ -106,14 +147,19 @@ static void usb_to_uart() {
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, led_idle);
+  show_reset_cause();
   Serial1.begin(UART_BAUD);
   // Pull-up on RX (pin stays muxed to the SERCOM; PULLEN + OUT=1 selects pull-up).
   const PinDescription &rxp = g_APinDescription[PIN_SERIAL1_RX];
   PORT->Group[rxp.ulPort].OUTSET.reg = (1ul << rxp.ulPin);
   PORT->Group[rxp.ulPort].PINCFG[rxp.ulPin].bit.PULLEN = 1;
+  usb_ok_at = millis();
+  wdt_start();
 }
 
 void loop() {
+  wdt_feed();
+  usb_health();
   usb_to_uart();
   uart_to_usb();
   led_service();
