@@ -1,13 +1,13 @@
 """
 ER-301 routing inside the i2c2midi (DualSense → ER-301 directly, no Teletype script).
 
-Written by DualSense Mapper on the Mac. You can still edit it by hand; the app reads it back.
+Written by Kontrolleur on the Mac. You can still edit it by hand; the app reads it back.
 Saving makes the MIDI hub (midi-passthrough service) send it to the i2c2midi within a
 second; the i2c2midi keeps it across power cycles. Check by hand:
 
     python3 ~/dualsense-eurorack-midi/scripts/er301_push.py
 
-Ports are the ER-301 SC.CV / SC.TR numbers (1–100) chosen as the source of a unit's input.
+Ports are the ER-301 SC.CV / SC.TR numbers (1–99) chosen as the source of a unit's input.
 Entries are (control, port) on CHANNEL, or (channel, control, port) for another channel.
 """
 
@@ -18,7 +18,7 @@ CV = [
     ('l2_trigger', 8),            # L2 → SC.CV 8
     ('right_stick_x', 4),         # Right stick x axis → SC.CV 4
     ('right_stick_y', 9),         # Right stick y axis → SC.CV 9
-    (16, 80, 4),                  # ch 16 CC 80 → SC.CV 4
+    (16, 80, 4),                  # ch 16 CC 80 → SC.CV 4 · master
     (16, 81, 5),                  # ch 16 CC 81 → SC.CV 5
     (5, 5, 4),                    # ch 5 CC 5 → SC.CV 4
     (2, 105, 10),                 # ch 2 CC 105 → SC.CV 10

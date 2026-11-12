@@ -1,6 +1,6 @@
 """
 What the DualSense buttons do. Read by the DualSense script; changes apply within a second.
-Written by DualSense Mapper on the Mac. You can still edit it by hand; the app reads it back.
+Written by Kontrolleur on the Mac. You can still edit it by hand; the app reads it back.
 
 tap  = short press   (loop actions fire when you let go)
 hold = held for LONG_PRESS_DURATION (mappings.py) or longer, decided when you let go
