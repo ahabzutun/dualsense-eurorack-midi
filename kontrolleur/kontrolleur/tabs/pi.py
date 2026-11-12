@@ -167,9 +167,11 @@ def module_output(ctx, key: str) -> Tuple[str, bool, QColor]:
         on = m.effective_role(i) == M.CV
         return (f"SC.CV {m.port(i)}" if on else "not sent"), on, Theme.cv
     if key == "lfo":
-        return ((f"SC.CV {m.lfo_port}" if m.triggers_as_cv else f"SC.TR {m.lfo_port}") if m.lfo_on else "off"), m.lfo_on, Theme.trig
+        # coloured by the port it lands on, like the ER-301 tab: SC.CV = CV colour, SC.TR = trigger colour
+        return ((f"SC.CV {m.lfo_port}" if m.triggers_as_cv else f"SC.TR {m.lfo_port}") if m.lfo_on else "off"), m.lfo_on, \
+            (Theme.cv if m.triggers_as_cv else Theme.trig)
     if key == "loop":
-        return f"MIDI ch {m.channel}", True, Theme.c("trig")
+        return f"MIDI ch {m.channel}", True, Theme.function
     return "", False, Theme.dim
 
 

@@ -58,37 +58,37 @@ PRESETS = [
         "body": _c(0.80, 0.80, 0.78), "cv": _c(0.95, 0.35, 0.30), "trig": _c(1.00, 0.78, 0.20),
         "special": _c(0.35, 0.75, 0.95), "octave": _c(0.70, 0.55, 0.95), "function": _c(0.98, 0.90, 0.60),
         "note": _c(1.00, 0.85, 0.60)})),
-    # after modules of the rack (approximations, not the makers' exact colours)
-    ("ER-301 (silver)", _look({
-        "bg": _c(0.80, 0.81, 0.82), "panel": _c(0.74, 0.75, 0.76), "card": _c(0.87, 0.875, 0.88),
-        "line": _c(0, 0, 0, 0.16), "ink": _c(0.07, 0.07, 0.08), "dim": _c(0, 0, 0, 0.55),
-        "body": _c(0.18, 0.20, 0.23), "cv": _c(0.74, 0.11, 0.11), "trig": _c(0.80, 0.38, 0.00),
-        "special": _c(0.00, 0.42, 0.56), "octave": _c(0.40, 0.24, 0.68), "function": _c(0.47, 0.38, 0.00),
-        "note": _c(0.45, 0.30, 0.02)})),
-    ("ER-301 (black)", _look({
-        "bg": _c(0.065, 0.065, 0.07), "panel": _c(0.10, 0.10, 0.105), "card": _c(0.145, 0.145, 0.15),
-        "line": _c(1, 1, 1, 0.11), "ink": _c(0.92, 0.92, 0.90), "dim": _c(1, 1, 1, 0.50),
-        "body": _c(0.74, 0.75, 0.77), "cv": _c(1.00, 0.33, 0.30), "trig": _c(1.00, 0.66, 0.22),
-        "special": _c(0.36, 0.80, 0.95), "octave": _c(0.74, 0.60, 1.00), "function": _c(0.96, 0.86, 0.50),
-        "note": _c(1.00, 0.88, 0.62)})),
-    ("Percussa SSP", _look({
-        "bg": _c(0.045, 0.045, 0.055), "panel": _c(0.075, 0.075, 0.09), "card": _c(0.115, 0.115, 0.135),
-        "line": _c(1, 1, 1, 0.12), "ink": _c(0.94, 0.95, 0.97), "dim": _c(1, 1, 1, 0.50),
-        "body": _c(0.62, 0.64, 0.68), "cv": _c(0.10, 0.80, 1.00), "trig": _c(1.00, 0.46, 0.16),
-        "special": _c(0.68, 1.00, 0.26), "octave": _c(1.00, 0.34, 0.76), "function": _c(1.00, 0.86, 0.22),
-        "note": _c(1.00, 0.90, 0.62)})),
-    ("Teletype (silver)", _look({
-        "bg": _c(0.84, 0.85, 0.86), "panel": _c(0.78, 0.79, 0.80), "card": _c(0.90, 0.905, 0.91),
-        "line": _c(0, 0, 0, 0.15), "ink": _c(0.06, 0.06, 0.07), "dim": _c(0, 0, 0, 0.52),
-        "body": _c(0.22, 0.23, 0.25), "cv": _c(0.13, 0.33, 0.58), "trig": _c(0.78, 0.36, 0.02),
-        "special": _c(0.12, 0.46, 0.26), "octave": _c(0.44, 0.28, 0.60), "function": _c(0.56, 0.42, 0.06),
-        "note": _c(0.50, 0.36, 0.06)}, ui="System Mono", title="System Mono")),
-    ("Teletype (black)", _look({
-        "bg": _c(0.035, 0.035, 0.04), "panel": _c(0.065, 0.065, 0.07), "card": _c(0.10, 0.10, 0.105),
-        "line": _c(1, 1, 1, 0.12), "ink": _c(0.95, 0.95, 0.92), "dim": _c(1, 1, 1, 0.50),
-        "body": _c(0.78, 0.78, 0.76), "cv": _c(0.56, 0.85, 1.00), "trig": _c(1.00, 0.70, 0.30),
-        "special": _c(0.62, 0.95, 0.68), "octave": _c(0.84, 0.74, 1.00), "function": _c(1.00, 0.90, 0.58),
-        "note": _c(1.00, 0.93, 0.74)}, ui="System Mono", title="System Mono")),
+    # after modules of the rack, picked from photos of the panels
+    ("ER-301 (silver)", _look({          # silver panel, black print, blue + grey buttons, amber OLEDs, red / amber LEDs
+        "bg": _c(0.78, 0.79, 0.80), "panel": _c(0.72, 0.73, 0.74), "card": _c(0.85, 0.855, 0.86),
+        "line": _c(0, 0, 0, 0.17), "ink": _c(0.09, 0.09, 0.10), "dim": _c(0, 0, 0, 0.55),
+        "body": _c(0.24, 0.25, 0.27), "cv": _c(0.09, 0.55, 0.82), "trig": _c(0.85, 0.44, 0.00),
+        "special": _c(0.78, 0.13, 0.11), "octave": _c(0.36, 0.36, 0.60), "function": _c(0.30, 0.32, 0.35),
+        "note": _c(0.62, 0.36, 0.00)})),
+    ("ER-301 (black)", _look({           # black panel, white print, same buttons, OLEDs and LEDs
+        "bg": _c(0.085, 0.09, 0.095), "panel": _c(0.115, 0.12, 0.125), "card": _c(0.155, 0.16, 0.165),
+        "line": _c(1, 1, 1, 0.13), "ink": _c(0.95, 0.95, 0.94), "dim": _c(1, 1, 1, 0.52),
+        "body": _c(0.62, 0.65, 0.68), "cv": _c(0.16, 0.68, 0.92), "trig": _c(1.00, 0.58, 0.10),
+        "special": _c(0.94, 0.25, 0.22), "octave": _c(0.68, 0.70, 0.90), "function": _c(0.66, 0.70, 0.73),
+        "note": _c(1.00, 0.80, 0.50)})),
+    ("Percussa SSP", _look({             # navy panel, grey print, black screen with coloured tiles, red buttons
+        "bg": _c(0.12, 0.135, 0.16), "panel": _c(0.10, 0.112, 0.135), "card": _c(0.04, 0.042, 0.05),
+        "line": _c(1, 1, 1, 0.12), "ink": _c(0.95, 0.95, 0.96), "dim": _c(1, 1, 1, 0.50),
+        "body": _c(0.56, 0.57, 0.60), "cv": _c(0.96, 0.27, 0.20), "trig": _c(0.94, 0.92, 0.34),
+        "special": _c(0.33, 0.88, 0.36), "octave": _c(0.74, 0.47, 0.92), "function": _c(0.36, 0.85, 0.95),
+        "note": _c(1.00, 0.60, 0.36)})),
+    ("Teletype (silver)", _look({        # brushed silver panel, dark grey print, chartreuse OLED
+        "bg": _c(0.73, 0.74, 0.75), "panel": _c(0.67, 0.68, 0.69), "card": _c(0.80, 0.805, 0.81),
+        "line": _c(0, 0, 0, 0.16), "ink": _c(0.15, 0.15, 0.16), "dim": _c(0, 0, 0, 0.52),
+        "body": _c(0.26, 0.27, 0.28), "cv": _c(0.36, 0.48, 0.00), "trig": _c(0.72, 0.38, 0.00),
+        "special": _c(0.06, 0.40, 0.44), "octave": _c(0.40, 0.30, 0.56), "function": _c(0.20, 0.20, 0.22),
+        "note": _c(0.42, 0.44, 0.00)}, ui="System Mono", title="System Mono")),
+    ("Teletype (black)", _look({         # black panel, white print, silver jacks, amber OLED
+        "bg": _c(0.065, 0.065, 0.07), "panel": _c(0.09, 0.09, 0.095), "card": _c(0.03, 0.03, 0.032),
+        "line": _c(1, 1, 1, 0.13), "ink": _c(0.94, 0.94, 0.93), "dim": _c(1, 1, 1, 0.50),
+        "body": _c(0.76, 0.77, 0.78), "cv": _c(1.00, 0.72, 0.00), "trig": _c(1.00, 0.48, 0.10),
+        "special": _c(0.80, 0.90, 0.20), "octave": _c(1.00, 0.86, 0.56), "function": _c(0.74, 0.77, 0.80),
+        "note": _c(1.00, 0.90, 0.66)}, ui="System Mono", title="System Mono")),
 ]
 
 BUILTIN_FONTS = ["System", "System Mono", "System Rounded", "System Serif"]
