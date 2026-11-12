@@ -330,7 +330,7 @@ struct ExternalPanel: View {
         @Bindable var m = mapping
         VStack(alignment: .leading, spacing: 12) {
             Text("MIDI routes").font(Theme.font(24, .bold, .title)).foregroundStyle(Theme.ink)
-            Hint(text: "Everything from the Pi hub that goes to the ER-301 besides the DualSense: 16n, pedals, EC4 or any other source. The device tabs add and remove their routes here for you; you can also add routes by hand (NRPN, notes, triggers, other channels). Control is a CC / NRPN / note number, or a name from mappings.py.")
+            Hint(text: "Everything from the MIDI hub that goes to the ER-301 besides the DualSense: 16n, pedals, EC4 or any other source. The device tabs add and remove their routes here for you; you can also add routes by hand (NRPN, notes, triggers, other channels). Control is a CC / NRPN / note number, or a name from mappings.py.")
             ForEach($m.externals) { $e in
                 Card(title: e.kind.rawValue, accent: e.kind == .cv || e.kind == .nrpn ? Theme.cv : Theme.trig) {
                     HStack {
@@ -384,7 +384,7 @@ struct CombosPanel: View {
             Text("Combos").font(Theme.font(24, .bold, .title)).foregroundStyle(Theme.ink)
             Hint(text: "Two buttons pressed together. Their own release actions are skipped then, so L1 + R1 doesn't also delete or play the loop.")
             if !m.controlsOnPi {
-                Hint(text: "⚠︎ The Pi doesn't have the button functions installed yet: only the ER-301 routing is uploaded.")
+                Hint(text: "⚠︎ The SSH host doesn't have the button functions installed yet: only the ER-301 routing is uploaded.")
             }
             ForEach($m.chords) { $c in
                 Card(title: "\(Buttons.label(c.a)) + \(Buttons.label(c.b))", accent: Theme.function) {
@@ -435,7 +435,7 @@ struct OverviewPanel: View {
                     Spacer()
                     NumberField(value: $m.channel, range: 1...16)
                 }
-                Hint(text: "The instrument channel the DualSense sends on (pedals on channel 1 follow it in the Pi hub). The ER-301 routes use it as CHANNEL.")
+                Hint(text: "The instrument channel the DualSense sends on (pedals on channel 1 follow it in the MIDI hub). The ER-301 routes use it as CHANNEL.")
             }
             Card(title: "All buttons", accent: Theme.function) {
                 ForEach(Buttons.all, id: \.name) { b in

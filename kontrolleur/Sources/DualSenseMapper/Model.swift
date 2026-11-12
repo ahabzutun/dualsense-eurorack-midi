@@ -723,7 +723,7 @@ struct PiClient {
     private func json<T: Decodable>(_ text: String) throws -> T {
         guard let line = text.split(separator: "\n").last(where: { $0.hasPrefix("{") }),
               let data = line.data(using: .utf8) else {
-            throw Failure.output(text.isEmpty ? "No answer from the Pi helper." : text.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw Failure.output(text.isEmpty ? "No answer from the SSH host." : text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return try JSONDecoder().decode(T.self, from: data)
     }

@@ -105,6 +105,10 @@ final class Appearance {
             snapshotOnly = true
             data = Appearance.presets[i].1
         }
+        // DSM_SCALE=1.35 / DSM_FONT=<family>: text size and font for UI snapshots, not saved
+        let env = ProcessInfo.processInfo.environment
+        if let s = Double(env["DSM_SCALE"] ?? "") { snapshotOnly = true; data.scale = s }
+        if let f = env["DSM_FONT"] { snapshotOnly = true; data.monoFont = f; data.uiFont = f; data.titleFont = f }
     }
 
     private func save() {
@@ -188,7 +192,7 @@ struct AppearancePanel: View {
                     }
                     .padding(4)
                 }
-                Text("Changes apply right away and are kept on this Mac. Big text sizes can crowd the drawings; zoom in there instead.")
+                Text("Changes apply right away and are kept on this computer. The drawings make room for bigger text and fit themselves to the window: zoom in there (pinch, scroll wheel, ⌘+) to see them larger.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Spacer()

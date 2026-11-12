@@ -117,6 +117,8 @@ struct ContentView: View {
     private var compact: Bool { winWidth < 1290 }
 
     private var client: PiClient { PiClient(host: host, identity: identity, repo: repo) }
+    /// How a device is reached, for status messages: "SSH (user@host)" or "cable".
+    private func route(_ onSSH: Bool) -> String { onSSH ? "SSH (\(host))" : "cable" }
     private var dirty: Bool {
         (synced != nil && synced != currentSources) || (syncedBank != nil && syncedBank != bank.json)
             || (syncedPedals != nil && syncedPedals != pedals.json)
@@ -228,13 +230,13 @@ struct ContentView: View {
             .padding(.leading, compact ? 6 : 18)
             if ["faderbank", "pedals", "ec4"].contains(deviceMode) {
                 Picker("", selection: deviceMode == "pedals" ? $pedalsOnPi : (deviceMode == "ec4" ? $ec4OnPi : $fader16OnPi)) {
-                    Label("Pi", systemImage: "cpu").tag(true)
-                    Label("Mac", systemImage: "laptopcomputer").tag(false)
+                    Label("SSH", systemImage: "network").tag(true)
+                    Label("Cable", systemImage: "cable.connector").tag(false)
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: compact ? 84 : 132)
+                .pickerStyle(.segmented).labelsHidden().frame(width: compact ? 84 : 150)
                 .labelStyle(compact ? AnyLabelStyle(.iconOnly) : AnyLabelStyle(.titleAndIcon))
                 .disabled(busy)
-                .help("Where this device is plugged in: the Raspberry Pi (default) or this Mac")
+                .help("How this device is reached: SSH = plugged into the SSH host (\(host)), Cable = plugged into this computer")
             }
             Spacer(minLength: 4)
             if dirty {
@@ -253,7 +255,7 @@ struct ContentView: View {
             Button { showSettings.toggle() } label: {
                 Image(systemName: "network")
             }
-            .help("Raspberry Pi: \(host) (click to change)")
+            .help("SSH host: \(host) (click to change)")
             .buttonStyle(.bordered)
             .popover(isPresented: $showSettings, arrowEdge: .bottom) { settings }
 
@@ -289,7 +291,7 @@ struct ContentView: View {
                 Button("Send") { Task { await sendEC4() } }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("First on the EC4: press Func, choose Setup, then Receive (the display shows “Work in progress”). Then press Send. This replaces all 16 setups on the device; the last received data is kept on this Mac as a backup.")
+                Text("First on the EC4: press Func, choose Setup, then Receive (the display shows “Work in progress”). Then press Send. This replaces all 16 setups on the device; the last received data is kept on this computer as a backup.")
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
@@ -324,7 +326,7 @@ struct ContentView: View {
             Button("") { saveConfig() }.keyboardShortcut("s", modifiers: [.command, .shift]).opacity(0).frame(width: 0, height: 0)
             Button("") { ConfigLibrary.askOpen { openConfig($0) } }.keyboardShortcut("o", modifiers: .command).opacity(0).frame(width: 0, height: 0)
         }
-        .help("Save the whole setup (DualSense, 16n, pedals, EC4, notes) on this Mac, or load one (⌘⇧S / ⌘O)")
+        .help("Save the whole setup (DualSense, 16n, pedals, EC4, notes) on this computer, or load one (⌘⇧S / ⌘O)")
         .sheet(item: $pendingConfig) { pc in
             ConfigLoadSheet(pending: pc) { parts in applyConfig(pc, parts) }
         }
@@ -376,22 +378,22 @@ struct ContentView: View {
 
     private var settings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Raspberry Pi").font(.headline)
-            LabeledContent("SSH host") { TextField("user@host", text: $host).frame(width: 220) }
+            Text("SSH host").font(.headline)
+            LabeledContent("Host") { TextField("user@host", text: $host).frame(width: 220) }
             LabeledContent("SSH key") { TextField("~/.ssh/…", text: $identity).frame(width: 220) }
-            LabeledContent("Repo on the Pi") { TextField("~/dualsense-eurorack-midi", text: $repo).frame(width: 220) }
+            LabeledContent("Repo on the host") { TextField("~/dualsense-eurorack-midi", text: $repo).frame(width: 220) }
             Text("Used by every tab. Leave the key empty to use your ~/.ssh/config.").font(.caption).foregroundStyle(.secondary)
             Divider()
-            Text("Where each device is plugged in").font(.headline)
-            Text("One setting per device: the same as the Pi | Mac switch on that device's tab. The DualSense and the ER-301 routing always go through the Pi.")
+            Text("How each device is reached").font(.headline)
+            Text("One setting per device, the same as the SSH | Cable switch on that device's tab. SSH: plugged into the SSH host. Cable: plugged into this computer. The DualSense and the ER-301 routing always go through the SSH host.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             plugRow("16n faderbank", $fader16OnPi)
             plugRow("MPC-20 pedals", $pedalsOnPi)
             plugRow("Faderfox EC4", $ec4OnPi)
             Divider()
-            Text("This Mac").font(.headline)
+            Text("Cable").font(.headline)
             LabeledContent("Python") { TextField("/usr/bin/python3", text: $python).frame(width: 220) }
-            Text("For devices plugged into this Mac. 16n and EC4 need python-rtmidi; the MPC-20 needs nothing extra.")
+            Text("For devices plugged into this computer. 16n and EC4 need python-rtmidi; the MPC-20 needs nothing extra.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
@@ -401,8 +403,8 @@ struct ContentView: View {
     private func plugRow(_ title: String, _ onPi: Binding<Bool>) -> some View {
         LabeledContent(title) {
             Picker("", selection: onPi) {
-                Text("Pi").tag(true)
-                Text("this Mac").tag(false)
+                Text("SSH").tag(true)
+                Text("Cable").tag(false)
             }
             .pickerStyle(.segmented).labelsHidden().frame(width: 150)
         }
@@ -449,7 +451,7 @@ struct ContentView: View {
             busy = false
             if quiet {
                 if status.kind == .error && before.kind != .error {
-                    status = Status(kind: .warn, text: before.text + " The Pi isn't reachable, so fader → ER-301 routes can't be loaded or uploaded right now.")
+                    status = Status(kind: .warn, text: before.text + " The SSH host isn't reachable, so fader → ER-301 routes can't be loaded or uploaded right now.")
                 } else {
                     status = before
                 }
@@ -463,19 +465,19 @@ struct ContentView: View {
                 e = try await client.export()
             }
             if e.cc_names == nil {
-                status = Status(kind: .error, text: "The Pi answered, but: \(e.error ?? "no data")")
+                status = Status(kind: .error, text: "The SSH host answered, but: \(e.error ?? "no data")")
                 return
             }
             mapping.apply(e)
             synced = currentSources
             if let ce = e.controls_error {
-                status = Status(kind: .warn, text: "Loaded, but controls.py on the Pi has a problem (defaults shown): \(ce)")
+                status = Status(kind: .warn, text: "Loaded, but controls.py on the SSH host has a problem (defaults shown): \(ce)")
             } else if !mapping.controlsOnPi {
-                status = Status(kind: .warn, text: "Loaded the routing. The Pi doesn't have the button functions installed yet: only the routing will be uploaded.")
+                status = Status(kind: .warn, text: "Loaded the routing. The SSH host doesn't have the button functions installed yet: only the routing will be uploaded.")
             } else if e.ok {
                 status = Status(kind: .ok, text: "Loaded routing and button functions from \(host).")
             } else {
-                status = Status(kind: .warn, text: "Loaded, but the file on the Pi has a problem: \(e.error ?? "")")
+                status = Status(kind: .warn, text: "Loaded, but the file on the SSH host has a problem: \(e.error ?? "")")
             }
         } catch {
             status = Status(kind: .error, text: "Could not load from \(host): \(error.localizedDescription)")
@@ -488,15 +490,15 @@ struct ContentView: View {
         do {
             let d = try await faderClient.export()
             guard d.ok else {
-                status = Status(kind: .error, text: "16n (\(fader16OnPi ? host : "this Mac")): \(d.error ?? "no answer")")
+                status = Status(kind: .error, text: "16n via \(route(fader16OnPi)): \(d.error ?? "no answer")")
                 return
             }
             bank.apply(d)
             syncedBank = bank.json
             let fw = "\(bank.device), firmware \(bank.firmware)\(bank.curvesSupported ? " + curves" : " (no curves)")"
-            status = Status(kind: bank.curvesSupported ? .ok : .warn, text: "Loaded the 16n (\(fw)) via \(fader16OnPi ? host : "this Mac").")
+            status = Status(kind: bank.curvesSupported ? .ok : .warn, text: "Loaded the 16n (\(fw)) via \(route(fader16OnPi)).")
         } catch {
-            status = Status(kind: .error, text: "Could not read the 16n via \(fader16OnPi ? host : "this Mac"): \(error.localizedDescription)")
+            status = Status(kind: .error, text: "Could not read the 16n via \(route(fader16OnPi)): \(error.localizedDescription)")
         }
     }
 
@@ -533,7 +535,7 @@ struct ContentView: View {
     private func receiveEC4() async {
         busy = true
         defer { busy = false }
-        let via = ec4OnPi ? host : "this Mac"
+        let via = route(ec4OnPi)
         status = Status(kind: .info, text: "Waiting for the EC4 (via \(via)): on the device press Func → Setup → Send → “Send all setups” and hold the knob …")
         do {
             let d = try await ec4Client.receive(seconds: 120)
@@ -543,7 +545,7 @@ struct ContentView: View {
             ec4.saveCache()
             syncedEC4 = ec4.fingerprint
             let used = ec4.setups.filter { !$0.name.hasPrefix("SE") && !$0.name.hasPrefix("--") }.count
-            status = Status(kind: .ok, text: "Received all 16 setups from the EC4 via \(via) (\(used) named). Kept on this Mac as a backup.")
+            status = Status(kind: .ok, text: "Received all 16 setups from the EC4 via \(via) (\(used) named). Kept on this computer as a backup.")
         } catch {
             status = Status(kind: .error, text: "Could not receive from the EC4 via \(via): \(error.localizedDescription)")
         }
@@ -552,7 +554,7 @@ struct ContentView: View {
     private func sendEC4() async {
         if let p = ec4.problems.first { status = Status(kind: .error, text: p); return }
         if !ec4.loaded { status = Status(kind: .error, text: "Receive the setups from the EC4 first."); return }
-        let via = ec4OnPi ? host : "this Mac"
+        let via = route(ec4OnPi)
         busy = true
         status = Status(kind: .info, text: "Sending all setups to the EC4 via \(via) … (about a minute; the EC4 shows the progress)")
         do {
@@ -576,11 +578,11 @@ struct ContentView: View {
     private func loadPedals() async {
         busy = true
         defer { busy = false }
-        let via = pedalsOnPi ? host : "this Mac"
+        let via = route(pedalsOnPi)
         do {
             let d = try await pedalClient.export()
             guard d.ok else {
-                status = Status(kind: .error, text: "MPC-20 (\(via)): \(d.error ?? "no answer")")
+                status = Status(kind: .error, text: "MPC-20 via \(via): \(d.error ?? "no answer")")
                 return
             }
             pedals.apply(d)
@@ -595,7 +597,7 @@ struct ContentView: View {
     private func uploadPedals() async {
         if let p = pedals.problems.first { status = Status(kind: .error, text: p); return }
         if !pedals.loaded { status = Status(kind: .error, text: "Load the MPC-20 first."); return }
-        let via = pedalsOnPi ? host : "this Mac"
+        let via = route(pedalsOnPi)
         busy = true
         do {
             let r = try await pedalClient.install(pedals.json)
@@ -644,7 +646,7 @@ struct ContentView: View {
             }
         } catch {
             busy = false
-            status = Status(kind: .error, text: "16n upload via \(fader16OnPi ? host : "this Mac") failed: \(error.localizedDescription)")
+            status = Status(kind: .error, text: "16n upload via \(route(fader16OnPi)) failed: \(error.localizedDescription)")
         }
     }
 
@@ -661,7 +663,7 @@ struct ContentView: View {
         do {
             let r = try await client.install(source)
             guard r.ok else {
-                status = Status(kind: .error, text: "The Pi rejected the routing: \(r.error ?? "unknown error")")
+                status = Status(kind: .error, text: "The SSH host rejected the routing: \(r.error ?? "unknown error")")
                 return
             }
             var parts: [String] = []
@@ -679,7 +681,7 @@ struct ContentView: View {
                 } else if c.hub != nil { parts.append("Button functions active.") }
                 else { parts.append("Button functions saved; the DualSense script did not confirm (is it running?)."); if kind == .ok { kind = .warn } }
             } else {
-                parts.append("Button functions not uploaded (not installed on the Pi yet).")
+                parts.append("Button functions not uploaded (not installed on the SSH host yet).")
                 if kind == .ok { kind = .warn }
             }
             synced = sentAll

@@ -409,7 +409,7 @@ struct PedalPanel: View {
                 Hint(text: "The box detects the pedal type by itself. Settings are stored per jack and pedal type, and kept when it's unplugged.")
             }
             Card(title: "Backup") {
-                Hint(text: "Save Configuration (⌘⇧S, Configs menu) includes the pedal settings. The Pi also has a raw backup: scripts/mpc20_backup_20261111.json (mpc20_tool.py restore).")
+                Hint(text: "Save Configuration (⌘⇧S, Configs menu) includes the pedal settings. The SSH host also has a raw backup: scripts/mpc20_backup_20261111.json (mpc20_tool.py restore).")
             }
         }
     }
@@ -524,7 +524,7 @@ struct SlotCard: View {
                             NumberField(value: Binding(get: { port }, set: { mapping.setFaderPort(channel: ch, cc: s.number, port: $0) }), range: 1...99)
                         }
                         Hint(text: s.channel == 1
-                             ? "The Pi hub moves pedal messages on channel 1 to the DualSense channel (\(mapping.channel)); the route follows that."
+                             ? "The MIDI hub moves pedal messages on channel 1 to the DualSense channel (\(mapping.channel)); the route follows that."
                              : "Routed on channel \(s.channel).")
                     }
                 }

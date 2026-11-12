@@ -13,7 +13,17 @@ final class StageBox {
 /// the buttons in the corner or ⌘+ / ⌘− / ⌘0. Pan: drag, or two-finger scroll on the trackpad.
 struct ZoomStage<Content: View>: View {
     let size: CGSize
+    /// true: the content is a flow layout with its own natural size (it grows with the text size
+    /// and font); the stage becomes at least that big, centred, on the blueprint grid.
+    var grows = false
     @ViewBuilder var content: () -> Content
+
+    @State private var natural: CGSize = .zero
+    /// The drawing's size in drawing units: `size`, or bigger when the content needs more room.
+    private var stage: CGSize {
+        guard grows else { return size }
+        return CGSize(width: max(size.width, natural.width + 60), height: max(size.height, natural.height + 60))
+    }
 
     // DSM_ZOOM / DSM_PAN ("x,y") preset the view for UI snapshots
     @State private var zoom: CGFloat = CGFloat(Double(ProcessInfo.processInfo.environment["DSM_ZOOM"] ?? "") ?? 1)
@@ -28,10 +38,23 @@ struct ZoomStage<Content: View>: View {
 
     var body: some View {
         GeometryReader { geo in
-            let fit = max(0.05, min(geo.size.width / size.width, geo.size.height / size.height))
-            content()
+            let s = stage
+            let fit = max(0.05, min(geo.size.width / s.width, geo.size.height / s.height))
+            Group {
+                if grows {
+                    ZStack {
+                        BlueprintGrid()
+                        content()
+                            .fixedSize()
+                            .background(GeometryReader { g in Color.clear.preference(key: NaturalSizeKey.self, value: g.size) })
+                    }
+                    .onPreferenceChange(NaturalSizeKey.self) { natural = $0 }
+                } else {
+                    content()
+                }
+            }
                 .id(Appearance.shared.revision)          // redraw the drawing when colours / fonts change
-                .frame(width: size.width, height: size.height)
+                .frame(width: s.width, height: s.height)
                 .scaleEffect(fit * zoom)                 // around the centre, so it stays centred
                 .offset(offset)
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -115,8 +138,9 @@ struct ZoomStage<Content: View>: View {
 
     /// Don't let the drawing slide out of view.
     private func clamp(_ o: CGSize, _ view: CGSize, _ z: CGFloat) -> CGSize {
-        let fit = max(0.05, min(view.width / size.width, view.height / size.height))
-        let w = size.width * fit * z, h = size.height * fit * z
+        let s = stage
+        let fit = max(0.05, min(view.width / s.width, view.height / s.height))
+        let w = s.width * fit * z, h = s.height * fit * z
         let mx = max(0, (w - view.width) / 2 + 40), my = max(0, (h - view.height) / 2 + 40)
         return CGSize(width: min(mx, max(-mx, o.width)), height: min(my, max(-my, o.height)))
     }
@@ -157,4 +181,18 @@ struct ZoomStage<Content: View>: View {
         .background(Capsule().fill(Theme.panel.opacity(0.92)))
         .overlay(Capsule().stroke(Theme.line, lineWidth: 1))
     }
+}
+
+/// Natural size of a growing stage's content.
+private struct NaturalSizeKey: PreferenceKey {
+    static let defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let n = nextValue()
+        value = CGSize(width: max(value.width, n.width), height: max(value.height, n.height))
+    }
+}
+
+extension Theme {
+    /// Text-size factor for drawings: boxes that hold text grow with it (never shrink below the design size).
+    static var grow: CGFloat { CGFloat(max(1, Appearance.shared.data.scale)) }
 }

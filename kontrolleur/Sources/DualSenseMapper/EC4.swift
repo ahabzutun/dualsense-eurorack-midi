@@ -216,66 +216,68 @@ struct EC4Canvas: View {
     @Binding var selected: Int
 
     var body: some View {
-        ZoomStage(size: CGSize(width: 1100, height: 640)) {
-            ZStack(alignment: .topLeading) {
-                BlueprintGrid()
-                if board.loaded {
-                    device
-                } else {
-                    VStack(spacing: 10) {
-                        Text("Faderfox EC4").font(Theme.font(22, .heavy, .title)).foregroundStyle(Theme.ink)
-                        Text("No setups received yet.\nPress “Receive”, then on the EC4: Func → Setup → Send → “Send all setups” (hold the knob).")
-                            .multilineTextAlignment(.center)
-                            .font(Theme.font(13, .regular, .mono)).foregroundStyle(Theme.dim)
-                    }
-                    .position(x: 550, y: 320)
+        // A flow layout: everything sizes itself to its text, the stage grows with it
+        ZoomStage(size: CGSize(width: 1100, height: 640), grows: true) {
+            if board.loaded {
+                device
+            } else {
+                VStack(spacing: 10) {
+                    Text("Faderfox EC4").font(Theme.font(22, .heavy, .title)).foregroundStyle(Theme.ink)
+                    Text("No setups received yet.\nPress “Receive”, then on the EC4: Func → Setup → Send → “Send all setups” (hold the knob).")
+                        .multilineTextAlignment(.center)
+                        .font(Theme.font(13, .regular, .mono)).foregroundStyle(Theme.dim)
                 }
             }
         }
     }
 
-    @ViewBuilder private var device: some View {
+    private var device: some View {
         let gr = board.setups[setup].groups[group]
-        Text("EC4 · firmware data \(String(format: "%.1f", board.version))\(board.receivedAt.map { " · received \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")")
-            .font(Theme.font(11, .heavy, .mono)).tracking(1.2)
-            .foregroundStyle(Theme.dim)
-            .position(x: 550, y: 30)
-        // setup + group strip
-        VStack(spacing: 6) {
-            strip(title: "SETUP", names: board.setups.map(\.name), sel: setup) { setup = $0; group = 0 }
-            strip(title: "GROUP", names: board.setups[setup].groups.map(\.name), sel: group) { group = $0 }
-        }
-        .position(x: 550, y: 92)
-        // body with 4x4 encoders
-        RoundedRectangle(cornerRadius: 22)
-            .fill(LinearGradient(colors: [Theme.body.opacity(0.10), Theme.body.opacity(0.03)], startPoint: .top, endPoint: .bottom))
-            .overlay(RoundedRectangle(cornerRadius: 22).stroke(Theme.body.opacity(0.55), lineWidth: 1.6))
-            .frame(width: 620, height: 470)
-            .position(x: 550, y: 390)
-        VStack(spacing: 6) {
-            ForEach(0..<4, id: \.self) { row in
-                HStack(spacing: 6) {
-                    ForEach(0..<4, id: \.self) { col in
-                        let i = row * 4 + col
-                        EncoderTile(enc: gr.encoders[i], index: i, selected: selected == i,
-                                    note: notes.note(NotesStore.ec4(setup, group, i)))
-                            .onTapGesture { selected = i }
+        return VStack(spacing: 20) {
+            Text("EC4 · firmware data \(String(format: "%.1f", board.version))\(board.receivedAt.map { " · received \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")")
+                .font(Theme.font(11, .heavy, .mono)).tracking(1.2)
+                .foregroundStyle(Theme.dim)
+            // setup + group strip
+            Grid(horizontalSpacing: 3, verticalSpacing: 6) {
+                strip(title: "SETUP", names: board.setups.map(\.name), sel: setup) { setup = $0; group = 0 }
+                strip(title: "GROUP", names: board.setups[setup].groups.map(\.name), sel: group) { group = $0 }
+            }
+            // body with 4x4 encoders; the body outline wraps the tiles
+            Grid(horizontalSpacing: 6, verticalSpacing: 6) {
+                ForEach(0..<4, id: \.self) { row in
+                    GridRow {
+                        ForEach(0..<4, id: \.self) { col in
+                            let i = row * 4 + col
+                            EncoderTile(enc: gr.encoders[i], index: i, selected: selected == i,
+                                        note: notes.note(NotesStore.ec4(setup, group, i)))
+                                .onTapGesture { selected = i }
+                        }
                     }
                 }
             }
+            .padding(.horizontal, 26).padding(.vertical, 22)
+            .background(
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(LinearGradient(colors: [Theme.body.opacity(0.10), Theme.body.opacity(0.03)], startPoint: .top, endPoint: .bottom))
+                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(Theme.body.opacity(0.55), lineWidth: 1.6))
+            )
         }
-        .position(x: 550, y: 390)
     }
 
     private func strip(title: String, names: [String], sel: Int, pick: @escaping (Int) -> Void) -> some View {
-        HStack(spacing: 3) {
-            Text(title).font(Theme.font(9, .heavy, .mono)).foregroundStyle(Theme.dim).frame(width: 46, alignment: .leading)
+        GridRow {
+            Text(title).font(Theme.font(9, .heavy, .mono)).foregroundStyle(Theme.dim)
+                .fixedSize()
+                .gridColumnAlignment(.leading)
+                .padding(.trailing, 6)
             ForEach(0..<16, id: \.self) { i in
                 let n = names[i].trimmingCharacters(in: .whitespaces)
                 Text(n.isEmpty ? "\(i + 1)" : n)
                     .font(Theme.font(10, .bold, .mono))
+                    .lineLimit(1)
                     .foregroundStyle(i == sel ? Theme.bg : (n.isEmpty ? Theme.dim : Theme.ink))
-                    .frame(width: 52, height: 22)
+                    .padding(.horizontal, 5).padding(.vertical, 4)
+                    .frame(minWidth: 52, minHeight: 22)
                     .background(RoundedRectangle(cornerRadius: 5).fill(i == sel ? Theme.cv : Theme.body.opacity(0.10)))
                     .contentShape(Rectangle())
                     .onTapGesture { pick(i) }
@@ -295,11 +297,14 @@ struct EncoderTile: View {
     var body: some View {
         let port = enc.type == "cc" ? mapping.faderPort(channel: enc.channel, cc: enc.number) : nil
         let col: Color = enc.type.hasPrefix("cc_rel") ? Theme.function : (enc.type == "note" || enc.type == "pc" ? Theme.trig : Theme.cv)
+        let g = Theme.grow
         VStack(spacing: 6) {
             Text(enc.name.trimmingCharacters(in: .whitespaces).isEmpty ? "—" : enc.name)
                 .font(Theme.font(12, .heavy, .mono))
+                .lineLimit(1).minimumScaleFactor(0.7)
                 .foregroundStyle(Color(red: 0.55, green: 0.95, blue: 0.75))
-                .frame(width: 96, height: 20)
+                .padding(.vertical, 2)
+                .frame(width: 96 * g)
                 .background(RoundedRectangle(cornerRadius: 3).fill(Color.black.opacity(0.65)))
             ZStack {
                 Circle().fill(Theme.bg).frame(width: 52, height: 52)
@@ -312,16 +317,25 @@ struct EncoderTile: View {
                     .foregroundStyle(Theme.ink)
             }
             .font(Theme.font(10, .semibold, .mono))
+            .lineLimit(1).minimumScaleFactor(0.7)
+            let pushText: String? = enc.push.type == "off" ? nil : "push: \(enc.push.type)"
+            if port != nil || note != nil || pushText != nil {
             HStack(spacing: 5) {
                 if port != nil || note == nil {
-                    Text(port.map { "CV \($0)" } ?? (enc.push.type == "off" ? " " : "push: \(enc.push.type)"))
+                    Text(port.map { "CV \($0)" } ?? pushText ?? "")
                         .font(Theme.font(9, .bold, .mono))
+                        .lineLimit(1)
                         .foregroundStyle(port == nil ? Theme.dim : Theme.cv)
                 }
-                if let note { NoteBadge(text: note, size: 9).frame(maxWidth: port == nil ? 130 : 84) }
+                if let note { NoteBadge(text: note, size: 9).frame(maxWidth: (port == nil ? 126 : 80) * g) }
+            }
             }
         }
-        .frame(width: 140, height: 108)
+        // width grows with the text size; height comes from the content, so the
+        // selection outline always wraps all four lines
+        .padding(.vertical, 8)
+        .frame(width: 140 * g)
+        .frame(maxHeight: .infinity, alignment: .top)   // all tiles in a row get the same height
         .background(RoundedRectangle(cornerRadius: 10).fill(selected ? col.opacity(0.12) : Color.clear))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? Theme.ink.opacity(0.7) : Color.clear, lineWidth: 1.2))
         .contentShape(Rectangle())
@@ -430,7 +444,7 @@ struct EC4Panel: View {
                             NumberField(value: Binding(get: { port }, set: { mapping.setFaderPort(channel: e.channel, cc: e.number, port: $0) }), range: 1...99)
                         }
                     }
-                    Hint(text: "Needs the EC4 on the Pi (the hub passes its MIDI to the i2c2midi). The route is stored with the ER-301 routing, so it applies in every setup that sends this channel + CC.")
+                    Hint(text: "Needs the EC4 on SSH (the MIDI hub on the SSH host passes its MIDI to the i2c2midi). The route is stored with the ER-301 routing, so it applies in every setup that sends this channel + CC.")
                 }
             }
             HStack(spacing: 6) {

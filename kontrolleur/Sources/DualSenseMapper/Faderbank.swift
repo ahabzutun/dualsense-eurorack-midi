@@ -343,7 +343,7 @@ struct FaderPanel: View {
                         NumberField(value: Binding(get: { port }, set: { mapping.setFaderPort(channel: f.usb_channel, cc: f.usb_cc, port: $0) }), range: 1...99)
                     }
                 }
-                Hint(text: "Needs the 16n on the Pi (its USB MIDI goes through the hub to the i2c2midi). 0–127 → 0–10 V; with 14-bit only the MSB is used for now.")
+                Hint(text: "Needs the 16n on SSH (its USB MIDI goes through the MIDI hub on the SSH host to the i2c2midi). 0–127 → 0–10 V; with 14-bit only the MSB is used for now.")
             }
 
             Card(title: "TRS MIDI") {

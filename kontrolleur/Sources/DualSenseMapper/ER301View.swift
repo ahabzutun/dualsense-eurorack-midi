@@ -132,41 +132,40 @@ struct ER301Canvas: View {
     @Binding var selectedPort: String?
 
     var body: some View {
-        ZoomStage(size: CGSize(width: 1100, height: 640)) {
-            ZStack(alignment: .topLeading) {
-                BlueprintGrid()
-                let map = mapping.portMap
-                let used = Dictionary(uniqueKeysWithValues: map.map { ($0.id, $0) })
-                let resolver = SourceResolver(mapping: mapping, bank: bank, pedals: pedals, ec4: ec4, notes: notes)
-                let cols = Array(repeating: GridItem(.fixed(100), spacing: 5), count: 10)
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .firstTextBaseline, spacing: 12) {
-                        Text("ER-301").font(Theme.font(22, .heavy, .title)).foregroundStyle(Theme.ink)
-                        Text("SC.CV 1–99 · \(map.filter { $0.kind == "CV" }.count) in use")
-                            .font(Theme.font(11, .semibold, .mono)).foregroundStyle(Theme.dim)
-                        Spacer()
-                        ForEach(["DualSense", "16n", "MPC-20", "EC4", "i2c2midi", "MIDI"], id: \.self) { DeviceBadge(device: $0) }
-                    }
-                    LazyVGrid(columns: cols, alignment: .leading, spacing: 5) {
-                        ForEach(1...99, id: \.self) { p in
-                            let id = "CV\(p)"
-                            PortTile(kind: "CV", port: p, sources: used[id].map(resolver.sources) ?? [], selected: selectedPort == id)
-                                .onTapGesture { selectedPort = (selectedPort == id ? nil : id) }
-                        }
-                    }
-                    if !mapping.triggersAsCV {
-                        Text("SC.TR").font(Theme.font(11, .heavy, .mono)).foregroundStyle(Theme.trig)
-                        LazyVGrid(columns: cols, alignment: .leading, spacing: 5) {
-                            ForEach(1...10, id: \.self) { p in
-                                let id = "TR\(p)"
-                                PortTile(kind: "TR", port: p, sources: used[id].map(resolver.sources) ?? [], selected: selectedPort == id)
-                                    .onTapGesture { selectedPort = (selectedPort == id ? nil : id) }
-                            }
-                        }
+        // A flow layout: tiles size themselves to their text, the stage grows with it
+        ZoomStage(size: CGSize(width: 1100, height: 640), grows: true) {
+            let map = mapping.portMap
+            let used = Dictionary(uniqueKeysWithValues: map.map { ($0.id, $0) })
+            let resolver = SourceResolver(mapping: mapping, bank: bank, pedals: pedals, ec4: ec4, notes: notes)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("ER-301").font(Theme.font(22, .heavy, .title)).foregroundStyle(Theme.ink)
+                    Text("SC.CV 1–99 · \(map.filter { $0.kind == "CV" }.count) in use")
+                        .font(Theme.font(11, .semibold, .mono)).foregroundStyle(Theme.dim)
+                    Spacer(minLength: 20)
+                    ForEach(["DualSense", "16n", "MPC-20", "EC4", "i2c2midi", "MIDI"], id: \.self) { DeviceBadge(device: $0) }
+                }
+                .frame(maxWidth: .infinity)
+                portGrid(kind: "CV", ports: Array(1...99), used: used, resolver: resolver)
+                if !mapping.triggersAsCV {
+                    Text("SC.TR").font(Theme.font(11, .heavy, .mono)).foregroundStyle(Theme.trig)
+                    portGrid(kind: "TR", ports: Array(1...10), used: used, resolver: resolver)
+                }
+            }
+        }
+    }
+
+    /// Ten ports per row; every tile in a row gets the height of the tallest one.
+    private func portGrid(kind: String, ports: [Int], used: [String: Mapping.PortUse], resolver: SourceResolver) -> some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 5, verticalSpacing: 5) {
+            ForEach(Array(stride(from: 0, to: ports.count, by: 10)), id: \.self) { start in
+                GridRow {
+                    ForEach(ports[start..<min(start + 10, ports.count)], id: \.self) { p in
+                        let id = "\(kind)\(p)"
+                        PortTile(kind: kind, port: p, sources: used[id].map(resolver.sources) ?? [], selected: selectedPort == id)
+                            .onTapGesture { selectedPort = (selectedPort == id ? nil : id) }
                     }
                 }
-                .frame(width: 1045, alignment: .topLeading)
-                .position(x: 550, y: mapping.triggersAsCV ? 320 : 330)
             }
         }
     }
@@ -190,13 +189,14 @@ struct PortTile: View {
                 if sources.count > 1 { SharedBadge(count: sources.count) }
             }
             if let s = sources.first {
-                Text(Array(Set(sources.map(\.device))).sorted().joined(separator: " + ")).font(Theme.font(8, .heavy, .mono)).foregroundStyle(col).lineLimit(1)
-                Text(s.note ?? s.detail).font(Theme.font(8.5, .medium)).foregroundStyle(s.note == nil ? Theme.ink : Theme.note).lineLimit(1)
+                Text(Array(Set(sources.map(\.device))).sorted().joined(separator: " + ")).font(Theme.font(8, .heavy, .mono)).foregroundStyle(col).lineLimit(1).minimumScaleFactor(0.8)
+                Text(s.note ?? s.detail).font(Theme.font(8.5, .medium)).foregroundStyle(s.note == nil ? Theme.ink : Theme.note).lineLimit(1).minimumScaleFactor(0.8)
             }
             Spacer(minLength: 0)
         }
         .padding(5)
-        .frame(width: 100, height: 52, alignment: .topLeading)
+        .frame(width: 100 * Theme.grow, alignment: .topLeading)
+        .frame(minHeight: 52 * Theme.grow, maxHeight: .infinity, alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 7).fill(sources.isEmpty ? AnyShapeStyle(Color.clear)
                                                                           : AnyShapeStyle(SourceResolver.bands(cols, opacity: 0.16))))
         .overlay {
