@@ -150,6 +150,9 @@ class ER301Drawing(GrowingDrawing):
             lines.append(D.Text(devs, Theme.font(8, HEAVY, "mono"), col, max_w=inner_w, min_scale=0.8))
             lines.append(D.Text(s.note or s.detail, Theme.font(8.5, MEDIUM), Theme.ink if s.note is None else Theme.note,
                                 max_w=inner_w, min_scale=0.8))
+        desc = ctx.notes.note(NotesStore.port(kind, port))
+        if desc:
+            lines.append(D.Text("» " + NotesStore.one_line(desc), Theme.font(8.5, BOLD), Theme.special, max_w=inner_w, min_scale=0.8))
         content = D.Box(D.Col(lines, 2, "leading"), w=100 * g, min_h=52 * g, align="leading", valign="top", pad=5)
 
         def bg(p, r):
@@ -168,6 +171,8 @@ class ER301Drawing(GrowingDrawing):
 
         tip = (f"SC.{kind} {port}: free" if not srcs else f"SC.{kind} {port}\n" + "\n".join(
             f"{s.device}: {s.detail}" + (f" — {s.note}" if s.note else "") for s in srcs))
+        if desc:
+            tip += f"\nSteers: {desc}"
         return D.Decor(content, before=bg, hits=self.hits, tip=tip, valign="top",
                        on_click=lambda: ctx.select("er_port", None if ctx.er_port == pid else pid, "Ports"))
 
@@ -200,23 +205,55 @@ def _badge_label(d: str) -> QLabel:
     return lb
 
 
+class _PortRow(QFrame):
+    """A row of the port list; clicking it selects the port (as in the drawing)."""
+
+    def __init__(self, on_click):
+        super().__init__()
+        self._on_click = on_click
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._on_click()
+        super().mousePressEvent(ev)
+
+
+DESC_TITLE = "Steers in the ER-301"
+DESC_PROMPT = "e.g. “grain size of the granular player, chain 2”"
+
+
 def ports_panel(ctx, col: QVBoxLayout):
     col.addWidget(W.title("ER-301 ports"))
     col.addWidget(W.hint("Set these as the sources of your ER-301 unit inputs. Each entry shows which device the MIDI comes from. "
+                         "Click a port to select it and note what it steers in your ER-301 patch. "
                          "“×2” marks a port with several sources: fine when intended (e.g. ✕ and the LFO both firing the grain "
                          "trigger); on a CV port the value sent last wins."))
     pmap = ctx.mapping.port_map()
+    content = col.parentWidget()
+    # a free port picked in the drawing: describe it here (e.g. while planning a patch)
+    sel = ctx.er_port
+    if sel and sel not in {u.id for u in pmap}:
+        kind, port = sel[:2], int(sel[2:])
+        card = W.Card(f"SC.{kind} {port} · free", Theme.cv if kind == "CV" else Theme.trig)
+        card.add(W.hint("Nothing is routed to this port yet."))
+        key = NotesStore.port(kind, port)
+        card.add(W.NoteField(ctx.notes.raw(key), lambda t, k=key: ctx.set_note(k, t), DESC_TITLE, DESC_PROMPT))
+        col.addWidget(card)
+        content._focus = card
     if not pmap:
         col.addWidget(W.hint("Nothing routed yet."))
     for use in pmap:
         srcs = sources(ctx, use)
-        sel = ctx.er_port == use.id
-        fr = QFrame()
+        selected = sel == use.id
+        fr = _PortRow(lambda uid=use.id: ctx.er_port != uid and ctx.select("er_port", uid, "Ports"))
         fr.setObjectName("portrow")
         fr.setStyleSheet(f"#portrow {{ background: {W.css(Theme.card)}; border-radius: 10px; border: 1.2px solid "
-                         f"{W.css(_op(Theme.ink, 0.7)) if sel else 'transparent'}; }}")
-        h = QHBoxLayout(fr)
-        h.setContentsMargins(12, 8, 12, 8)
+                         f"{W.css(_op(Theme.ink, 0.7)) if selected else 'transparent'}; }}")
+        outer = QVBoxLayout(fr)
+        outer.setContentsMargins(12, 8, 12, 8)
+        outer.setSpacing(8)
+        h = QHBoxLayout()
         h.setSpacing(10)
         name = W.label(f"SC.{use.kind} {use.port}", 13, HEAVY, "mono", Theme.cv if use.kind == "CV" else Theme.trig)
         name.setFixedWidth(int(84 * Theme.grow))
@@ -231,12 +268,22 @@ def ports_panel(ctx, col: QVBoxLayout):
             v.addLayout(r)
             if s.note:
                 v.addWidget(W.label("✎ " + NotesStore.one_line(s.note), 10.5, MEDIUM, "ui", Theme.note, wrap=True, italic=True))
+        key = NotesStore.port(use.kind, use.port)
+        desc = ctx.notes.note(key)
+        if desc and not selected:
+            v.addWidget(W.label("» " + NotesStore.one_line(desc), 11, BOLD, "ui", Theme.special, wrap=True))
         h.addLayout(v, 1)
         if len(srcs) > 1:
             b = W.label(f"×{len(srcs)}", 9, HEAVY, "mono")
             b.setStyleSheet(f"color: {W.css(Theme.ink)}; border: 1px solid {W.css(_op(Theme.ink, 0.45))}; border-radius: 7px; padding: 0 4px;")
             b.setToolTip(f"{len(srcs)} sources share this port. On a CV port the value sent last wins; on a trigger port each source fires it.")
             h.addWidget(b, 0, Qt.AlignTop)
+        outer.addLayout(h)
+        if selected:
+            outer.addWidget(W.NoteField(ctx.notes.raw(key), lambda t, k=key: ctx.set_note(k, t), DESC_TITLE, DESC_PROMPT))
+            content._focus = fr
+        elif not desc:
+            fr.setToolTip("Click to select this port and describe what it steers")
         col.addWidget(fr)
 
 

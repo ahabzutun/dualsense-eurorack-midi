@@ -502,9 +502,11 @@ class Mapping:
     def python_source(self, notes: Optional[Dict[str, str]] = None) -> str:
         notes = notes or {}
 
-        def noted(c, key):
+        def noted(c, key, port_key=None):
             n = notes.get(key)
-            return c if n is None else c + " · " + n.replace("\n", " ")
+            c = c if n is None else c + " · " + n.replace("\n", " ")
+            d = notes.get("er:" + port_key) if port_key else None
+            return c if d is None else c + " » " + d.replace("\n", " ")
 
         s = (
             '"""\n'
@@ -533,25 +535,26 @@ class Mapping:
             return f"ext:{e.channel}:{_strip(e.control)}"
 
         L, eff = self._line, self.effective_role
-        rows = [L(f"({self._ctl(i)}, {self.port(i)}),", noted(f"{input_title(i)} → SC.CV {self.port(i)}", "ds:" + i.id))
+        tk = "CV" if self.triggers_as_cv else "TR"
+        rows = [L(f"({self._ctl(i)}, {self.port(i)}),", noted(f"{input_title(i)} → SC.CV {self.port(i)}", "ds:" + i.id, f"CV{self.port(i)}"))
                 for i in ALL_INPUTS if i.kind == "cc" and eff(i) == CV]
-        rows += [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} CC {e.control} → SC.CV {e.port}", ext_key(e)))
+        rows += [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} CC {e.control} → SC.CV {e.port}", ext_key(e), f"CV{e.port}"))
                  for e in self.externals if e.kind == EXT_CV]
         section("# CC → SC.CV   (0–127 → 0–10 V)", "CV", rows)
 
-        rows = [L(f"({self._ctl(i)}, {self.port(i)}),", noted(f"{input_title(i)} → SC.CV {self.port(i)}", "ds:" + i.id))
+        rows = [L(f"({self._ctl(i)}, {self.port(i)}),", noted(f"{input_title(i)} → SC.CV {self.port(i)}", "ds:" + i.id, f"CV{self.port(i)}"))
                 for i in ALL_INPUTS if i.kind == "nrpn" and eff(i) == CV]
-        rows += [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} NRPN {e.control} → SC.CV {e.port}", ext_key(e)))
+        rows += [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} NRPN {e.control} → SC.CV {e.port}", ext_key(e), f"CV{e.port}"))
                  for e in self.externals if e.kind == EXT_NRPN]
         section("# 14-bit NRPN → SC.CV   (0–16383 → 0–10 V, full resolution)", "NRPN_CV", rows)
 
-        rows = [L(f"({self._ctl(i)}, {self.port(i)}),", noted(f"{input_title(i)} → {tp} {self.port(i)}", "ds:" + i.id))
+        rows = [L(f"({self._ctl(i)}, {self.port(i)}),", noted(f"{input_title(i)} → {tp} {self.port(i)}", "ds:" + i.id, tk + str(self.port(i))))
                 for i in ALL_INPUTS if i.kind == "cc" and eff(i) == TRIGGER]
-        rows += [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} CC {e.control} → {tp} {e.port}", ext_key(e)))
+        rows += [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} CC {e.control} → {tp} {e.port}", ext_key(e), tk + str(e.port)))
                  for e in self.externals if e.kind == EXT_TRIGGER]
         section("# CC as gate (≥ 64 = high) → trigger port", "TRIGGERS", rows)
 
-        rows = [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} note {e.control} → {tp} {e.port}", ext_key(e)))
+        rows = [L(f"({e.channel}, {self._ext_literal(e.control)}, {e.port}),", noted(f"ch {e.channel} note {e.control} → {tp} {e.port}", ext_key(e), tk + str(e.port)))
                 for e in self.externals if e.kind == EXT_NOTE]
         section("# Note held → trigger port. These notes do not change the pitch.", "NOTE_TRIGGERS", rows)
 

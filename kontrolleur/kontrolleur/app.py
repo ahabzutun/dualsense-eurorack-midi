@@ -401,7 +401,7 @@ class Main(QMainWindow):
     def route_notes(self) -> dict:
         """Notes of routed controls, for the comments in er301_routes.py."""
         from .devices import hub_channel
-        r = {k: self.notes.note(k) for k in self.notes.notes if k.startswith("ds:") and self.notes.note(k)}
+        r = {k: self.notes.note(k) for k in self.notes.notes if k.startswith(("ds:", "er:")) and self.notes.note(k)}
 
         def ext(ch, cc, key):
             n = self.notes.note(key)

@@ -59,6 +59,8 @@ class NotesStore:
     def ec4(s: int, g: int, e: int) -> str: return f"ec4:{s}:{g}:{e}"
     @staticmethod
     def ec4_push(s: int, g: int, e: int) -> str: return f"ec4p:{s}:{g}:{e}"
+    @staticmethod
+    def port(kind: str, port: int) -> str: return f"er:{kind}{port}"     # what an ER-301 port steers
 
     def note(self, key: str) -> Optional[str]:
         n = (self.notes.get(key) or "").strip()

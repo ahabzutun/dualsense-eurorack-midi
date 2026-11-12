@@ -358,4 +358,11 @@ class Inspector(QWidget):
         self.scroll.setWidget(content)
         if old is not None:
             old.deleteLater()
-        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(pos))
+        focus = getattr(content, "_focus", None)
+
+        def restore():
+            self.scroll.verticalScrollBar().setValue(pos)
+            if focus is not None:
+                self.scroll.ensureWidgetVisible(focus, 0, 40)
+
+        QTimer.singleShot(0, restore)
