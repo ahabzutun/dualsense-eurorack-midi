@@ -20,14 +20,15 @@ Also: notes per control (also written into `er301_routes.py` comments), saved co
 **Linux**
 
 ```sh
-cd kontrolleur
-./install-linux.sh           # venv with PySide6, python-rtmidi, pyusb; launcher + menu entry
+git clone -b kontrolleur-and-device-tools https://github.com/ahabzutun/dualsense-eurorack-midi.git ~/dualsense-eurorack-midi
+cd ~/dualsense-eurorack-midi/kontrolleur
+./install-linux.sh           # venv with PySide6, alsa-midi, pyusb; launcher + menu entry
 ./install-linux.sh --udev    # same, plus access to an MPC-20 plugged into this computer (sudo)
 ```
 
-Start it from the app menu or with `kontrolleur`. Needs Python ≥ 3.9 and `ssh`
-(Fedora: `sudo dnf install python3 openssh-clients`). If pip has to build python-rtmidi:
-`sudo dnf install gcc-c++ alsa-lib-devel python3-devel`.
+Start it from the app menu or with `kontrolleur`. Needs Python ≥ 3.9, `git` and `ssh` (all on Fedora
+by default). MIDI to a 16n or EC4 on a cable uses python-rtmidi where it can be installed and
+`scripts/rtmidi_compat.py` (alsa-midi) where it can't, e.g. Fedora 44.
 
 **macOS**
 

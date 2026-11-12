@@ -1,3 +1,4 @@
 PySide6>=6.6
-python-rtmidi>=1.5      # 16n and EC4 on a cable
-pyusb>=1.2              # MPC-20 on a cable (Linux)
+pyusb>=1.2                                         # MPC-20 on a cable (Linux)
+alsa-midi>=1.0; sys_platform == "linux"            # 16n and EC4 on a cable (Linux)
+python-rtmidi>=1.5; sys_platform == "darwin"       # 16n and EC4 on a cable (macOS)

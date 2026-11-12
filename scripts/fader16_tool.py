@@ -18,8 +18,17 @@ import time
 HDR = [0xF0, 0x7D, 0x00, 0x00]
 
 
+def _rtmidi():
+    """python-rtmidi, or the alsa-midi stand-in where it can't be installed (e.g. Fedora 44)."""
+    try:
+        import rtmidi
+    except ImportError:
+        import rtmidi_compat as rtmidi
+    return rtmidi
+
+
 def _ports():
-    import rtmidi
+    rtmidi = _rtmidi()
     i, o = rtmidi.MidiIn(), rtmidi.MidiOut()
     ii = [n for n, p in enumerate(i.get_ports()) if "16n" in p]
     oi = [n for n, p in enumerate(o.get_ports()) if "16n" in p]

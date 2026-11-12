@@ -29,13 +29,11 @@ mkdir -p "$(dirname "$VENV")"
 # system site packages: lets the venv use python3-rtmidi / python3-pyusb from dnf or apt
 [ -x "$VENV/bin/python" ] || "$PY" -m venv --system-site-packages "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet "PySide6>=6.6" "pyusb>=1.2" || { echo "pip could not install PySide6."; exit 1; }
-# python-rtmidi: only needed for the 16n and the EC4 on a cable to this computer
-if ! "$VENV/bin/python" -c "import rtmidi" 2>/dev/null; then
-  if ! "$VENV/bin/python" -m pip install --quiet --only-binary=:all: "python-rtmidi>=1.5" 2>/dev/null; then
-    RTMIDI_MISSING=1
-  fi
-fi
+"$VENV/bin/python" -m pip install --quiet "PySide6>=6.6" "pyusb>=1.2" "alsa-midi>=1.0" \
+  || { echo "pip could not install PySide6 / pyusb / alsa-midi."; exit 1; }
+# MIDI for a 16n or EC4 on a cable: python-rtmidi where it exists, otherwise scripts/rtmidi_compat.py
+# uses alsa-midi (python-rtmidi has no builds for newer Pythons, e.g. Fedora 44's 3.14)
+"$VENV/bin/python" -m pip install --quiet --only-binary=:all: "python-rtmidi>=1.5" 2>/dev/null || true
 
 echo "→ Launcher $BIN"
 mkdir -p "$(dirname "$BIN")"
@@ -69,12 +67,5 @@ if [ "${1:-}" = "--udev" ]; then
   sudo udevadm control --reload-rules && sudo udevadm trigger
 fi
 
-if [ "${RTMIDI_MISSING:-}" = 1 ]; then
-  echo
-  echo "note: python-rtmidi is missing. Everything over SSH works; for a 16n or EC4 on a cable to this computer:"
-  echo "        Fedora:          sudo dnf install python3-rtmidi"
-  echo "        Debian / Ubuntu: sudo apt install python3-rtmidi"
-  echo "      then run ./install-linux.sh again."
-fi
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: add ~/.local/bin to your PATH to start it with 'kontrolleur'";; esac
 echo "Done. Start Kontrolleur from the app menu or with: kontrolleur"

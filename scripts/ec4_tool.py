@@ -207,8 +207,17 @@ def _port(lst):
     raise RuntimeError('no Faderfox EC4 found (is it plugged in?)')
 
 
+def _rtmidi():
+    """python-rtmidi, or the alsa-midi stand-in where it can't be installed (e.g. Fedora 44)."""
+    try:
+        import rtmidi
+    except ImportError:
+        import rtmidi_compat as rtmidi
+    return rtmidi
+
+
 def receive(seconds):
-    import rtmidi
+    rtmidi = _rtmidi()
     mi = rtmidi.MidiIn()
     mi.ignore_types(sysex=False, timing=True, active_sense=True)
     n, name = _port(mi.get_ports())
