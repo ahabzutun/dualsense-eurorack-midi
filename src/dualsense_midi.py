@@ -14,6 +14,7 @@ from state.loop import LoopState
 from state.channel_manager import ChannelManager
 from state.clock_source import ClockSource
 from midi.controller import MIDIController
+from midi.axis_router import AxisRouter
 try:
     from midi.button_router import ButtonRouter, NullRouter
 except Exception as _router_err:      # a broken router must never stop the controller
@@ -253,8 +254,7 @@ def main():
         print("  R3 (Right Stick Click) → FREEZE Right Stick ❄️")
         print("  Sticks → CC 1,2,74,71")
         print("  Triggers → CC 7,10")
-        print("  Touchpad X  → Scrub loop position")
-        print("  Touchpad Y  → Quantize subdivision (top→bottom: 1/32 / 1/16 / 1/8 / 1/4)")
+        print("  Axes        → as set in config/controls.py (AXES)")
         print("  Motion → NRPN 0,1,2 (14-bit tilt X/Y, twist) (Press L1+R1 to toggle)")
         print("=" * 50)
         print("🎛️  MIDI Channel: 1 (White LED) ⚪")
@@ -300,6 +300,55 @@ def main():
             controller_obj.ds.on_mic = (lambda pressed: router.post('mic', pressed))
         except Exception:
             pass
+
+        axes = AxisRouter(controller_obj, channel_manager, midiout, router)
+
+        def _record(msg):
+            loop_state = channel_manager.get_current_loop_state()
+            if loop_state.recording:
+                loop_state.record_message(msg)
+
+        def send_cc(key, cc_val, label=None):
+            """An axis' own CC (its function is 'midi')."""
+            cc = CC_MAP[key]
+            if controller_obj.should_send_cc(cc, cc_val):
+                midi_msg = [controller_obj.get_midi_channel_byte(0xB0), cc, cc_val]
+                midiout.send_message(midi_msg)
+                _record(midi_msg)
+                if label:
+                    print(f"{label} → CC{cc:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+
+        def send_dpad_step(horizontal, up):
+            """D-pad as MIDI: 8 steps per direction pair."""
+            if horizontal:
+                step = channel_manager.increment_horizontal_step() if up else channel_manager.decrement_horizontal_step()
+                key = 'dpad_horizontal'
+            else:
+                step = channel_manager.increment_vertical_step() if up else channel_manager.decrement_vertical_step()
+                key = 'dpad_vertical'
+            cc_val = channel_manager.step_to_cc_value(step)
+            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP[key], cc_val]
+            midiout.send_message(midi_msg)
+            _record(midi_msg)
+            arrow = ("➡️  D-pad RIGHT" if up else "⬅️  D-pad LEFT ") if horizontal else ("⬆️  D-pad UP   " if up else "⬇️  D-pad DOWN ")
+            print(f"{arrow} → CC{CC_MAP[key]:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
+
+        def motion_axis(key, val_14, deadzone, label):
+            """Tilt / twist: only while motion control is on. 'midi' = 14-bit NRPN as before."""
+            if not controller_obj.is_motion_enabled():
+                return
+            if axes.fn(key) != 'midi':
+                axes.value(key, val_14 >> 7, lambda: None)
+                return
+            if abs(val_14 - 8192) > deadzone and controller_obj.should_send_nrpn(NRPN_MAP[key], val_14):
+                controller_obj.send_nrpn(midiout, NRPN_MAP[key], val_14)
+                loop_state = channel_manager.get_current_loop_state()
+                if loop_state.recording:
+                    ch = controller_obj.get_midi_channel_byte(0xB0)
+                    p = NRPN_MAP[key]
+                    for msg in ([ch, 99, (p >> 7) & 0x7F], [ch, 98, p & 0x7F], [ch, 6, (val_14 >> 7) & 0x7F], [ch, 38, val_14 & 0x7F]):
+                        loop_state.record_message(msg)
+                print(f"{label} → NRPN {NRPN_MAP[key]}: {val_14:5d} (Ch {controller_obj.current_channel})")
 
         try:
             while True:
@@ -521,113 +570,44 @@ def main():
                                         print(f"🎚️  O (○)  → CC{CC_MAP['btn_east']:2d}:   0 (Trigger OFF) (Ch {controller_obj.current_channel})")
 
                             elif event.type == ecodes.EV_ABS:
+                                # axes -> functions (AXES in config/controls.py); freeze is applied first
                                 if event.code == ecodes.ABS_X:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
                                     cc_val, _ = channel_manager.get_left_stick_values(raw_val, channel_manager.current_left_y)
-                                    if router.left_stick_x == 'midi':
-                                        if controller_obj.should_send_cc(CC_MAP['left_stick_x'], cc_val):
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['left_stick_x'], cc_val]
-                                            midiout.send_message(midi_msg)
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
-                                    else:
-                                        stick_val = int((cc_val / 127.0) * 255)
-                                        controller_obj.update_fine_slice(stick_val)
-                                        controller_obj.send_grain_slice(midiout)
+                                    axes.value('left_x', cc_val, lambda: send_cc('left_stick_x', cc_val))
 
                                 elif event.code == ecodes.ABS_Y:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
                                     _, cc_val = channel_manager.get_left_stick_values(channel_manager.current_left_x, raw_val)
-                                    if controller_obj.should_send_cc(CC_MAP['left_stick_y'], cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['left_stick_y'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"🕹️  Left Y  → CC{CC_MAP['left_stick_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                    axes.value('left_y', cc_val, lambda: send_cc('left_stick_y', cc_val, "🕹️  Left Y "))
 
                                 elif event.code == ecodes.ABS_RX:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
                                     cc_val, _ = channel_manager.get_right_stick_values(raw_val, channel_manager.current_right_y)
-                                    if controller_obj.should_send_cc(CC_MAP['right_stick_x'], cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['right_stick_x'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"🕹️  Right X → CC{CC_MAP['right_stick_x']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                    axes.value('right_x', cc_val, lambda: send_cc('right_stick_x', cc_val, "🕹️  Right X"))
 
                                 elif event.code == ecodes.ABS_RY:
                                     raw_val = controller_obj.apply_deadzone(event.value, STICK_CENTER, STICK_DEADZONE)
                                     _, cc_val = channel_manager.get_right_stick_values(channel_manager.current_right_x, raw_val)
-                                    if controller_obj.should_send_cc(CC_MAP['right_stick_y'], cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['right_stick_y'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"🕹️  Right Y → CC{CC_MAP['right_stick_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                    axes.value('right_y', cc_val, lambda: send_cc('right_stick_y', cc_val, "🕹️  Right Y"))
 
                                 elif event.code == ecodes.ABS_Z:
                                     raw_val = 0 if event.value <= TRIGGER_DEADZONE else controller_obj.scale_value(event.value, TRIGGER_DEADZONE, 255)
                                     cc_val = channel_manager.get_l2_value(raw_val)
-                                    if controller_obj.should_send_cc(CC_MAP['l2_trigger'], cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['l2_trigger'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"🎚️  L2     → CC{CC_MAP['l2_trigger']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                    axes.value('l2', cc_val, lambda: send_cc('l2_trigger', cc_val, "🎚️  L2    "))
 
                                 elif event.code == ecodes.ABS_RZ:
                                     raw_val = 0 if event.value <= TRIGGER_DEADZONE else controller_obj.scale_value(event.value, TRIGGER_DEADZONE, 255)
                                     cc_val = channel_manager.get_r2_value(raw_val)
-                                    if controller_obj.should_send_cc(CC_MAP['r2_trigger'], cc_val):
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['r2_trigger'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"🎚️  R2     → CC{CC_MAP['r2_trigger']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                    axes.value('r2', cc_val, lambda: send_cc('r2_trigger', cc_val, "🎚️  R2    "))
 
                                 elif event.code == ecodes.ABS_HAT0X:
-                                    if router.dpad_horizontal == 'midi':
-                                        if event.value in (-1, 1):
-                                            step = (channel_manager.increment_horizontal_step() if event.value == 1
-                                                    else channel_manager.decrement_horizontal_step())
-                                            cc_val = channel_manager.step_to_cc_value(step)
-                                            midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_horizontal'], cc_val]
-                                            midiout.send_message(midi_msg)
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                loop_state.record_message(midi_msg)
-                                    elif event.value == -1:
-                                        controller_obj.handle_dpad_left()
-                                        controller_obj.send_grain_slice(midiout)
-                                    elif event.value == 1:
-                                        controller_obj.handle_dpad_right()
-                                        controller_obj.send_grain_slice(midiout)
+                                    if event.value in (-1, 1):
+                                        axes.step('dpad_x', event.value, lambda: send_dpad_step(True, event.value == 1))
 
                                 elif event.code == ecodes.ABS_HAT0Y:
-                                    if event.value == -1:
-                                        step = channel_manager.increment_vertical_step()
-                                        cc_val = channel_manager.step_to_cc_value(step)
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_vertical'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"⬆️  D-pad UP    → CC{CC_MAP['dpad_vertical']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
-                                    elif event.value == 1:
-                                        step = channel_manager.decrement_vertical_step()
-                                        cc_val = channel_manager.step_to_cc_value(step)
-                                        midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['dpad_vertical'], cc_val]
-                                        midiout.send_message(midi_msg)
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.recording:
-                                            loop_state.record_message(midi_msg)
-                                        print(f"⬇️  D-pad DOWN  → CC{CC_MAP['dpad_vertical']:2d}: {cc_val:3d} (Step {step}/7) (Ch {controller_obj.current_channel})")
+                                    if event.value in (-1, 1):       # -1 = up
+                                        axes.step('dpad_y', -event.value, lambda: send_dpad_step(False, event.value == -1))
 
                         elif device == motion:
                             if event.type == ecodes.EV_ABS:
@@ -637,16 +617,7 @@ def main():
                                     raw_7 = controller_obj.scale_value(event.value, -500, 500)
                                     cc_val = controller_obj.smooth_motion(raw_7, 'tilt_x', MOTION_SMOOTHING)
                                     controller_obj.update_haptics_from_tilt(cc_val, controller_obj.smoothed_motion['tilt_y'])
-                                    if controller_obj.is_motion_enabled() and abs(val_14 - 8192) > TILT_DEADZONE_14BIT:
-                                        if controller_obj.should_send_nrpn(NRPN_MAP['tilt_x'], val_14):
-                                            controller_obj.send_nrpn(midiout, NRPN_MAP['tilt_x'], val_14)
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                ch = controller_obj.get_midi_channel_byte(0xB0)
-                                                p = NRPN_MAP['tilt_x']
-                                                for msg in ([ch,99,(p>>7)&0x7F],[ch,98,p&0x7F],[ch,6,(val_14>>7)&0x7F],[ch,38,val_14&0x7F]):
-                                                    loop_state.record_message(msg)
-                                            print(f"📐 Tilt X  → NRPN {NRPN_MAP['tilt_x']}: {val_14:5d} (Ch {controller_obj.current_channel})")
+                                    motion_axis('tilt_x', val_14, TILT_DEADZONE_14BIT, "📐 Tilt X ")
 
                                 elif event.code == ecodes.ABS_Y:
                                     raw_14 = controller_obj.scale_value(event.value, 7500, 8500, 0, 16383)
@@ -654,30 +625,12 @@ def main():
                                     raw_7 = controller_obj.scale_value(event.value, 7500, 8500)
                                     cc_val = controller_obj.smooth_motion(raw_7, 'tilt_y', MOTION_SMOOTHING)
                                     controller_obj.update_haptics_from_tilt(controller_obj.smoothed_motion['tilt_x'], cc_val)
-                                    if controller_obj.is_motion_enabled() and abs(val_14 - 8192) > TILT_DEADZONE_14BIT:
-                                        if controller_obj.should_send_nrpn(NRPN_MAP['tilt_y'], val_14):
-                                            controller_obj.send_nrpn(midiout, NRPN_MAP['tilt_y'], val_14)
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                ch = controller_obj.get_midi_channel_byte(0xB0)
-                                                p = NRPN_MAP['tilt_y']
-                                                for msg in ([ch,99,(p>>7)&0x7F],[ch,98,p&0x7F],[ch,6,(val_14>>7)&0x7F],[ch,38,val_14&0x7F]):
-                                                    loop_state.record_message(msg)
-                                            print(f"📐 Tilt Y  → NRPN {NRPN_MAP['tilt_y']}: {val_14:5d} (Ch {controller_obj.current_channel})")
+                                    motion_axis('tilt_y', val_14, TILT_DEADZONE_14BIT, "📐 Tilt Y ")
 
                                 elif event.code == ecodes.ABS_RZ:
                                     raw_14 = controller_obj.scale_value(event.value, -1000, 1000, 0, 16383)
                                     val_14 = controller_obj.smooth_motion_14bit(raw_14, 'twist', MOTION_SMOOTHING)
-                                    if controller_obj.is_motion_enabled() and abs(val_14 - 8192) > GYRO_DEADZONE_14BIT:
-                                        if controller_obj.should_send_nrpn(NRPN_MAP['twist'], val_14):
-                                            controller_obj.send_nrpn(midiout, NRPN_MAP['twist'], val_14)
-                                            loop_state = channel_manager.get_current_loop_state()
-                                            if loop_state.recording:
-                                                ch = controller_obj.get_midi_channel_byte(0xB0)
-                                                p = NRPN_MAP['twist']
-                                                for msg in ([ch,99,(p>>7)&0x7F],[ch,98,p&0x7F],[ch,6,(val_14>>7)&0x7F],[ch,38,val_14&0x7F]):
-                                                    loop_state.record_message(msg)
-                                            print(f"🔄 Twist   → NRPN {NRPN_MAP['twist']}: {val_14:5d} (Ch {controller_obj.current_channel})")
+                                    motion_axis('twist', val_14, GYRO_DEADZONE_14BIT, "🔄 Twist  ")
 
                         elif device == touchpad:
                             if event.type == ecodes.EV_KEY:
@@ -698,34 +651,16 @@ def main():
 
                             elif event.type == ecodes.EV_ABS:
                                 if event.code == ecodes.ABS_X:
-                                    touchpad_x = event.value
+                                    controller_obj.touchpad_x = event.value
                                     if controller_obj.touchpad_active:
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.playing:
-                                            controller_obj.update_touchpad(touchpad_x, controller_obj.touchpad_y, True)
-                                        if not loop_state.playing:
-                                            cc_val = controller_obj.scale_value(touchpad_x, 0, 1920)
-                                            if controller_obj.should_send_cc(CC_MAP['touchpad_x'], cc_val):
-                                                midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_x'], cc_val]
-                                                midiout.send_message(midi_msg)
-                                                if loop_state.recording:
-                                                    loop_state.record_message(midi_msg)
-                                                print(f"👆 Touch X → CC{CC_MAP['touchpad_x']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                        cc_val = controller_obj.scale_value(event.value, 0, 1920)
+                                        axes.value('touch_x', cc_val, lambda: send_cc('touchpad_x', cc_val, "👆 Touch X"))
 
                                 elif event.code == ecodes.ABS_Y:
-                                    touchpad_y = event.value
+                                    controller_obj.touchpad_y = event.value
                                     if controller_obj.touchpad_active:
-                                        loop_state = channel_manager.get_current_loop_state()
-                                        if loop_state.playing:
-                                            controller_obj.update_touchpad(controller_obj.touchpad_x, touchpad_y, True)
-                                        else:
-                                            cc_val = controller_obj.scale_value(touchpad_y, 0, 1080)
-                                            if controller_obj.should_send_cc(CC_MAP['touchpad_y'], cc_val):
-                                                midi_msg = [controller_obj.get_midi_channel_byte(0xB0), CC_MAP['touchpad_y'], cc_val]
-                                                midiout.send_message(midi_msg)
-                                                if loop_state.recording:
-                                                    loop_state.record_message(midi_msg)
-                                                print(f"👆 Touch Y → CC{CC_MAP['touchpad_y']:2d}: {cc_val:3d} (Ch {controller_obj.current_channel})")
+                                        cc_val = controller_obj.scale_value(event.value, 0, 1080)
+                                        axes.value('touch_y', cc_val, lambda: send_cc('touchpad_y', cc_val, "👆 Touch Y"))
 
                 controller_obj.send_held_button_ccs(midiout)
                 router.tick()

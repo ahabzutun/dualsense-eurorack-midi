@@ -40,6 +40,32 @@ ACTIONS = {
 DPAD_HORIZONTAL_MODES = ("slice_section", "midi")
 LEFT_STICK_X_MODES = ("slice_fine", "midi")
 
+# Axes -> function. Continuous axes give a position 0-127, step axes (D-pad) give -1 / +1.
+#   midi           send the axis' own CC (motion: 14-bit NRPN) - route it to the ER-301 in er301_routes.py
+#   none           nothing
+#   slice_fine     grain slice: slice inside the section (16)        step axes: -
+#   slice_section  grain slice: section of 16 inside the block (8)    step axes: previous / next section
+#   slice_block    grain slice: block of 128 (8)                      step axes: previous / next block
+#   loop_scrub     playing loop: playback position                     (continuous only)
+#   quantize_grid  quantize subdivision 1/32 1/16 1/8 1/4              (continuous only)
+AXIS_CC = {   # axis -> CC_MAP / NRPN_MAP key of its own MIDI output
+    "left_x": "left_stick_x", "left_y": "left_stick_y", "right_x": "right_stick_x", "right_y": "right_stick_y",
+    "l2": "l2_trigger", "r2": "r2_trigger", "touch_x": "touchpad_x", "touch_y": "touchpad_y",
+    "dpad_x": "dpad_horizontal", "dpad_y": "dpad_vertical", "tilt_x": "tilt_x", "tilt_y": "tilt_y", "twist": "twist",
+}
+AXES = list(AXIS_CC)
+STEP_AXES = ("dpad_x", "dpad_y")
+AXIS_FUNCTIONS = {
+    "midi":          "send its own MIDI (route it in er301_routes.py)",
+    "none":          "nothing",
+    "slice_fine":    "grain slice: slice inside the section",
+    "slice_section": "grain slice: section of 16",
+    "slice_block":   "grain slice: block of 128",
+    "loop_scrub":    "loop: playback position",
+    "quantize_grid": "loop: quantize subdivision",
+}
+STEP_FUNCTIONS = ("midi", "none", "slice_section", "slice_block")
+
 DEFAULTS = {
     "buttons": {
         "cross": {"tap": "midi", "hold": None}, "circle": {"tap": "midi", "hold": None},
@@ -54,6 +80,9 @@ DEFAULTS = {
     "chords": [("l1", "r1", "motion"), ("create", "options", "block_reset")],
     "dpad_horizontal": "slice_section",
     "left_stick_x": "slice_fine",
+    "axes": {"left_x": "slice_fine", "left_y": "midi", "right_x": "midi", "right_y": "midi", "l2": "midi", "r2": "midi",
+             "touch_x": "loop_scrub", "touch_y": "quantize_grid", "dpad_x": "slice_section", "dpad_y": "midi",
+             "tilt_x": "midi", "tilt_y": "midi", "twist": "midi"},
 }
 
 
@@ -78,7 +107,9 @@ def _action(value, where, allow_midi=True):
 def load(path=CONTROLS_PATH):
     """Return the checked controls as a dict (see DEFAULTS). Raises ControlsError."""
     if not os.path.exists(path):
-        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
+        d = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
+        d["buttons"] = {n: dict(v) for n, v in DEFAULTS["buttons"].items()}
+        return d
     try:
         spec = importlib.util.spec_from_file_location("controls_live", path)
         mod = importlib.util.module_from_spec(spec)
@@ -111,7 +142,22 @@ def load(path=CONTROLS_PATH):
     _check(dh in DPAD_HORIZONTAL_MODES, f"DPAD_HORIZONTAL must be one of {DPAD_HORIZONTAL_MODES}")
     lx = getattr(mod, "LEFT_STICK_X", DEFAULTS["left_stick_x"])
     _check(lx in LEFT_STICK_X_MODES, f"LEFT_STICK_X must be one of {LEFT_STICK_X_MODES}")
-    return {"buttons": buttons, "chords": chords, "dpad_horizontal": dh, "left_stick_x": lx}
+
+    # AXES (new); files without it: DPAD_HORIZONTAL / LEFT_STICK_X as before
+    axes = dict(DEFAULTS["axes"])
+    axes["dpad_x"], axes["left_x"] = dh, lx
+    raw_axes = getattr(mod, "AXES", None)
+    if raw_axes is not None:
+        _check(isinstance(raw_axes, dict), "AXES must be a dict")
+        for name, fn in raw_axes.items():
+            _check(name in AXIS_CC, f"AXES: unknown axis {name!r} (known: {', '.join(AXES)})")
+            _check(fn in AXIS_FUNCTIONS, f"AXES[{name!r}]: unknown function {fn!r} (known: {', '.join(AXIS_FUNCTIONS)})")
+            _check(name not in STEP_AXES or fn in STEP_FUNCTIONS,
+                   f"AXES[{name!r}]: the D-pad can do {', '.join(STEP_FUNCTIONS)}")
+            axes[name] = fn
+    dh = "slice_section" if axes["dpad_x"] == "slice_section" else "midi"
+    lx = "slice_fine" if axes["left_x"] == "slice_fine" else "midi"
+    return {"buttons": buttons, "chords": chords, "dpad_horizontal": dh, "left_stick_x": lx, "axes": axes}
 
 
 def mtime(path=CONTROLS_PATH):
