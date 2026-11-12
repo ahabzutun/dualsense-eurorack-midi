@@ -23,6 +23,11 @@ except Exception as _e:
     print(f"osc_out tap not loaded: {_e}")
 import time
 import threading
+try:
+    import er301_config     # ER-301 routing for the i2c2midi (config/er301_routes.py)
+except Exception as _e:
+    er301_config = None
+    print(f"er301_config not loaded: {_e}")
 
 
 class MIDIHub:
@@ -69,8 +74,15 @@ class MIDIHub:
         # Keeps the 115200-baud XIAO link clear. SSP/NerdSEQ are not affected.
         self.TT_COALESCE_ENABLED = True
         self.TT_FLUSH_INTERVAL   = 0.010     # seconds
+        # Channels that go straight through (no coalescing): ch 2 is the DualSense
+        # instrument that i2c2midi turns into ER-301 gates/triggers — timing-critical.
+        self.TT_COALESCE_EXEMPT_CHANNELS = {2}
         self._tt_pending = {}
         self._tt_lock = threading.Lock()
+        # ER-301 routing (config/er301_routes.py) is sent to the i2c2midi as SysEx
+        # whenever the XIAO-TT output (re)connects or the file changes.
+        self._er301_mtime = None
+        self._er301_push_pending = False
         # ─────────────────────────────────────────────────────────────────────
 
         # Create scanners ONCE and reuse them (never re-create these)
@@ -167,6 +179,8 @@ class MIDIHub:
                         self.outputs[name] = midiout
                         self._out_port_names[name] = port_name
                         print(f"✅ Output connected: {port_name}")
+                        if name == 'Teletype':
+                            self._er301_push_pending = True
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
                         del midiout   # don't leak the client on failure either
@@ -300,6 +314,8 @@ class MIDIHub:
     def _tt_coalesce(self, msg):
         """Queue continuous messages for Teletype; return True if queued."""
         if not self.TT_COALESCE_ENABLED or len(msg) < 2:
+            return False
+        if (msg[0] & 0x0F) + 1 in self.TT_COALESCE_EXEMPT_CHANNELS:
             return False
         msg_type = msg[0] & 0xF0
         if msg_type == 0xB0 and len(msg) >= 3:
@@ -448,6 +464,39 @@ class MIDIHub:
         except Exception:
             pass  # file not written yet, keep current cache
 
+    def _er301_tick(self):
+        """Send the ER-301 routing to the i2c2midi on connect or when er301_routes.py changes."""
+        if er301_config is None:
+            return
+        m = er301_config.mtime()
+        if m != self._er301_mtime:
+            if self._er301_mtime is not None:
+                print("📝 er301_routes.py changed")
+            self._er301_mtime = m
+            self._er301_push_pending = True
+        if not self._er301_push_pending or 'Teletype' not in self.outputs:
+            return
+        self._er301_push_pending = False
+        try:
+            msgs, summary = er301_config.build()
+        except er301_config.ConfigError as e:
+            print(f"⚠️  ER-301 routing NOT sent, er301_routes.py: {e}")
+            return
+        for msg in msgs:
+            with self.lock:
+                out = self.outputs.get('Teletype')
+                if out is None:
+                    self._er301_push_pending = True
+                    return
+                try:
+                    out.send_message(msg)
+                except Exception as e:
+                    print(f"⚠️  ER-301 routing send failed: {e}")
+                    self._er301_push_pending = True
+                    return
+            time.sleep(0.003)
+        print(f"🎛️  ER-301 routing sent to i2c2midi: {summary}")
+
     def monitor_loop(self):
         """Periodically rescan for device changes"""
         print("🔄 Hot-plug monitoring active (logging on change only)")
@@ -456,6 +505,7 @@ class MIDIHub:
                 self._refresh_channel_cache()
                 self.scan_and_update_outputs()
                 self.scan_and_update_inputs()
+                self._er301_tick()
                 self._gc_tick = getattr(self, "_gc_tick", 0) + 1
                 if self._gc_tick >= 5:   # every ~5s: reclaim GC-delayed rtmidi ALSA clients (load bursts)
                     self._gc_tick = 0
