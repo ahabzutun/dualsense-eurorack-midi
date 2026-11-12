@@ -54,6 +54,7 @@ class Main(QMainWindow):
         self.pedal_sel = 0
         self.ec4_setup = self.ec4_group = self.ec4_enc = 0
         self.er_port: Optional[str] = None
+        self.er_view = "CV"            # which ER-301 ports the matrix shows: CV / TR
         self.mode = os.environ.get("KONTROLLEUR_MODE") or self.s.value("deviceMode", "dualsense")
         if self.mode not in dict(MODES):
             self.mode = "dualsense"
@@ -166,6 +167,8 @@ class Main(QMainWindow):
 
     def select(self, attr: str, value, tab: Optional[str] = None):
         setattr(self, attr, value)
+        if attr == "er_port" and value:
+            self.er_view = value[:2]       # a TR port picked in the list: show the SC.TR matrix
         if tab and self.inspector.tab != tab and tab in self.inspector.tabs:
             self.inspector.set_tab(tab)
         else:

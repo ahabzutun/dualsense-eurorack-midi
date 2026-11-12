@@ -103,18 +103,27 @@ class ER301Drawing(GrowingDrawing):
         m = ctx.mapping
         pmap = m.port_map()
         used = {u.id: u for u in pmap}
-        grid = self._grid("CV", list(range(1, 100)), used)
-        parts = [None, grid]
-        if not m.triggers_as_cv:
-            parts += [D.Text("SC.TR", Theme.font(11, HEAVY, "mono"), Theme.trig), self._grid("TR", list(range(1, 11)), used)]
-        left = D.Row([D.Text("ER-301", Theme.font(22, HEAVY, "title"), Theme.ink),
-                      D.Text(f"SC.CV 1–99 · {sum(1 for u in pmap if u.kind == 'CV')} in use", Theme.font(11, SEMIBOLD, "mono"), Theme.dim)],
-                     12, "bottom")
+        view = ctx.er_view
+        grid = self._grid(view, list(range(1, 100)), used)
+        toggles = [self._toggle(k, sum(1 for u in pmap if u.kind == k), view == k) for k in ("CV", "TR")]
+        left = D.Row([D.Text("ER-301", Theme.font(22, HEAVY, "title"), Theme.ink), D.Gap(4)] + toggles, 8)
         right = D.Row([_device_badge(d) for d in DEVICES], 5)
         width = max(grid.w, left.w + 20 + right.w)
-        parts[0] = D.Custom(width, max(left.h, right.h), lambda p, r: (left.paint(p, r.left(), r.top() + (r.height() - left.h)),
-                                                                         right.paint(p, r.right() - right.w, r.top() + (r.height() - right.h) / 2)))
+        head = D.Custom(width, max(left.h, right.h), lambda p, r: (left.paint(p, r.left(), r.top() + (r.height() - left.h) / 2),
+                                                                   right.paint(p, r.right() - right.w, r.top() + (r.height() - right.h) / 2)))
+        parts = [head, grid]
+        if view == "TR" and m.triggers_as_cv:
+            parts.append(D.Text("Triggers currently go to SC.CV ports (ER-301 tab → Pitch & LFO → Output). "
+                                "SC.TR ports can still be described here.", Theme.font(10, MEDIUM, "mono"), Theme.dim))
         return D.Col(parts, 10, "leading")
+
+    def _toggle(self, kind: str, n: int, on: bool) -> D.Item:
+        """SC.CV / SC.TR switch in the header."""
+        col = Theme.cv if kind == "CV" else Theme.trig
+        t = D.Text(f"SC.{kind} 1–99 · {n} in use", Theme.font(11, BOLD if on else SEMIBOLD, "mono"), col if on else Theme.dim)
+        pill = D.Pill(t, 9, 3, _op(col, 0.16) if on else None, col if on else Theme.line, 1.2)
+        return D.Decor(pill, hits=self.hits, on_click=lambda: self.ctx.select("er_view", kind),
+                       tip=f"Show the SC.{kind} ports")
 
     def _grid(self, kind: str, ports: List[int], used) -> D.Grid:
         rows, row = [], []
