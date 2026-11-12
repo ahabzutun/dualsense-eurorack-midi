@@ -185,14 +185,24 @@ class Segmented(QWidget):
             h.addWidget(b)
             self.buttons.append((v, b))
 
+        self._raise()
+
+    def _raise(self):
+        """The selected segment on top, so its whole (accent) border shows."""
+        for _v, b in self.buttons:
+            if b.isChecked():
+                b.raise_()
+
     def _pick(self, v, on_change):
         for vv, b in self.buttons:
             b.setChecked(vv == v)
+        self._raise()
         on_change(v)
 
     def set_current(self, v):
         for vv, b in self.buttons:
             b.setChecked(vv == v)
+        self._raise()
 
 
 class Switch(QAbstractButton):
