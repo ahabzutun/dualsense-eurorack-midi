@@ -23,7 +23,7 @@ Also: notes per control (also written into `er301_routes.py` comments), saved co
 ```sh
 git clone -b kontrolleur-and-device-tools https://github.com/ahabzutun/dualsense-eurorack-midi.git ~/dualsense-eurorack-midi
 cd ~/dualsense-eurorack-midi/kontrolleur
-./install-linux.sh           # venv with PySide6, alsa-midi, pyusb; launcher + menu entry
+./install-linux.sh           # venv with PySide6-Essentials, alsa-midi, pyusb; launcher + menu entry
 ./install-linux.sh --udev    # same, plus access to an MPC-20 plugged into this computer (sudo)
 ```
 
@@ -38,7 +38,7 @@ cd kontrolleur
 ./install-mac.sh             # venv + ~/Applications/Kontrolleur.app
 ```
 
-Or run it straight from the repository: `python3 kontrolleur.py` (with PySide6 installed).
+Or run it straight from the repository: `python3 kontrolleur.py` (with PySide6 or PySide6-Essentials installed).
 
 ## Where things are kept
 

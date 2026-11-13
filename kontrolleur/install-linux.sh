@@ -29,8 +29,11 @@ mkdir -p "$(dirname "$VENV")"
 # system site packages: lets the venv use python3-rtmidi / python3-pyusb from dnf or apt
 [ -x "$VENV/bin/python" ] || "$PY" -m venv --system-site-packages "$VENV"
 "$VENV/bin/python" -m pip install --quiet --upgrade pip
-"$VENV/bin/python" -m pip install --quiet "PySide6>=6.6" "pyusb>=1.2" "alsa-midi>=1.0" \
-  || { echo "pip could not install PySide6 / pyusb / alsa-midi."; exit 1; }
+# only Qt core / GUI / widgets: drop the full PySide6 (web engine, 3D, PDF …) if an older install pulled it in
+"$VENV/bin/python" -m pip uninstall --quiet -y PySide6 PySide6_Addons PySide6_WebEngine PySide6_Pdf 2>/dev/null || true
+"$VENV/bin/python" -m pip install --quiet --force-reinstall --no-deps "PySide6-Essentials>=6.6" "shiboken6>=6.6" \
+  && "$VENV/bin/python" -m pip install --quiet "PySide6-Essentials>=6.6" "pyusb>=1.2" "alsa-midi>=1.0" \
+  || { echo "pip could not install PySide6-Essentials / pyusb / alsa-midi."; exit 1; }
 # MIDI for a 16n or EC4 on a cable: python-rtmidi where it exists, otherwise scripts/rtmidi_compat.py
 # uses alsa-midi (python-rtmidi has no builds for newer Pythons, e.g. Fedora 44's 3.14)
 "$VENV/bin/python" -m pip install --quiet --only-binary=:all: "python-rtmidi>=1.5" 2>/dev/null || true

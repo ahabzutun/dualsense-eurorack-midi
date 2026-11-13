@@ -1,4 +1,4 @@
-PySide6>=6.6
+PySide6-Essentials>=6.6                            # Qt core, GUI and widgets only
 pyusb>=1.2                                         # MPC-20 on a cable (Linux)
 alsa-midi>=1.0; sys_platform == "linux"            # 16n and EC4 on a cable (Linux)
 python-rtmidi>=1.5; sys_platform == "darwin"       # 16n and EC4 on a cable (macOS)
