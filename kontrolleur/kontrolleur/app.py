@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
-import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -1013,26 +1012,6 @@ def _reveal(path: Path):
         os.startfile(str(path))   # noqa
 
 
-def _migrate_mac_settings(s):
-    """First start on a Mac: take over the Swift app's settings (host, key, routes, appearance …)."""
-    if sys.platform != "darwin" or s.value("migrated") in (True, "true"):
-        return
-    s.setValue("migrated", True)
-    try:
-        out = subprocess.run(["defaults", "export", "net.ahab.dualsense-mapper", "-"], capture_output=True, timeout=5).stdout
-        d = plistlib.loads(out)
-    except Exception:
-        return
-    for k in ("host", "identity", "repo", "fader16OnPi", "pedalsOnPi", "ec4OnPi", "deviceMode", "recentConfigs"):
-        if k in d:
-            s.setValue(k, d[k])
-    if isinstance(d.get("appearance"), (bytes, bytearray)):
-        try:
-            s.setValue("appearance", json.dumps(json.loads(d["appearance"].decode())))
-        except Exception:
-            pass
-
-
 def main():
     if sys.platform.startswith("linux") and not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("WAYLAND_DISPLAY"):
         os.environ.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
@@ -1040,7 +1019,6 @@ def main():
     app.setApplicationName("Kontrolleur")
     app.setOrganizationName("Kontrolleur")
     app.setDesktopFileName("kontrolleur")
-    _migrate_mac_settings(store.settings())    # before the theme reads its settings
     theme.init()
     w = Main()
     w.show()

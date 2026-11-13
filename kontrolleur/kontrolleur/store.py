@@ -18,11 +18,11 @@ def settings() -> QSettings:
 
 
 def data_dir() -> Path:
-    """macOS: the folder the Swift app used, so notes and the EC4 dump carry over."""
+    """Notes and the last EC4 dump."""
     if os.environ.get("KONTROLLEUR_DATA"):
         d = Path(os.environ["KONTROLLEUR_DATA"])
     elif sys.platform == "darwin":
-        d = Path.home() / "Library" / "Application Support" / "DualSense Mapper"
+        d = Path.home() / "Library" / "Application Support" / "Kontrolleur"
     else:
         d = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "kontrolleur"
     d.mkdir(parents=True, exist_ok=True)
@@ -183,7 +183,7 @@ def remember(path: Path):
 
 def recent(limit: int = 10) -> List[Path]:
     urls = [Path(x) for x in (settings().value("recentConfigs") or [])]
-    folders = [config_folder(), Path.home() / "Documents" / "DualSense Mapper"]
+    folders = [config_folder()]
     for d in folders:
         if d.is_dir():
             urls += [p for p in d.iterdir() if p.suffix == ".dsmconfig"]

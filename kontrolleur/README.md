@@ -45,10 +45,10 @@ Or run it straight from the repository: `python3 kontrolleur.py` (with PySide6 i
 | | Linux | macOS |
 |---|---|---|
 | Settings (host, routes, appearance) | `~/.config/Kontrolleur/Kontrolleur.conf` | `~/Library/Preferences/com.kontrolleur.Kontrolleur.plist` |
-| Notes, last EC4 dump | `~/.local/share/kontrolleur/` | `~/Library/Application Support/DualSense Mapper/` |
+| Notes, last EC4 dump | `~/.local/share/kontrolleur/` | `~/Library/Application Support/Kontrolleur/` |
 | Configurations | `~/Documents/Kontrolleur/` | `~/Documents/Kontrolleur/` |
 
-Configuration files are the same on both systems (and the same as the old Swift app's).
+Configuration files are the same on both systems.
 
 ## Checking the UI without devices
 

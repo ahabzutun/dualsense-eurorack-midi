@@ -1,7 +1,6 @@
 """
 DualSense routing and button functions: what the app edits, and the two files it writes on the
-SSH host (src/config/er301_routes.py and src/config/controls.py). Port of the Mac app's Model.swift;
-the generated files are byte-identical to the Mac app's.
+SSH host (src/config/er301_routes.py and src/config/controls.py).
 """
 from __future__ import annotations
 

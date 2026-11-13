@@ -1,5 +1,5 @@
 #!/bin/bash
-# Kontrolleur on macOS: Python environment + ~/Applications/Kontrolleur.app (replaces the old Swift build)
+# Kontrolleur on macOS: Python environment + ~/Applications/Kontrolleur.app
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SUPPORT="$HOME/Library/Application Support/Kontrolleur"
@@ -19,11 +19,6 @@ mkdir -p "$SUPPORT"
 "$VENV/bin/python" -m pip install --quiet -r "$HERE/requirements.txt"
 
 echo "→ $APP"
-if [ -d "$APP" ] && [ -f "$APP/Contents/MacOS/DualSenseMapper" ]; then
-  rm -rf "$HOME/Applications/Kontrolleur (Swift).app"
-  mv "$APP" "$HOME/Applications/Kontrolleur (Swift).app"
-  echo "   the old Swift build is kept as “Kontrolleur (Swift).app” until you delete it"
-fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cat > "$APP/Contents/MacOS/Kontrolleur" <<LAUNCH
