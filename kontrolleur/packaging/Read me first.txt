@@ -1,0 +1,28 @@
+KONTROLLEUR
+===========
+
+Install: drag Kontrolleur onto the Applications folder next to it.
+Needs a Mac with Apple Silicon (M1 or newer) and macOS 14 Sonoma or newer.
+
+FIRST START
+Kontrolleur isn't from the App Store and isn't signed with an Apple developer
+account, so macOS blocks it the first time ("Apple could not verify …").
+Open it once anyway:
+
+  1. Double-click Kontrolleur in Applications and close the warning.
+  2. Open System Settings → Privacy & Security, scroll down to
+     "Kontrolleur was blocked …" and click "Open Anyway".
+  3. Confirm with "Open Anyway" and your password.
+
+After that it opens normally.
+(Or in Terminal: xattr -dr com.apple.quarantine /Applications/Kontrolleur.app)
+
+WHAT IT DOES
+- 16n faderbank, Faderfox EC4 and DOREMiDi MPC-20 plugged into this Mac:
+  choose "Cable" for the device and load / edit / upload its settings.
+- DualSense, Pi functions and ER-301 routing: need a Raspberry Pi with
+  github.com/ahabzutun/dualsense-eurorack-midi, reached over SSH
+  (set the host under "SSH").
+
+Settings live in ~/Library/Preferences/com.kontrolleur.Kontrolleur.plist,
+notes in ~/Library/Application Support/Kontrolleur.

@@ -10,9 +10,11 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
 
-# scripts/ of the repository this app lives in (the same files run on the SSH host)
+# scripts/ of the repository this app lives in (the same files run on the SSH host);
+# in the packed Mac app (PyInstaller) they travel inside the app
+FROZEN = bool(getattr(sys, "frozen", False))
 REPO = Path(__file__).resolve().parents[2]
-SCRIPTS = REPO / "scripts"
+SCRIPTS = Path(getattr(sys, "_MEIPASS", "")) / "scripts" if FROZEN else REPO / "scripts"
 
 
 class ToolError(Exception):
@@ -43,9 +45,15 @@ def run_local(python: str, script: str, args, stdin: Optional[str] = None, timeo
     path = SCRIPTS / script
     if not path.exists():
         raise ToolError(f"{script} is missing in {SCRIPTS}")
-    py = _expand(python) if python.strip() else sys.executable
+    if python.strip():
+        cmd = [_expand(python), str(path)]
+    elif FROZEN:
+        cmd = [sys.executable, "--run-script", str(path)]     # the packed app runs the tool itself
+    else:
+        cmd = [sys.executable, str(path)]
+    py = cmd[0]
     try:
-        p = subprocess.run([py, str(path), *args], input=stdin or "", capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run([*cmd, *args], input=stdin or "", capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         raise ToolError(f"can't start {py}")
     except subprocess.TimeoutExpired:
