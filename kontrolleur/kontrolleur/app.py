@@ -98,7 +98,7 @@ class Main(QMainWindow):
     @property
     def host(self) -> clients.Host:
         return clients.Host(self.get("host", "ahab@ahab.local"), self.get("identity", "~/.ssh/id_ed25519_pi"),
-                            self.get("repo", "~/dualsense-eurorack-midi"), self.get("python", sys.executable))
+                            self.get("repo", "~/dualsense-eurorack-midi"), self.get("python", "" if clients.FROZEN else sys.executable))
 
     def on_ssh(self, mode: str) -> bool:
         return self.get(ROUTE_KEY[mode], True)
@@ -855,9 +855,12 @@ class Main(QMainWindow):
             v.addWidget(W.row(title_text, seg))
         v.addWidget(W.divider())
         v.addWidget(W.label("Cable", 14, BOLD))
-        field("Python", "python", sys.executable, "python3 with python-rtmidi")
-        v.addWidget(W.hint("For devices plugged into this computer. 16n and EC4 need python-rtmidi; the MPC-20 needs pyusb on Linux "
-                           "(install-linux.sh sets both up)."))
+        if clients.FROZEN:
+            v.addWidget(W.hint("For devices plugged into this computer. The tools for them are built into this app."))
+        else:
+            field("Python", "python", sys.executable, "python3 with python-rtmidi")
+            v.addWidget(W.hint("For devices plugged into this computer. 16n and EC4 need python-rtmidi; the MPC-20 needs pyusb on Linux "
+                               "(install-linux.sh sets both up)."))
         self._popup(self.host_btn, w)
 
     def show_appearance(self):

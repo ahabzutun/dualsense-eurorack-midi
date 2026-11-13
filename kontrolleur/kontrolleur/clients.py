@@ -45,15 +45,16 @@ def run_local(python: str, script: str, args, stdin: Optional[str] = None, timeo
     path = SCRIPTS / script
     if not path.exists():
         raise ToolError(f"{script} is missing in {SCRIPTS}")
-    if python.strip():
-        cmd = [_expand(python), str(path)]
-    elif FROZEN:
-        cmd = [sys.executable, "--run-script", str(path)]     # the packed app runs the tool itself
+    py = _expand(python) if python.strip() else ""
+    if FROZEN and (not py or os.path.realpath(py) == os.path.realpath(sys.executable)):
+        # the packed app runs the tool itself; started without --run-script it would open another window
+        cmd = [sys.executable, "--run-script", str(path)]
     else:
-        cmd = [sys.executable, str(path)]
+        cmd = [py or sys.executable, str(path)]
     py = cmd[0]
+    env = dict(os.environ, KONTROLLEUR_TOOL="1")    # a tool run never opens the app's window (see kontrolleur.py)
     try:
-        p = subprocess.run([*cmd, *args], input=stdin or "", capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run([*cmd, *args], input=stdin or "", capture_output=True, text=True, timeout=timeout, env=env)
     except FileNotFoundError:
         raise ToolError(f"can't start {py}")
     except subprocess.TimeoutExpired:
