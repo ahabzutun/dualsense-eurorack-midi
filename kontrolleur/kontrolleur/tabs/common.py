@@ -94,7 +94,7 @@ def pi_card(ctx, device: str, where: Callable[[], Tuple[int, str, int]], hint: s
     elif cur in ("er_lfo_rate", "er_lfo_reset"):
         card.add(W.hint("Goes to the i2c2midi's trigger LFO (ER-301 tab → Pitch & LFO)."))
     card.add(W.hint((hint + " " if hint else "") + "The DualSense script on the Pi runs it in addition to the MIDI going on to the "
-                    "i2c2midi. All patches: Pi tab."))
+                    "i2c2midi. All patches: Routing tab."))
     if not m.controls_on_pi:
         card.add(W.hint("⚠︎ The SSH host doesn't have the button functions installed yet."))
     return card

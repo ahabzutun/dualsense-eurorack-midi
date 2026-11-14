@@ -101,7 +101,7 @@ def _kind_color(kind: tuple) -> QColor:
 
 class ControllerDrawing(Drawing):
     """Neutral drawing of the controller: a control gets its colour and a label only when
-    something is assigned to it. What the Pi functions get from it: Pi tab."""
+    something is assigned to it. What the Pi functions get from it: Routing tab."""
     base = (1100.0, 640.0)
 
     def __init__(self, ctx):

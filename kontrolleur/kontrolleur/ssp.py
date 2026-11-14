@@ -95,6 +95,40 @@ def module_title(m: dict) -> str:
     return f"{'MIDI module' if m['code'] == 'MIDI' else m['code']} · {m['slot'] + 1}"
 
 
+# Parameter names of plugin modules, in the order the plugin creates them (MIDI learn stores that index).
+# From the plugins' source (github.com/TheTechnobear/SSP, technobear/*/Source/PluginProcessor.cpp).
+def _pmix():
+    sends = ["Level", "Cue send", "Aux 1", "Aux 2", "Pan", "Gain", "Mute", "Solo", "Cue", "AC"]
+    return [f"In {n + 1} {x}" for n in range(8) for x in sends] + [f"Out {n + 1} {x}" for n in range(8) for x in sends]
+
+
+PARAM_NAMES = {
+    "PMIX": _pmix(),
+    "ATTN": ["Slew"] + [f"Attn {c}" for c in "ABCDEFGHIJKLMNOP"],
+    "PVCA": [f"VCA {v + 1} {x}" for v in range(4) for x in ("Gain", "Pan")],
+    "LDRF": [f"{x} {f + 1}" for f in range(4) for x in ("Cutoff", "Res")],
+    "MMX4": [f"VCA {o}{c}" for o in "1234" for c in "ABCD"],
+    "COMP": ["Ratio", "Threshold", "Attack", "Release", "Makeup", "Auto makeup"],
+    "MTIN": [f"CC {c}" for c in "ABCDEFGH"] + ["Slew CC", "PB range", "Clock", "Transport"],
+    "MTOT": [f"CC {c}" for c in "ABCDEFGH"] + ["PB range"],
+    "MTTR": [f"Note {c}" for c in "ABCDEFGH"],
+    "MSW8": ["In select", "Out select", "Active", "Soft"],
+    "CLDS": ["Position", "Size", "Density", "Texture", "Mix", "Spread", "Feedback", "Reverb", "Pitch", "Mode", "In gain", "Freeze"],
+    "PLTS": ["Pitch", "Harmonics", "Timbre", "Morph", "Model", "Freq mod", "Timbre mod", "Morph mod", "LPG", "VCA", "Trig", "Level"],
+    "RNGS": ["Pitch", "Structure", "Brightness", "Damping", "Position", "Polyphony", "Model", "Bypass", "Easter egg", "In gain", "In", "Strum"],
+    "SRVB": ["LP freq", "Feedback", "Mix", "Freeze"],
+}
+
+
+def target_text(m: dict, i: dict) -> str:
+    """'In 1 Level' for MIDI learn on a known plugin, else what the tool said ('param 10', 'CV A' …)."""
+    names = PARAM_NAMES.get(m.get("code", "").upper())
+    k = i.get("param")
+    if names and k is not None and 0 <= k < len(names):
+        return names[k]
+    return i["target"]
+
+
 def input_text(i: dict) -> str:
     ch = f"ch {i['ch']}" if i["ch"] else "any ch"
     if i["kind"] == "cc":

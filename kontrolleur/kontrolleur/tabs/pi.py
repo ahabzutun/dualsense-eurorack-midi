@@ -1,4 +1,4 @@
-"""Pi tab: the functions that run on the Pi (and the i2c2midi's LFO) as modules, patched from any
+"""Routing tab: the functions that run on the Pi (and the i2c2midi's LFO) as modules, patched from any
 controller: DualSense, 16n, pedals (MPC-20) or EC4 on the left, modules in the middle, where their
 results go on the right."""
 from __future__ import annotations
@@ -683,7 +683,7 @@ def ssp_panel(ctx, col: QVBoxLayout):
             if len(who) > 3:
                 src += f" +{len(who) - 3}"
             card.add(W.hbox(W.label(S.input_text(i), 11, BOLD, "mono", sc if who else Theme.dim),
-                            W.label("→ " + i["target"], 11, REGULAR, "ui", Theme.ink), "stretch"))
+                            W.label("→ " + S.target_text(m, i), 11, REGULAR, "ui", Theme.ink), "stretch"))
             card.add(W.label("← " + src if who else "← nothing sends this", 11, REGULAR, "ui",
                              Theme.ink if who else Theme.dim, wrap=True))
         col.addWidget(card)

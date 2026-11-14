@@ -82,6 +82,7 @@ def parse(path):
                     cur["inputs"].append({"ch": _int(_attr(a.group(1), "midi.channel")),
                                           "kind": "cc" if t == 0 else ("note" if t == 1 else "t%d" % t),
                                           "num": _int(_attr(a.group(1), "midi.num")),
+                                          "param": _int(_attr(a.group(1), "paramId")),
                                           "target": "param %d" % _int(_attr(a.group(1), "paramId"))})
             if cur["code"] == "MTIN":                    # MIDI → CV: 8 CCs on one channel (+ notes)
                 ch = cur["midi_ch"]
@@ -122,17 +123,21 @@ def parse(path):
     return {"name": name, "modules": out}
 
 
+PRESET_LOG = "/tmp/synthor-presets.log"          # written by /root/synthor_log.py (see S90synthor)
+
+
 def _logging_on():
     try:
-        return "logger -t synthor" in open("/etc/init.d/S90synthor").read()
+        s = open("/etc/init.d/S90synthor").read()
+        return "synthor_log.py" in s or "logger -t synthor" in s
     except OSError:
         return False
 
 
 def current_from_log(names):
-    """The last preset SYNTHOR loaded, from its log (needs its output going to syslog)."""
+    """The last preset SYNTHOR loaded, from its output (needs S90synthor to keep it, see synthor_log.py)."""
     lines = []
-    for f in ("/var/log/messages.0", "/var/log/messages"):
+    for f in ("/var/log/messages.0", "/var/log/messages", PRESET_LOG):
         try:
             lines += [l for l in open(f, errors="replace") if "loadPreset" in l]
         except OSError:

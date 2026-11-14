@@ -418,7 +418,7 @@ def lfo_card(ctx) -> W.Card:
     card.add(W.row("Rate control", W.Picker(o, cur, lfo_pick(M.LFO_RATE), 190)))
     o, cur = opts(M.LFO_RESET, "none")
     card.add(W.row("Phase reset", W.Picker(o, cur, lfo_pick(M.LFO_RESET), 190)))
-    card.add(W.hint(f"Listens on MIDI channel {m.lfo_channel}. A 16n fader, a pedal or an EC4 control: Pi tab → LFO → Patch a controller."))
+    card.add(W.hint(f"Listens on MIDI channel {m.lfo_channel}. A 16n fader, a pedal or an EC4 control: Routing tab → LFO → Patch a controller."))
     lp = m.lfo_problem()
     if lp:
         card.add(W.label("⚠︎ " + lp, 11, REGULAR, "ui", Theme.trig, wrap=True))

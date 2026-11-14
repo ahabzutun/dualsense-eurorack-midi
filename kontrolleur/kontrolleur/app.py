@@ -23,7 +23,7 @@ from .model import Mapping
 from .stage import Stage
 from .theme import BOLD, HEAVY, SEMIBOLD, REGULAR, Theme
 
-MODES = [("dualsense", "DualSense"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("pi", "Pi"), ("er301", "ER-301")]
+MODES = [("dualsense", "DualSense"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("pi", "Routing"), ("er301", "ER-301")]
 ROUTED = ("faderbank", "pedals", "ec4")
 ROUTE_KEY = {"faderbank": "fader16OnPi", "pedals": "pedalsOnPi", "ec4": "ec4OnPi"}
 ICON = Path(__file__).resolve().parent / "icon.png"
