@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
-from . import clients, store, theme
+from . import clients, ssp, store, theme
 from . import widgets as W
 from .devices import EC4Board, Faderbank, PedalBoard
 from .model import Mapping
@@ -56,6 +56,8 @@ class Main(QMainWindow):
         self.er_view = "CV"            # which ER-301 ports the matrix shows: CV / TR
         self.pi_sel = os.environ.get("KONTROLLEUR_PI_SELECT", "mod_slice")   # Pi tab: mod_<module> | src_<device>
         self.pi_add = {}               # Pi tab: the “Patch a controller” form
+        self.ssp = ssp.SSPState()      # Pi tab: the Percussa SSP's patch
+        self.ssp.pick = str(self.s.value("sspPreset", "") or "")
         self.mode = os.environ.get("KONTROLLEUR_MODE") or self.s.value("deviceMode", "dualsense")
         if self.mode not in dict(MODES):
             self.mode = "dualsense"
@@ -319,6 +321,8 @@ class Main(QMainWindow):
             self.load_ec4_cache()
         elif mode == "pi" and not self.ec4.loaded:
             self.load_ec4_cache(quiet=True)      # names of the EC4 controls patched to Pi functions
+        if mode == "pi" and (not self.ssp.loaded or self.ssp.stale):
+            self.load_ssp()
         self.inspector.rebuild()
 
     def set_route(self, on_ssh: bool):
@@ -343,10 +347,39 @@ class Main(QMainWindow):
         else:
             if self.mode == "pi":
                 self.load_ec4_cache(quiet=True)
+                self.load_ssp()
             self.load_routing()
         snap = os.environ.get("KONTROLLEUR_SNAPSHOT")
         if snap:
             QTimer.singleShot(int(float(os.environ.get("KONTROLLEUR_WAIT", "2")) * 1000), lambda: self._snapshot(snap))
+
+    # ── Percussa SSP (its own ssh connection; never blocks the other tabs) ──
+    def load_ssp(self):
+        st = self.ssp
+        if st.loading:
+            return
+        st.loading = True
+        st.error = ""
+        hosts, identity = self.get("sspHosts", ssp.DEFAULT_HOSTS), self.get("sspIdentity", "")
+
+        def fn():
+            if self.offline:
+                return "offline", self._fixture("ssp-scan.json")
+            return ssp.scan_remote(hosts, identity)
+
+        def done(r, err):
+            st.loading = False
+            if err is None and not (r[1] or {}).get("ok"):
+                err = clients.ToolError((r[1] or {}).get("error") or "no answer")
+            if err is not None:
+                st.error = f"SSP: {err}"
+            else:
+                st.host, st.scan, st.stale = r[0], r[1], False
+                st.save_cache()
+            self.refresh_all()
+
+        self.run(fn, done, busy=False)
+        self.refresh_all()
 
     def _snapshot(self, path: str):
         w, h = (int(x) for x in os.environ.get("KONTROLLEUR_SIZE", "1400x840").split("x"))

@@ -25,8 +25,9 @@ def _expand(p: str) -> str:
     return os.path.expanduser(p.strip())
 
 
-def run_ssh(host: str, identity: str, remote: str, stdin: Optional[str] = None, timeout: int = 300) -> str:
-    args = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=accept-new"]
+def run_ssh(host: str, identity: str, remote: str, stdin: Optional[str] = None, timeout: int = 300,
+            connect_timeout: int = 6) -> str:
+    args = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={connect_timeout}", "-o", "StrictHostKeyChecking=accept-new"]
     if identity.strip():
         args += ["-o", "IdentitiesOnly=yes", "-i", _expand(identity)]
     args += [host, remote]

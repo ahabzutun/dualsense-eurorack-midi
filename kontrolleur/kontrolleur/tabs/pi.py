@@ -7,10 +7,11 @@ from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
-from PySide6.QtWidgets import QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from .. import draw as D
 from .. import model as M
+from .. import ssp as S
 from .. import widgets as W
 from ..devices import pedal_name
 from ..stage import Drawing
@@ -26,7 +27,8 @@ MODULES = [
     ("extras", "DUALSENSE-EXTRAS", "Pi · DualSense script", "function",
      [("motion", "MOTION"), ("strum", "STRUM"), ("freeze_l", "FREEZE L"), ("freeze_r", "FREEZE R")]),
 ]
-MOD_NAME = {"slice": "Slice-Selekteur", "loop": "Loop-Rekordeur", "lfo": "LFO", "extras": "DualSense-Extras"}
+MOD_NAME = {"slice": "Slice-Selekteur", "loop": "Loop-Rekordeur", "lfo": "LFO", "extras": "DualSense-Extras",
+            "ssp": "Percussa SSP"}
 PORT_OF = {
     "slice_fine": ("slice", "slice"), "slice_section": ("slice", "section"), "section_up": ("slice", "section"),
     "section_down": ("slice", "section"), "slice_block": ("slice", "block"), "block_up": ("slice", "block"),
@@ -56,11 +58,35 @@ def _op(c: QColor, o: float) -> QColor:
     return q
 
 
+SSP_COLOR = "note"
+SSP_MAX_JACKS = 9
+
+
+def modules(ctx) -> list:
+    """The Pi modules + the SSP with one jack per module of its patch that listens to MIDI."""
+    st = ctx.ssp
+    p = st.active
+    jacks = [(S.module_key(m), S.module_title(m).upper()) for m in S.midi_modules(p)]
+    if len(jacks) > SSP_MAX_JACKS:
+        jacks = jacks[:SSP_MAX_JACKS - 1] + [("_more", f"+ {len(jacks) - SSP_MAX_JACKS + 1} MORE")]
+    if p:
+        sub = f"patch {S.label(p)}" + ("" if st.pick or not st.current.get("file") else " · loaded")
+    elif st.loaded:
+        sub = "pick a patch" if st.presets else "no patches on the card"
+    else:
+        sub = "not loaded · " + ("connecting …" if st.loading else "click to connect")
+    return MODULES + [("ssp", "PERCUSSA SSP", sub, SSP_COLOR, jacks)]
+
+
 def module_color(mod: str) -> QColor:
+    if mod == "ssp":
+        return Theme.c(SSP_COLOR)
     return Theme.c(next(c for k, _t, _s, c, _p in MODULES if k == mod))
 
 
 def token(f: str) -> str:
+    if f.startswith("ssp:"):
+        return f[4:]
     return LFO_TOKEN.get(f) or M.AXIS_TOKEN.get(f) or M.ACTION_TOKEN.get(f, f.upper())
 
 
@@ -129,12 +155,13 @@ def raw_label(ch: int, kind: str, num: int) -> str:
 class Patch:
     """One source → one function. kind: 'dualsense' | 'midi' | 'lfo'."""
 
-    def __init__(self, device, label, func, ref, hold=False):
+    def __init__(self, device, label, func, ref, hold=False, jack=None):
         self.device, self.label, self.func, self.ref, self.hold = device, label, func, ref, hold
+        self._jack = jack
 
     @property
     def jack(self):
-        return PORT_OF.get(self.func)
+        return self._jack or PORT_OF.get(self.func)
 
 
 def patches(ctx) -> List[Patch]:
@@ -156,6 +183,34 @@ def patches(ctx) -> List[Patch]:
     for f, src in (("er_lfo_rate", m.lfo_rate_src), ("er_lfo_reset", m.lfo_reset_src)):
         if src:
             out.append(Patch(src[0], source_label(ctx, src[0], src[1], "cc", src[2]), f, ("midi", src[0], src[1], "cc", src[2])))
+    return out + ssp_patches(ctx)
+
+
+def ssp_patches(ctx) -> List[Patch]:
+    """Controllers whose MIDI the SSP's patch listens to (through the MIDI hub)."""
+    mods = S.midi_modules(ctx.ssp.active)
+    if not mods:
+        return []
+    snd = S.senders(ctx)
+    keys = [S.module_key(m) for m in mods]
+    shown = set(keys[:SSP_MAX_JACKS - 1] if len(keys) > SSP_MAX_JACKS else keys)
+    groups = {}                     # (device, jack) → [labels], in order
+    codes = {}
+    for m in mods:
+        k = S.module_key(m)
+        jack = ("ssp", k if k in shown else "_more")
+        codes[jack] = m["code"] if jack[1] != "_more" else "SSP"
+        for i in m["inputs"]:
+            for dev, lab in S.matches(snd, i):
+                lst = groups.setdefault((dev, jack), [])
+                if lab not in lst:
+                    lst.append(lab)
+    out = []
+    for (dev, jack), labs in groups.items():
+        if len(labs) > 2:           # e.g. every EC4 push that sends notes on that channel: one row
+            out.append(Patch(dev, f"{labs[0]} + {len(labs) - 1} more", "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack))
+        else:
+            out += [Patch(dev, lab, "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack) for lab in labs]
     return out
 
 
@@ -197,7 +252,7 @@ class PiDrawing(Drawing):
 
     def _mod_heights(self):
         rh = self._row_h() + 2
-        return [44 + rh * len(ports) + 8 for *_x, ports in MODULES]
+        return [44 + rh * max(1, len(ports)) + 8 for *_x, ports in modules(self.ctx)]
 
     @property
     def base(self):
@@ -205,7 +260,7 @@ class PiDrawing(Drawing):
         for pt in patches(self.ctx):
             by_dev.setdefault(pt.device, []).append(pt)
         src = sum(self._src_heights(by_dev)) + 14 * (len(SOURCES) - 1)
-        mod = sum(self._mod_heights()) + 22 * (len(MODULES) - 1)
+        mod = sum(self._mod_heights()) + 22 * (len(modules(self.ctx)) - 1)
         return (WIDTH, max(640.0, src + 60, mod + 60))
 
     def paint(self, p: QPainter, w, h):
@@ -222,7 +277,7 @@ class PiDrawing(Drawing):
 
     def _heading(self, p):
         f = Theme.font(10, HEAVY, "mono")
-        for x, t in ((SRC_X, "CONTROLLERS"), (MOD_X, "PI FUNCTIONS"), (OUT_X, "OUT")):
+        for x, t in ((SRC_X, "CONTROLLERS"), (MOD_X, "PI FUNCTIONS · SSP"), (OUT_X, "OUT")):
             D.Text(t, f, Theme.dim, tracking=1.4).paint(p, x, 6)
 
     # ── left: the controllers ──
@@ -276,11 +331,12 @@ class PiDrawing(Drawing):
     # ── middle: the modules ──
     def _modules(self, p, pts, h):
         heights = self._mod_heights()
-        total = sum(heights) + 22 * (len(MODULES) - 1)
+        mods = modules(self.ctx)
+        total = sum(heights) + 22 * (len(mods) - 1)
         y = max(30.0, (h - total) / 2)
         rh = self._row_h() + 2
         used_jacks = {pt.jack for pt in pts}
-        for (key, title, sub, colname, ports), mh in zip(MODULES, heights):
+        for (key, title, sub, colname, ports), mh in zip(mods, heights):
             sel = self.sel == "mod_" + key
             col = Theme.c(colname)
             used = any((key, pk) in used_jacks for pk, _ in ports)
@@ -293,7 +349,7 @@ class PiDrawing(Drawing):
                         Theme.ink if sel else (_op(col, 0.75) if used else Theme.c("body", 0.4)), 2 if sel else 1.3)
             t = D.Text(title, Theme.font(11, HEAVY, "mono"), col if used or sel else Theme.dim, tracking=1.2)
             t.paint(p, r.left() + 16, r.top() + 9)
-            D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim).paint(p, r.left() + 16, r.top() + 11 + t.h)
+            D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=MOD_W - 32, min_scale=0.7).paint(p, r.left() + 16, r.top() + 11 + t.h)
             ry = r.top() + 44
             for pk, plabel in ports:
                 on = (key, pk) in used_jacks
@@ -381,6 +437,8 @@ def build_panel(ctx, tab: str, col: QVBoxLayout):
     sel = ctx.pi_sel
     if sel.startswith("src_"):
         device_panel(ctx, sel[4:], col)
+    elif sel == "mod_ssp":
+        ssp_panel(ctx, col)
     else:
         module_panel(ctx, sel[4:] if sel.startswith("mod_") else "slice", col)
     if not ctx.mapping.controls_on_pi:
@@ -398,7 +456,11 @@ def _patch_row(ctx, pt: Patch, show_func: bool) -> QWidget:
     if show_func:
         parts.append(W.label(token(pt.func), 10, BOLD, "mono", module_color(pt.jack[0])))
     parts.append("stretch")
-    if pt.ref[0] == "midi":
+    if pt.ref[0] == "ssp":
+        def go_ssp():
+            ctx.select("pi_sel", "mod_ssp")
+        parts.append(W.icon_button("→", go_ssp, "Show the SSP patch"))
+    elif pt.ref[0] == "midi":
         _, d, c, k, n = pt.ref
 
         def remove(d=d, c=c, k=k, n=n):
@@ -535,6 +597,8 @@ def device_panel(ctx, dev: str, col: QVBoxLayout):
     if not mine:
         card.add(W.label("—", 12, REGULAR, "ui", Theme.dim))
     for pt in mine:
+        if pt.ref[0] == "ssp":
+            continue
         if pt.ref[0] != "midi":
             card.add(_patch_row(ctx, pt, True))
             continue
@@ -549,8 +613,93 @@ def device_panel(ctx, dev: str, col: QVBoxLayout):
         card.add(W.hbox(W.Picker([(f, "Unpatch" if f == "none" else func_title(f)) for f in m.pi_choices(k)], pt.func, setf, 230),
                         stretch_end=True))
     col.addWidget(card)
+    to_ssp = [pt for pt in mine if pt.ref[0] == "ssp"]
+    if to_ssp:
+        card = W.Card("Reaches the SSP patch", module_color("ssp"))
+        for pt in to_ssp:
+            card.add(_patch_row(ctx, pt, True))
+        col.addWidget(card)
     if dev == "dualsense":
         b = W.small_button("Open the DualSense tab", lambda: ctx.set_mode("dualsense"))
         col.addWidget(W.hbox(b, stretch_end=True))
     else:
         col.addWidget(add_card(ctx, [f for f in m.pi_choices("cc") if f != "none"], Theme.function, dev))
+
+
+# ── the SSP ────────────────────────────────────────────────────────────────────────────────────
+
+def ssp_panel(ctx, col: QVBoxLayout):
+    st = ctx.ssp
+    sc = module_color("ssp")
+    col.addWidget(W.title("Percussa SSP"))
+    col.addWidget(W.hint("Everything the MIDI hub gets from the DualSense, 16n, pedals and EC4 also goes to the SSP. "
+                         "This shows which of it the SSP's patch listens to: MIDI learn on its modules, MIDI-to-CV "
+                         "modules and the built-in MIDI module. Read over ssh from the patch files on the SSP's card."))
+    card = W.Card("Patch", sc)
+    if st.error:
+        card.add(W.label("⚠︎ " + st.error, 11, REGULAR, "ui", Theme.trig, wrap=True))
+    if st.loaded:
+        cur = st.current
+        loaded = next((p for p in st.presets if p["file"] == cur.get("file")), None)
+        follow = "Follow the SSP" + (f" (now {S.label(loaded)})" if loaded else " (loaded patch unknown)")
+        opts = [("", follow)] + [(p["file"], S.label(p)) for p in st.presets]
+
+        def pick(v):
+            st.pick = v
+            ctx.s.setValue("sspPreset", v)
+            ctx.refresh_all()
+
+        card.add(W.row("Show", W.Picker(opts, st.pick if st.pick in {p["file"] for p in st.presets} else "", pick, 240), SEMIBOLD))
+        if not cur.get("file") and not st.pick:
+            card.add(W.hint("Which patch is loaded is read from the SSP's log, written from SYNTHOR's next start on. "
+                            "Restart SYNTHOR once, or pick a patch here." if cur.get("logging") else
+                            "The SSP doesn't log which patch it loads (its startup script sends SYNTHOR's output nowhere), "
+                            "so pick a patch here."))
+        where = f"via {st.host}" if st.host and not st.stale else "from the last connection"
+        card.add(W.hint(f"{len(st.presets)} patches {where}."))
+    elif not st.loading:
+        card.add(W.hint("Not loaded yet."))
+    card.add(W.hbox(W.small_button("Connecting …" if st.loading else "Reload from the SSP", lambda: ctx.load_ssp(), not st.loading),
+                    stretch_end=True))
+    col.addWidget(card)
+
+    p = st.active
+    mods = S.midi_modules(p)
+    if p and not mods:
+        col.addWidget(W.hint(f"{S.label(p)} doesn't listen to MIDI: no MIDI learn, no MIDI modules."))
+    snd = S.senders(ctx) if mods else {}
+    for m in mods:
+        card = W.Card(S.module_title(m), sc)
+        if m["code"] != "MIDI":
+            text, ok = st.device_status(m.get("midi_in"))
+            card.add(W.label(("listens to " if ok else "⚠︎ listens to ") + text, 11, REGULAR, "ui",
+                             Theme.dim if ok else Theme.trig, wrap=True))
+        else:
+            chs = m.get("channels") or []
+            card.add(W.label("channels " + (", ".join(map(str, chs)) if len(chs) < 16 else "all"), 11, REGULAR, "ui", Theme.dim))
+        for i in m["inputs"]:
+            who = S.matches(snd, i)
+            src = ", ".join(f"{'DualSense' if d == 'dualsense' else M.PI_DEVICE_TITLE[d]} {lab}" for d, lab in who[:3])
+            if len(who) > 3:
+                src += f" +{len(who) - 3}"
+            card.add(W.hbox(W.label(S.input_text(i), 11, BOLD, "mono", sc if who else Theme.dim),
+                            W.label("→ " + i["target"], 11, REGULAR, "ui", Theme.ink), "stretch"))
+            card.add(W.label("← " + src if who else "← nothing sends this", 11, REGULAR, "ui",
+                             Theme.ink if who else Theme.dim, wrap=True))
+        col.addWidget(card)
+    if mods:
+        col.addWidget(W.hint("Parameter numbers as the SSP counts them inside each module. The DualSense sends on "
+                             "channels 1–3 (Create / Options switch them)."))
+    card = W.Card("Connection")
+
+    def seth(k, v):
+        ctx.s.setValue(k, v)
+
+    for title_text, key, default, ph in (("SSP host(s)", "sspHosts", S.DEFAULT_HOSTS, "ssp-eth ssp …"),
+                                         ("SSH key", "sspIdentity", "", "~/.ssh/… (empty: ~/.ssh/config)")):
+        e = QLineEdit(str(ctx.get(key, default)))
+        e.setPlaceholderText(ph)
+        e.textEdited.connect(lambda t, k=key: seth(k, t))
+        card.add(W.row(title_text, e))
+    card.add(W.hint("Tried in order, as root. Names from ~/.ssh/config work (home Wi-Fi, studio, Ethernet)."))
+    col.addWidget(card)

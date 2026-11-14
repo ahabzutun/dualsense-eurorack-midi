@@ -9,7 +9,7 @@ APP = HERE.parent
 REPO = APP.parent
 VERSION = os.environ.get("KONTROLLEUR_VERSION", "0")
 # device tools that run on this computer in cable mode (packed as data, run with `Kontrolleur --run-script`)
-TOOLS = ["fader16_tool.py", "ec4_tool.py", "mpc20_tool.py", "rtmidi_compat.py"]
+TOOLS = ["fader16_tool.py", "ec4_tool.py", "mpc20_tool.py", "rtmidi_compat.py", "ssp_tool.py"]
 
 
 def imports(path):
