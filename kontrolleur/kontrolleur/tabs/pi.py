@@ -701,5 +701,5 @@ def ssp_panel(ctx, col: QVBoxLayout):
         e.setPlaceholderText(ph)
         e.textEdited.connect(lambda t, k=key: seth(k, t))
         card.add(W.row(title_text, e))
-    card.add(W.hint("Tried in order, as root. Names from ~/.ssh/config work (home Wi-Fi, studio, Ethernet)."))
+    card.add(W.hint("Tried in order, as root. Names from ~/.ssh/config work; ssp-wifi = ssp.local, which the SSP answers on any Wi-Fi."))
     col.addWidget(card)

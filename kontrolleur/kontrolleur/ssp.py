@@ -12,7 +12,7 @@ from . import clients
 from . import model as M
 from . import store
 
-DEFAULT_HOSTS = "ssp-eth ssp ssp-studio"
+DEFAULT_HOSTS = "ssp-eth ssp-wifi ssp ssp-studio"
 DS_CHANNELS = (1, 2, 3)          # the DualSense switches between channels 1–3 (Create / Options)
 
 
