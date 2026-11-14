@@ -6,7 +6,7 @@ Raspberry Pi OS) and **macOS**; Python + Qt (PySide6).
 | Tab | Device | How it talks to it |
 |---|---|---|
 | DualSense | PS5 controller on the SSH host | `er301_routes.py` + `controls.py` over SSH (`scripts/er301_routes_tool.py`) |
-| Routing | the Pi's own functions (Slice-Selekteur, Loop-Rekordeur, LFO, DualSense extras) and the Percussa SSP's patch | patched from the DualSense, 16n, pedals or EC4: `controls.py` (`MIDI_INPUTS`) + `er301_routes.py`; SSP: `scripts/ssp_tool.py` over ssh to the SSP (reads the MIDI learn / MIDI modules of its presets) |
+| Routing | where the MIDI goes: the controllers, the Raspberry Pi (DualSense script + MIDI hub; *Scripts* shows how the two services work together), the i2c2midi with its LFO, the ER-301 and Teletype on I2C, the Percussa SSP's patch. Boxes can be dragged and folded | patched from the DualSense, 16n, pedals or EC4: `controls.py` (`MIDI_INPUTS`) + `er301_routes.py`; SSP: `scripts/ssp_tool.py` over ssh to the SSP (reads the MIDI learn / MIDI modules of its presets) |
 | 16n | 16n faderbank (fork with curves) | `scripts/fader16_tool.py`, over SSH or on a cable to this computer |
 | Pedals | DOREMiDi MPC-20 | `scripts/mpc20_tool.py`, over SSH or on a cable |
 | EC4 | Faderfox EC4 | `scripts/ec4_tool.py`, over SSH or on a cable (transfers are started on the EC4) |

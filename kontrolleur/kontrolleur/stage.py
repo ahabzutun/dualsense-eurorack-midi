@@ -24,6 +24,15 @@ class Drawing:
     return a layout item from `content()` and get a stage at least that big, centred."""
     base: Tuple[float, float] = (1100.0, 640.0)
     grows = False
+    clip = True            # clip painting to the stage (off while a box is dragged past the edge)
+
+    def drag_at(self, pt: QPointF):
+        """A mover for what is under pt: called with the drag distance (drawing units), None at the end."""
+        return None
+
+    def actions(self):
+        """Extra buttons for the corner box: [(key, label, tip, callback)]."""
+        return []
 
     def __init__(self):
         self.hits = draw.Hits()
@@ -50,6 +59,8 @@ class Stage(QWidget):
         self._press: Optional[QPointF] = None
         self._press_offset = QPointF(0, 0)
         self._dragging = False
+        self._handle = None
+        self._press_scale = 1.0
         self._xf = QTransform()
         self._stage_size = drawing.base
         self.setMouseTracking(True)
@@ -95,7 +106,8 @@ class Stage(QWidget):
         xf.translate(-sw / 2, -sh / 2)
         self._xf = xf
         p.setTransform(xf)
-        p.setClipRect(QRectF(0, 0, sw, sh))
+        if self.drawing.clip:
+            p.setClipRect(QRectF(0, 0, sw, sh))
         draw.grid(p, sw, sh)
         self.drawing.hits.clear()
         if item is not None:
@@ -107,6 +119,7 @@ class Stage(QWidget):
         self._zoom_label.setText(f"{round(self.zoom * 100)}%")
         self._out.setEnabled(self.zoom > 1.001)
         self._in.setEnabled(self.zoom < MAX_ZOOM - 0.001)
+        self._sync_actions()
 
     def to_drawing(self, pos: QPointF) -> QPointF:
         inv, ok = self._xf.inverted()
@@ -118,19 +131,25 @@ class Stage(QWidget):
             self._press = ev.position()
             self._press_offset = QPointF(self.offset)
             self._dragging = False
+            self._handle = self.drawing.drag_at(self.to_drawing(ev.position()))
+            self._press_scale = self._xf.m11() or 1.0
 
     def mouseMoveEvent(self, ev):
         if self._press is not None and ev.buttons() & Qt.LeftButton:
             d = ev.position() - self._press
-            if not self._dragging and math.hypot(d.x(), d.y()) >= 4 and self.zoom > 1.001:
+            if not self._dragging and math.hypot(d.x(), d.y()) >= 4 and (self._handle is not None or self.zoom > 1.001):
                 self._dragging = True
                 self.setCursor(Qt.ClosedHandCursor)
             if self._dragging:
-                self.offset = self._clamp(self._press_offset + d, self.zoom)
-                self.update()
+                if self._handle is not None:            # move a box of the drawing
+                    self._handle(QPointF(d.x() / self._press_scale, d.y() / self._press_scale))
+                else:
+                    self.offset = self._clamp(self._press_offset + d, self.zoom)
+                    self.update()
             return
-        cb, tip = self.drawing.hits.at(self.to_drawing(ev.position()))
-        self.setCursor(Qt.PointingHandCursor if cb else Qt.ArrowCursor)
+        pt = self.to_drawing(ev.position())
+        cb, tip = self.drawing.hits.at(pt)
+        self.setCursor(Qt.PointingHandCursor if cb else (Qt.OpenHandCursor if self.drawing.drag_at(pt) is not None else Qt.ArrowCursor))
         if tip:
             QToolTip.showText(ev.globalPosition().toPoint(), tip, self)
         else:
@@ -140,8 +159,11 @@ class Stage(QWidget):
         if ev.button() != Qt.LeftButton or self._press is None:
             return
         was_drag = self._dragging
+        handle, self._handle = self._handle, None
         self._press, self._dragging = None, False
         self.setCursor(Qt.ArrowCursor)
+        if was_drag and handle is not None:
+            handle(None)
         if not was_drag:
             cb, _ = self.drawing.hits.at(self.to_drawing(ev.position()))
             if cb:
@@ -198,6 +220,26 @@ class Stage(QWidget):
         lay = QHBoxLayout(box)
         lay.setContentsMargins(8, 3, 8, 3)
         lay.setSpacing(2)
+        self._acts = {}
+        for key, label, tip, _cb in self.drawing.actions():
+            b = QPushButton(label)
+            b.setObjectName("flat")
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, k=key: self._run_action(k))
+            if self._acts:
+                lay.addSpacing(8)
+            lay.addWidget(b)
+            self._acts[key] = b
+        if self._acts:
+            sep = QFrame()
+            sep.setObjectName("zoomsep")
+            sep.setFixedSize(1, 16)
+            lay.addSpacing(4)
+            lay.addWidget(sep)
+            lay.addSpacing(4)
+            self._sep = sep
         self._out = QPushButton("−")
         self._zoom_label = QPushButton("100%")
         self._in = QPushButton("+")
@@ -214,9 +256,28 @@ class Stage(QWidget):
         self._box = box
         self.restyle()
 
+    def _run_action(self, key):
+        for k, _label, _tip, cb in self.drawing.actions():
+            if k == key:
+                cb()
+        self.update()
+
+    def _sync_actions(self):
+        changed = False
+        for k, label, tip, _cb in self.drawing.actions():
+            b = self._acts.get(k)
+            if b is not None and b.text() != label:
+                b.setText(label)
+                b.setToolTip(tip)
+                changed = True
+        if changed:
+            self._box.adjustSize()
+            self._box.move(self.width() - self._box.width() - 10, self.height() - self._box.height() - 10)
+
     def restyle(self):
         c = lambda s, o=1.0: draw_css(Theme.c(s, o))   # noqa: E731
         self._box.setStyleSheet(f"#zoombox {{ background: {c('panel', 0.92)}; border: 1px solid {c('line')}; border-radius: 13px; }}"
+                                f"#zoomsep {{ background: {c('line')}; }}"
                                 f"QPushButton {{ font-family: '{Theme.font(11, 600, 'mono').family()}'; font-weight: 600; min-width: 18px; }}")
         self._zoom_label.setMinimumWidth(44)
         self._box.adjustSize()
