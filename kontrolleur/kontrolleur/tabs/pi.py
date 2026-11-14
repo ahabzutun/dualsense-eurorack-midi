@@ -47,9 +47,7 @@ SOURCES = [("dualsense", "DUALSENSE")] + [(d, t.upper()) for d, t in M.PI_DEVICE
 LFO_TOKEN = {"er_lfo_rate": "LFO RATE", "er_lfo_reset": "LFO RESET"}
 
 SRC_X, SRC_W = 24.0, 330.0
-MOD_X, MOD_W = 560.0, 270.0
-OUT_X, OUT_W = 1000.0, 230.0
-WIDTH = 1260.0
+MOD_W = 270.0
 
 
 def _op(c: QColor, o: float) -> QColor:
@@ -231,6 +229,38 @@ def module_output(ctx, key: str) -> Tuple[str, bool, QColor]:
 
 
 # ── drawing ────────────────────────────────────────────────────────────────────────────────────
+# Environments, left to right: the controllers · the Raspberry Pi (Pi functions + MIDI hub) · the
+# i2c2midi (Teletype expander, with its LFO) on the I2C bus with the ER-301 and the Teletype · the SSP.
+# MIDI for the i2c2midi and the SSP leaves the Pi through the hub (XIAO-TT / XIAO-SSP).
+
+PI_X, PI_W = 404.0, 616.0
+HUB_X, HUB_W = 790.0, 210.0
+R_X, R_W = 1090.0, 420.0
+WIDTH = 1530.0
+ENV_HEAD = 34.0
+PI_MODS = ("slice", "loop", "extras")
+ENV_OF = {"slice": "pi", "loop": "pi", "extras": "pi", "lfo": "i2c", "ssp": "ssp"}
+HUB_IN = [("dualsense", "DUALSENSE"), ("16n", "16N"), ("pedal", "PEDALS"), ("ec4", "EC4"), ("script", "PI SCRIPT")]
+HUB_OUT = [("tt", "XIAO-TT", "→ i2c2midi"), ("ssp", "XIAO-SSP", "→ SSP")]
+
+
+def _opaque(p, path, tint: QColor, alpha: float):
+    p.fillPath(path, Theme.bg)
+    p.fillPath(path, _op(tint, alpha))
+
+
+def _curve(a: QPointF, b: QPointF, bend: float = 0.45) -> QPainterPath:
+    path = QPainterPath()
+    path.moveTo(a)
+    dx = max(50.0, abs(b.x() - a.x()) * bend)
+    path.cubicTo(QPointF(a.x() + dx, a.y()), QPointF(b.x() - dx, b.y()), b)
+    return path
+
+
+def _jack(p, c: QPointF, col: QColor, on: bool, d: float = 13):
+    D.circle(p, c, d, col if on else Theme.bg, col if on else Theme.c("body", 0.5), 1.4)
+    D.circle(p, c, d * 0.38, Theme.bg if on else None, None if on else Theme.c("body", 0.4), 1)
+
 
 class PiDrawing(Drawing):
     def __init__(self, ctx):
@@ -250,35 +280,80 @@ class PiDrawing(Drawing):
         rh = self._row_h()
         return [44 * Theme.grow ** 0.5 + rh * max(1, len(by_dev.get(d, []))) + 8 for d, _ in SOURCES]
 
-    def _mod_heights(self):
-        rh = self._row_h() + 2
-        return [44 + rh * max(1, len(ports)) + 8 for *_x, ports in modules(self.ctx)]
+    def _mod_h(self, ports) -> float:
+        return 44 + (self._row_h() + 2) * max(1, len(ports)) + 8
+
+    def _layout(self, h: Optional[float] = None) -> dict:
+        """Heights of the columns; positions when h is given."""
+        ctx = self.ctx
+        mods = {m[0]: m for m in modules(ctx)}
+        rh = self._row_h()
+        L = {"mods": mods}
+        pi_mods = sum(self._mod_h(mods[k][4]) for k in PI_MODS) + 22 * (len(PI_MODS) - 1)
+        hub_h = 44 + (rh + 2) * len(HUB_IN) + 30 + (rh + 2) * len(HUB_OUT) + 10
+        L["pi_h"] = ENV_HEAD + max(pi_mods, hub_h) + 18
+        L["hub_h"] = hub_h
+        L["i2c_h"] = ENV_HEAD + self._mod_h(mods["lfo"][4]) + 18
+        L["er_rows"] = self._er_rows()
+        L["er_h"] = 40 + rh * len(L["er_rows"]) + 10
+        L["bus_h"] = 24 + max(L["er_h"], 78)
+        L["ssp_h"] = ENV_HEAD + self._mod_h(mods["ssp"][4]) + 18
+        L["right_h"] = L["i2c_h"] + L["bus_h"] + 30 + L["ssp_h"]
+        by_dev = {}
+        for pt in patches(ctx):
+            by_dev.setdefault(pt.device, []).append(pt)
+        L["by_dev"] = by_dev
+        L["src_h"] = sum(self._src_heights(by_dev)) + 14 * (len(SOURCES) - 1)
+        if h is not None:
+            L["pi_y"] = max(30.0, (h - L["pi_h"]) / 2)
+            L["right_y"] = max(30.0, (h - L["right_h"]) / 2)
+        return L
+
+    def _er_rows(self) -> List[Tuple[str, str, QColor, bool]]:
+        """ER-301 ports reached through the i2c2midi: (port, what, colour, from the LFO?)."""
+        m = self.ctx.mapping
+        rows = []
+        text, on, col = module_output(self.ctx, "slice")
+        if on:
+            rows.append((text, "grain slice (Pi)", col, False))
+        text, on, col = module_output(self.ctx, "lfo")
+        if on:
+            rows.append((text, "LFO pulses (i2c2midi)", col, True))
+        n = len(m.port_map()) - len(rows)
+        rows.append((f"+ {n}" if n > 0 else "—", "more ports routed (ER-301 tab)" if n > 0 else "no other routes", Theme.dim, False))
+        return rows
 
     @property
     def base(self):
-        by_dev = {}
-        for pt in patches(self.ctx):
-            by_dev.setdefault(pt.device, []).append(pt)
-        src = sum(self._src_heights(by_dev)) + 14 * (len(SOURCES) - 1)
-        mod = sum(self._mod_heights()) + 22 * (len(modules(self.ctx)) - 1)
-        return (WIDTH, max(640.0, src + 60, mod + 60))
+        L = self._layout()
+        return (WIDTH, max(640.0, L["src_h"] + 60, L["pi_h"] + 60, L["right_h"] + 60))
 
+    # ── painting ──
     def paint(self, p: QPainter, w, h):
-        self._src_jacks, self._jacks, self._outs = [], {}, {}
+        self._src_jacks, self._jacks = [], {}
+        L = self._layout(h)
         pts = patches(self.ctx)
-        by_dev = {}
-        for pt in pts:
-            by_dev.setdefault(pt.device, []).append(pt)
-        self._heading(p)
-        self._sources(p, by_dev, h)
-        self._modules(p, pts, h)
-        self._outputs(p)
-        self._cables(p)
-
-    def _heading(self, p):
-        f = Theme.font(10, HEAVY, "mono")
-        for x, t in ((SRC_X, "CONTROLLERS"), (MOD_X, "PI FUNCTIONS · SSP"), (OUT_X, "OUT")):
-            D.Text(t, f, Theme.dim, tracking=1.4).paint(p, x, 6)
+        used = {pt.jack for pt in pts}
+        D.Text("CONTROLLERS", Theme.font(10, HEAVY, "mono"), Theme.dim, tracking=1.4).paint(p, SRC_X, 6)
+        envs = self._environments(p, L)
+        self._sources(p, L["by_dev"], h)
+        hub = self._hub_geometry(L)
+        self._via_hub_cables(p, pts, hub, envs, used)
+        # boxes (opaque: the cables to the hub run behind them)
+        y = L["pi_y"] + ENV_HEAD + max(0.0, (L["pi_h"] - ENV_HEAD - 18 - (sum(self._mod_h(L["mods"][k][4]) for k in PI_MODS) + 44)) / 2)
+        outs = {}
+        for k in PI_MODS:
+            r, out = self._module(p, L["mods"][k], PI_X + 26, y, used)
+            outs[k] = out
+            y += r.height() + 22
+        lfo_r, lfo_out = self._module(p, L["mods"]["lfo"], R_X + 18, L["right_y"] + ENV_HEAD, used)
+        ssp_top = L["right_y"] + L["i2c_h"] + L["bus_h"] + 30
+        self._module(p, L["mods"]["ssp"], R_X + 18, ssp_top + ENV_HEAD, used, width=R_W - 36)
+        self._hub(p, hub, pts, outs)
+        self._script_cables(p, outs, hub)
+        self._fan_out(p, envs, used)
+        self._i2c_bus(p, L, lfo_out)
+        self._pi_cables(p)
 
     # ── left: the controllers ──
     def _sources(self, p, by_dev, h):
@@ -328,87 +403,219 @@ class PiDrawing(Drawing):
         return {"16n": "16n faderbank", "pedal": "MPC-20 via DOREMiDi", "ec4": "Faderfox EC4"}[dev] + \
             ("" if n or dev not in ("16n", "ec4") else " · not listened to")
 
-    # ── middle: the modules ──
-    def _modules(self, p, pts, h):
-        heights = self._mod_heights()
-        mods = modules(self.ctx)
-        total = sum(heights) + 22 * (len(mods) - 1)
-        y = max(30.0, (h - total) / 2)
-        rh = self._row_h() + 2
-        used_jacks = {pt.jack for pt in pts}
-        for (key, title, sub, colname, ports), mh in zip(mods, heights):
-            sel = self.sel == "mod_" + key
-            col = Theme.c(colname)
-            used = any((key, pk) in used_jacks for pk, _ in ports)
-            r = QRectF(MOD_X, y, MOD_W, mh)
-            path = QPainterPath()
-            path.addRoundedRect(r, 10, 10)
-            if sel:
-                D.glow(p, path, _op(col, 0.7), 10)
-            D.draw_path(p, path, _op(col, 0.07) if used else Theme.c("body", 0.035),
-                        Theme.ink if sel else (_op(col, 0.75) if used else Theme.c("body", 0.4)), 2 if sel else 1.3)
-            t = D.Text(title, Theme.font(11, HEAVY, "mono"), col if used or sel else Theme.dim, tracking=1.2)
-            t.paint(p, r.left() + 16, r.top() + 9)
-            D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=MOD_W - 32, min_scale=0.7).paint(p, r.left() + 16, r.top() + 11 + t.h)
-            ry = r.top() + 44
-            for pk, plabel in ports:
-                on = (key, pk) in used_jacks
-                cy = ry + rh / 2
-                jc = QPointF(r.left(), cy)
-                D.circle(p, jc, 13, col if on else Theme.bg, col if on else Theme.c("body", 0.5), 1.4)
-                D.circle(p, jc, 5, Theme.bg if on else None, None if on else Theme.c("body", 0.4), 1)
-                self._jacks[(key, pk)] = jc
-                lt = D.Text(plabel, Theme.font(10, HEAVY, "mono"), col if on else Theme.dim)
-                lt.paint(p, r.left() + 18, cy - lt.h / 2)
-                ry += rh
-            text, on, oc = module_output(self.ctx, key)
-            if text:
-                oy = r.top() + 44 + rh / 2
-                jc = QPointF(r.right(), oy)
-                D.circle(p, jc, 13, oc if on else Theme.bg, oc if on else Theme.c("body", 0.5), 1.4)
-                D.circle(p, jc, 5, Theme.bg if on else None, None if on else Theme.c("body", 0.4), 1)
-                lt = D.Text("OUT", Theme.font(10, HEAVY, "mono"), Theme.dim)
-                lt.paint(p, r.right() - 22 - lt.w, oy - lt.h / 2)
-                self._outs[key] = (jc, text, on, oc)
-            self.hits.add(path, lambda key=key: self.ctx.select("pi_sel", "mod_" + key), MOD_NAME[key])
-            y += mh + 22
+    # ── environments ──
+    def _env(self, p, r: QRectF, title: str, sub: str, col: QColor, key: Optional[str] = None):
+        path = QPainterPath()
+        path.addRoundedRect(r, 14, 14)
+        p.fillPath(path, _op(col, 0.035))
+        p.strokePath(path, D.pen(_op(col, 0.45), 1.3, [5, 4]))
+        t = D.Text(title, Theme.font(10, HEAVY, "mono"), _op(col, 0.95), tracking=1.4)
+        t.paint(p, r.left() + 14, r.top() + 8)
+        D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=r.width() - t.w - 40, min_scale=0.7).paint(
+            p, r.left() + 24 + t.w, r.top() + 8 + (t.h - Theme.font(9, SEMIBOLD, "mono").pixelSize() * 1.2) / 2)
+        if key:
+            self.hits.add(QRectF(r.left(), r.top(), r.width(), ENV_HEAD), lambda: self.ctx.select("pi_sel", key))
 
-    # ── right: where the results go ──
-    def _outputs(self, p):
-        for key, (jc, text, on, oc) in self._outs.items():
-            head = "MIDI HUB" if key == "loop" else "ER-301"
-            sub = "loop playback" if key == "loop" else ("grain slice" if key == "slice" else "LFO pulses")
-            t1 = D.Text(head, Theme.font(10, HEAVY, "mono"), Theme.ink if on else Theme.dim, tracking=1.2)
-            t2 = D.Text(text, Theme.font(11, BOLD, "mono"), oc if on else Theme.dim)
-            t3 = D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim)
-            bh = t1.h + t2.h + t3.h + 18
-            r = QRectF(OUT_X, jc.y() - bh / 2, OUT_W, bh)
-            D.rounded(p, r, 9, _op(oc, 0.08) if on else Theme.c("body", 0.035), _op(oc, 0.6) if on else Theme.c("body", 0.4), 1.2)
-            t1.paint(p, r.left() + 22, r.top() + 7)
-            t2.paint(p, r.left() + 22, r.top() + 9 + t1.h)
-            t3.paint(p, r.left() + 22, r.top() + 11 + t1.h + t2.h)
-            end = QPointF(r.left(), jc.y())
-            D.circle(p, end, 9, oc if on else Theme.bg, oc if on else Theme.c("body", 0.5), 1.2)
-            if on:
+    def _environments(self, p, L) -> dict:
+        pi = QRectF(PI_X, L["pi_y"], PI_W, L["pi_h"])
+        self._env(p, pi, "RASPBERRY PI", "DualSense script · MIDI hub", Theme.function)
+        y = L["right_y"]
+        i2c = QRectF(R_X, y, R_W, L["i2c_h"])
+        self._env(p, i2c, "I2C2MIDI", "Teletype expander · gets MIDI over USB (XIAO-TT)", module_color("lfo"), "mod_lfo")
+        ssp_r = QRectF(R_X, y + L["i2c_h"] + L["bus_h"] + 30, R_W, L["ssp_h"])
+        st = self.ctx.ssp
+        sub = "gets MIDI over USB (XIAO-SSP)"
+        if st.loaded and not st.stale and not st.devices():
+            sub = "⚠ no MIDI device plugged in"
+        self._env(p, ssp_r, "PERCUSSA SSP", sub, module_color("ssp"), "mod_ssp")
+        return {"pi": pi, "i2c": i2c, "ssp": ssp_r,
+                "i2c_in": QPointF(R_X, y + ENV_HEAD + 6), "ssp_in": QPointF(R_X, ssp_r.top() + ENV_HEAD + 6)}
+
+    # ── modules ──
+    def _module(self, p, mod, x, y, used, width=MOD_W):
+        key, title, sub, colname, ports = mod
+        sel = self.sel == "mod_" + key
+        col = Theme.c(colname)
+        on_any = any((key, pk) in used for pk, _ in ports)
+        rh = self._row_h() + 2
+        r = QRectF(x, y, width, self._mod_h(ports))
+        path = QPainterPath()
+        path.addRoundedRect(r, 10, 10)
+        if sel:
+            D.glow(p, path, _op(col, 0.7), 10)
+        _opaque(p, path, col if on_any else Theme.c("body"), 0.08 if on_any else 0.035)
+        p.strokePath(path, D.pen(Theme.ink if sel else (_op(col, 0.75) if on_any else Theme.c("body", 0.4)), 2 if sel else 1.3))
+        if key == "ssp":
+            title, sub = sub.upper() if sub.startswith("patch") else "NO PATCH", "MIDI inputs of its modules"
+            title = title.replace("PATCH ", "")
+        t = D.Text(title, Theme.font(11, HEAVY, "mono"), col if on_any or sel else Theme.dim, tracking=1.2, max_w=width - 32, min_scale=0.7)
+        t.paint(p, r.left() + 16, r.top() + 9)
+        D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=width - 32, min_scale=0.7).paint(p, r.left() + 16, r.top() + 11 + t.h)
+        ry = r.top() + 44
+        for pk, plabel in ports:
+            on = (key, pk) in used
+            cy = ry + rh / 2
+            jc = QPointF(r.left(), cy)
+            _jack(p, jc, col, on)
+            self._jacks[(key, pk)] = jc
+            lt = D.Text(plabel, Theme.font(10, HEAVY, "mono"), col if on else Theme.dim, max_w=width - 40, min_scale=0.7)
+            lt.paint(p, r.left() + 18, cy - lt.h / 2)
+            ry += rh
+        out = None
+        text, on, oc = module_output(self.ctx, key)
+        if text:
+            oy = r.top() + 44 + rh / 2
+            jc = QPointF(r.right(), oy)
+            _jack(p, jc, oc, on)
+            lt = D.Text("OUT", Theme.font(10, HEAVY, "mono"), Theme.dim)
+            lt.paint(p, r.right() - 22 - lt.w, oy - lt.h / 2)
+            out = (jc, on, oc)
+        self.hits.add(path, lambda key=key: self.ctx.select("pi_sel", "mod_" + key), MOD_NAME[key])
+        return r, out
+
+    # ── the MIDI hub ──
+    def _hub_geometry(self, L) -> dict:
+        rh = self._row_h() + 2
+        top = L["pi_y"] + ENV_HEAD + max(0.0, (L["pi_h"] - ENV_HEAD - 18 - L["hub_h"]) / 2)
+        r = QRectF(HUB_X, top, HUB_W, L["hub_h"])
+        ins, outs = {}, {}
+        y = top + 44
+        for k, _t in HUB_IN:
+            ins[k] = QPointF(r.left(), y + rh / 2)
+            y += rh
+        y += 30
+        for k, *_ in HUB_OUT:
+            outs[k] = QPointF(r.right(), y + rh / 2)
+            y += rh
+        return {"r": r, "in": ins, "out": outs, "out_y0": top + 44 + rh * len(HUB_IN) + 8}
+
+    def _hub(self, p, hub, pts, pi_outs):
+        r = hub["r"]
+        col = Theme.function
+        path = QPainterPath()
+        path.addRoundedRect(r, 10, 10)
+        _opaque(p, path, col, 0.06)
+        p.strokePath(path, D.pen(_op(col, 0.7), 1.3))
+        t = D.Text("MIDI HUB", Theme.font(11, HEAVY, "mono"), col, tracking=1.2)
+        t.paint(p, r.left() + 16, r.top() + 9)
+        D.Text("midi_passthrough on the Pi", Theme.font(9, SEMIBOLD, "mono"), Theme.dim).paint(p, r.left() + 16, r.top() + 11 + t.h)
+        via = {pt.device for pt in pts if ENV_OF.get(pt.jack[0]) != "pi"}
+        script_on = any(o and o[1] for o in pi_outs.values())
+        for k, label in HUB_IN:
+            on = k in via or (k == "script" and script_on)
+            c = hub["in"][k]
+            _jack(p, c, col, on, 11)
+            lt = D.Text(label, Theme.font(10, HEAVY, "mono"), col if on else Theme.dim)
+            lt.paint(p, c.x() + 16, c.y() - lt.h / 2)
+        D.Text("OUT", Theme.font(9, HEAVY, "mono"), Theme.dim, tracking=1.2).paint(p, r.left() + 16, hub["out_y0"])
+        for k, name, to in HUB_OUT:
+            c = hub["out"][k]
+            oc = module_color("lfo" if k == "tt" else "ssp")
+            _jack(p, c, oc, True, 11)
+            lt = D.Text(f"{name} {to}", Theme.font(10, HEAVY, "mono"), oc, max_w=r.width() - 40, min_scale=0.7)
+            lt.paint(p, c.x() - 16 - lt.w, c.y() - lt.h / 2)
+
+    # ── cables ──
+    def _via_hub_cables(self, p, pts, hub, envs, used):
+        """Controllers → hub (for the i2c2midi and the SSP), hub → the other environments."""
+        for a, pt in self._src_jacks:
+            env = ENV_OF.get(pt.jack[0])
+            if env == "pi":
+                continue
+            end = hub["in"].get(pt.device)
+            if end is None:
+                continue
+            hot = self.sel in ("src_" + pt.device, "mod_" + pt.jack[0])
+            col = module_color(pt.jack[0])
+            p.strokePath(_curve(a, end), D.pen(_op(col, 0.85 if hot else 0.28), 2.2 if hot else 1.3))
+        for k, target in (("tt", "i2c_in"), ("ssp", "ssp_in")):
+            a, b = hub["out"][k], envs[target]
+            col = module_color("lfo" if k == "tt" else "ssp")
+            hot = self.sel == ("mod_lfo" if k == "tt" else "mod_ssp")
+            p.strokePath(_curve(a, b, 0.5), D.pen(_op(col, 0.95 if hot else 0.6), 4.0 if hot else 3.2))
+            _jack(p, b, col, True, 13)
+
+    def _fan_out(self, p, envs, used):
+        """Inside the i2c2midi and the SSP: from where the USB MIDI arrives to the inputs that listen."""
+        for env, mod in (("i2c_in", "lfo"), ("ssp_in", "ssp")):
+            a = envs[env]
+            col = module_color(mod)
+            hot = self.sel == "mod_" + mod
+            for (mk, pk), end in self._jacks.items():
+                if mk == mod and (mk, pk) in used:
+                    path = QPainterPath()
+                    path.moveTo(a)
+                    path.cubicTo(QPointF(a.x() + 6, a.y()), QPointF(end.x() - 14, end.y()), end)
+                    p.strokePath(path, D.pen(_op(col, 0.9 if hot else 0.55), 1.8 if hot else 1.4))
+            _jack(p, a, col, True, 13)
+
+    def _script_cables(self, p, outs, hub):
+        """The Pi functions' MIDI (grain slice NRPN, loop playback) goes out through the hub."""
+        end = hub["in"]["script"]
+        for k, out in outs.items():
+            if out and out[1]:
+                jc, _on, oc = out
+                hot = self.sel == "mod_" + k
                 path = QPainterPath()
                 path.moveTo(jc)
-                path.cubicTo(QPointF(jc.x() + 70, jc.y()), QPointF(end.x() - 70, end.y()), end)
-                hot = self.sel == "mod_" + key
-                p.strokePath(path, D.pen(_op(oc, 0.9 if hot else 0.5), 2.4 if hot else 1.8))
-            self.hits.add(QRectF(r), lambda key=key: self.ctx.select("pi_sel", "mod_" + key))
+                path.cubicTo(QPointF(jc.x() + 40, jc.y()), QPointF(end.x() - 40, end.y()), end)
+                p.strokePath(path, D.pen(_op(oc, 0.9 if hot else 0.5), 2.2 if hot else 1.6))
 
-    def _cables(self, p):
+    def _pi_cables(self, p):
         for a, pt in self._src_jacks:
+            if ENV_OF.get(pt.jack[0]) != "pi":
+                continue
             end = self._jacks.get(pt.jack)
             if end is None:
                 continue
             col = module_color(pt.jack[0])
             hot = self.sel in ("src_" + pt.device, "mod_" + pt.jack[0])
-            path = QPainterPath()
-            path.moveTo(a)
-            dx = max(60.0, (end.x() - a.x()) * 0.45)
-            path.cubicTo(QPointF(a.x() + dx, a.y()), QPointF(end.x() - dx, end.y()), end)
-            p.strokePath(path, D.pen(_op(col, 0.9 if hot else 0.35), 2.4 if hot else 1.5))
+            p.strokePath(_curve(a, end), D.pen(_op(col, 0.9 if hot else 0.35), 2.4 if hot else 1.5))
+
+    # ── I2C: i2c2midi → ER-301, with the Teletype on the same bus ──
+    def _i2c_bus(self, p, L, lfo_out):
+        rh = self._row_h()
+        top = L["right_y"] + L["i2c_h"]
+        bus_y = top + 14
+        col = module_color("lfo")
+        er = QRectF(R_X, bus_y + 12, 250, L["er_h"])
+        tt = QRectF(R_X + 268, bus_y + 12, R_W - 268, 78)
+        p.strokePath(_line(R_X + R_W / 2, top, R_X + R_W / 2, bus_y), D.pen(_op(col, 0.6), 2.2))
+        p.strokePath(_line(er.center().x(), bus_y, tt.center().x(), bus_y), D.pen(_op(col, 0.6), 2.2))
+        for x in (er.center().x(), tt.center().x()):
+            p.strokePath(_line(x, bus_y, x, bus_y + 12), D.pen(_op(col, 0.6), 2.2))
+        D.Text("I2C", Theme.font(9, HEAVY, "mono"), _op(col, 0.9), tracking=1.4).paint(p, R_X + R_W / 2 + 8, top + 1)
+        # ER-301
+        path = QPainterPath()
+        path.addRoundedRect(er, 10, 10)
+        _opaque(p, path, Theme.cv, 0.05)
+        p.strokePath(path, D.pen(_op(Theme.cv, 0.55), 1.3))
+        t = D.Text("ER-301", Theme.font(11, HEAVY, "mono"), Theme.ink, tracking=1.2)
+        t.paint(p, er.left() + 14, er.top() + 9)
+        y = er.top() + 40
+        for port, what, c, from_lfo in L["er_rows"]:
+            pt_t = D.Text(port, Theme.font(10.5, BOLD, "mono"), c)
+            pt_t.paint(p, er.left() + 14, y + (rh - pt_t.h) / 2)
+            D.Text(what, Theme.font(9.5, SEMIBOLD, "mono"), Theme.dim, max_w=er.width() - 100, min_scale=0.7).paint(
+                p, er.left() + 90, y + (rh - Theme.font(9.5, SEMIBOLD, "mono").pixelSize() * 1.2) / 2)
+            y += rh
+        self.hits.add(QRectF(er), lambda: self.ctx.set_mode("er301"), "ER-301 tab")
+        # Teletype (shown only)
+        path = QPainterPath()
+        path.addRoundedRect(tt, 10, 10)
+        _opaque(p, path, Theme.c("body"), 0.04)
+        p.strokePath(path, D.pen(Theme.c("body", 0.45), 1.2, [4, 3]))
+        t = D.Text("TELETYPE", Theme.font(11, HEAVY, "mono"), Theme.ink, tracking=1.2)
+        t.paint(p, tt.left() + 14, tt.top() + 9)
+        D.Text("I2C leader", Theme.font(9, SEMIBOLD, "mono"), Theme.dim).paint(p, tt.left() + 14, tt.top() + 13 + t.h)
+        D.Text("shown only", Theme.font(9, SEMIBOLD, "mono"), _op(Theme.dim, 0.7)).paint(p, tt.left() + 14, tt.top() + 27 + t.h)
+
+
+def _line(x1, y1, x2, y2) -> QPainterPath:
+    path = QPainterPath()
+    path.moveTo(x1, y1)
+    path.lineTo(x2, y2)
+    return path
 
 
 # ── inspector ──────────────────────────────────────────────────────────────────────────────────
