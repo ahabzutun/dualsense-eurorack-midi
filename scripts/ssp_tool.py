@@ -61,7 +61,7 @@ def parse(path):
     if b[:8] != b"synthor\0":
         return {"error": "not a preset"}
     name = b[16:32].split(b"\0")[0].decode("latin1").rstrip("_ ")
-    mods, cur = [], None
+    mods, cur, names = [], None, {}
     for tag, p in records(b):
         if tag == 220:
             slot, kind, code = _ints(p)[:3]
@@ -98,6 +98,10 @@ def parse(path):
                 g = re.search(r"<GRID_STATE\b[^>]*>", x)
                 g = g.group() if g else ""
                 cur["midi_in"] = _attr(g, "midiDevice") or _attr(g, "midiDeviceId")
+                for i, n in ((_attr(g, "midiDeviceId"), _attr(g, "midiDevice")),
+                             (_attr(g, "globalsMidiDeviceId"), _attr(g, "globalsMidiDevice"))):
+                    if i and n:
+                        names.setdefault(i, n)          # Grid keeps id and name: names for the ids in other modules
                 base = _int(_attr(g, "padMuteCCBase"), -1)
                 if base >= 0:
                     cur["inputs"].append({"ch": 0, "kind": "cc", "num": base, "target": "pad mutes from CC %d" % base})
@@ -120,7 +124,7 @@ def parse(path):
             m["channels"] = chans
         del m["_ch"], m["_cc"]
         out.append(m)
-    return {"name": name, "modules": out}
+    return {"name": name, "modules": out, "device_names": names}
 
 
 PRESET_LOG = "/tmp/synthor-presets.log"          # written by /root/synthor_log.py (see S90synthor)
@@ -155,16 +159,17 @@ def current_from_log(names):
 
 
 def midi_devices():
-    """ALSA sequencer ports on the SSP: [{"id": "24-0", "name": "XIAO-SSP MIDI 1"}]."""
+    """MIDI devices plugged into the SSP, as its modules name them (JUCE on ALSA: "client-port"):
+    [{"id": "24-0", "name": "XIAO-SSP MIDI 1"}]. Only hardware (kernel clients of sound cards)."""
     out, client = [], None
     try:
         for line in open("/proc/asound/seq/clients", errors="replace"):
-            m = re.match(r'Client\s+(\d+)\s*:\s*"([^"]*)"', line)
+            m = re.match(r'Client\s+(\d+)\s*:\s*"([^"]*)"\s*\[(\w+)', line)
             if m:
-                client = int(m.group(1))
+                client = int(m.group(1)) if m.group(3) == "Kernel" and int(m.group(1)) >= 16 else None
                 continue
             m = re.match(r'\s+Port\s+(\d+)\s*:\s*"([^"]*)"', line)
-            if m and client is not None and client >= 16:
+            if m and client is not None:
                 out.append({"id": "%d-%s" % (client, m.group(1)), "name": m.group(2).strip()})
     except OSError:
         pass
@@ -182,7 +187,12 @@ def scan(root):
         p.update(file=base, mtime=int(os.path.getmtime(f)), size=os.path.getsize(f))
         names[base] = p.get("name")
         presets.append(p)
-    return {"ok": True, "root": root, "presets": presets, "current": current_from_log(names), "devices": midi_devices()}
+    known = {}
+    for p in presets:
+        for i, n in (p.get("device_names") or {}).items():
+            known.setdefault(i, n)
+    return {"ok": True, "root": root, "presets": presets, "current": current_from_log(names), "devices": midi_devices(),
+            "device_names": known}
 
 
 def main():

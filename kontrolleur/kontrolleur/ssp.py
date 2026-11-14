@@ -63,19 +63,31 @@ class SSPState:
     def devices(self) -> List[dict]:
         return (self.scan or {}).get("devices", [])
 
-    def device_status(self, midi_in: Optional[str]) -> Tuple[str, bool]:
-        """(text, ok) for a module's MIDI input device."""
+    def device_status(self, midi_in: Optional[str], preset: Optional[dict] = None) -> Tuple[str, bool]:
+        """(text, ok) for a module's MIDI input device. Most modules save the device by its ALSA id
+        ("20-0" = client 20 port 0), which depends on the order things were plugged in; the names
+        for old ids come from modules that save both (GRID)."""
         if not midi_in:
             return "no MIDI device set", False
         names = {d["name"]: d for d in self.devices()}
         ids = {d["id"]: d for d in self.devices()}
         if midi_in in names:
             return midi_in, True
-        if re.fullmatch(r"\d+-\d+", midi_in):
-            if midi_in in ids:
-                return f"{ids[midi_in]['name']} (id {midi_in})", True
-            return f"device id {midi_in}, saved in an earlier session", False
-        return f"{midi_in}, not connected", False
+        if not re.fullmatch(r"\d+-\d+", midi_in):
+            return f"{midi_in}, not connected", False
+        known = ((preset or {}).get("device_names") or {}).get(midi_in) or \
+            ((self.scan or {}).get("device_names") or {}).get(midi_in)
+        if midi_in in ids:
+            now = ids[midi_in]["name"]
+            if known and known != now:
+                return f"{now} (id {midi_in}; saved for {known})", True
+            return now, True
+        if known:
+            if known in names:
+                return f"{known}, saved as id {midi_in}; it's {names[known]['id']} now, so pick it again in the module", False
+            return f"{known} (saved as id {midi_in}), not connected", False
+        card = (int(midi_in.split("-")[0]) - 16) // 4
+        return f"device id {midi_in} (the SSP's sound card {card} when the patch was saved), not connected", False
 
 
 def label(p: dict) -> str:

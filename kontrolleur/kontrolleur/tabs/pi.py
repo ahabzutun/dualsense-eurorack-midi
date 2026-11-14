@@ -663,6 +663,9 @@ def ssp_panel(ctx, col: QVBoxLayout):
                     stretch_end=True))
     col.addWidget(card)
 
+    if st.loaded and not st.stale and not st.devices():
+        col.addWidget(W.label("⚠︎ No MIDI device is plugged into the SSP right now, so nothing from the MIDI hub "
+                              "reaches it (the XIAO bridge from the Pi isn't connected).", 11, REGULAR, "ui", Theme.trig, wrap=True))
     p = st.active
     mods = S.midi_modules(p)
     if p and not mods:
@@ -671,7 +674,7 @@ def ssp_panel(ctx, col: QVBoxLayout):
     for m in mods:
         card = W.Card(S.module_title(m), sc)
         if m["code"] != "MIDI":
-            text, ok = st.device_status(m.get("midi_in"))
+            text, ok = st.device_status(m.get("midi_in"), p)
             card.add(W.label(("listens to " if ok else "⚠︎ listens to ") + text, 11, REGULAR, "ui",
                              Theme.dim if ok else Theme.trig, wrap=True))
         else:
