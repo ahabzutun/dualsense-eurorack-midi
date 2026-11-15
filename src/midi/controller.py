@@ -55,6 +55,7 @@ class MIDIController:
         # translate it to I2C for the ER-301 grain player.
         self.sample_block = 0         # 0-7 → block * 128
         self.max_blocks = 7           # 8 blocks (0-7)
+        self._block_dots_until = 0.0  # while quantize is on: show the block on the dots until then
         self.current_fine_slice = 0   # last left-stick fine position (0-15)
         self.last_grain_slice = -1    # dedup gate (absolute slice 0-1023)
 
@@ -126,8 +127,9 @@ class MIDIController:
             notes_per_chord=4      # 4-note chords
         )
 
-        # Set initial LED color
+        # Set initial LED color, and the sample block on the dots
         self.update_led_color()
+        self.update_player_dots()
 
     def scale_value(self, value, in_min, in_max, out_min=0, out_max=127):
         """Scale input value to MIDI range (0-127)"""
@@ -182,24 +184,43 @@ class MIDIController:
     def handle_block_change(self, midiout):
         """Create/Option select the coarse 128-sample block.
         Options (START) → next block (+1); Create (SELECT) → previous (-1);
-        both together → reset to block 0. Clamped to 0..max_blocks."""
+        both together → reset to block 0. Clamped to 0..max_blocks: a press past the
+        first or last block does nothing (no rumble, nothing sent), like the section d-pad."""
+        old = self.sample_block
         if self.select_pressed and self.start_pressed:
             self.sample_block = 0
-            print(f"\n🔢 SAMPLE BLOCK reset → 0 (slices 0-127)\n")
         elif self.start_pressed and not self.select_pressed:
-            if self.sample_block < self.max_blocks:
-                self.sample_block += 1
-            base = self.sample_block * 128
-            print(f"\n🔢 SAMPLE BLOCK ▲ {self.sample_block} (slices {base}-{base + 127})\n")
-            self.ds.setRightMotor(100); time.sleep(0.05); self.ds.setRightMotor(0)
+            self.sample_block = min(self.max_blocks, self.sample_block + 1)
+            if self.sample_block != old:
+                self.ds.setRightMotor(100); time.sleep(0.05); self.ds.setRightMotor(0)
         elif self.select_pressed and not self.start_pressed:
-            if self.sample_block > 0:
-                self.sample_block -= 1
-            base = self.sample_block * 128
-            print(f"\n🔢 SAMPLE BLOCK ▼ {self.sample_block} (slices {base}-{base + 127})\n")
-            self.ds.setLeftMotor(100); time.sleep(0.05); self.ds.setLeftMotor(0)
+            self.sample_block = max(0, self.sample_block - 1)
+            if self.sample_block != old:
+                self.ds.setLeftMotor(100); time.sleep(0.05); self.ds.setLeftMotor(0)
+        self.show_block()
+        base = self.sample_block * 128
+        if self.sample_block == old:
+            print(f"\n🔢 SAMPLE BLOCK stays {self.sample_block} (slices {base}-{base + 127})\n")
+            return
+        print(f"\n🔢 SAMPLE BLOCK {self.sample_block} (slices {base}-{base + 127})\n")
         self.send_grain_slice(midiout)
 
+    # sample block on the 5 player dots (bit 0 = leftmost): a dot walking from left to right,
+    # in-between blocks light two neighbours; only the first and last block light a single outer dot
+    BLOCK_DOTS = (0b00001, 0b00011, 0b00010, 0b00110, 0b01100, 0b01000, 0b11000, 0b10000)
+    BLOCK_DOTS_SHOW = 1.5      # seconds the block is shown while the dots belong to quantize
+
+    def block_dots(self) -> int:
+        return self.BLOCK_DOTS[max(0, min(len(self.BLOCK_DOTS) - 1, self.sample_block))]
+
+    def show_block(self):
+        """Show the current block on the dots (for a moment while quantize owns them)."""
+        if self.quantize_on:
+            self._block_dots_until = time.time() + self.BLOCK_DOTS_SHOW
+            t = threading.Timer(self.BLOCK_DOTS_SHOW + 0.05, self.update_player_dots)
+            t.daemon = True
+            t.start()
+        self.update_player_dots()
 
     def handle_dpad_left(self):
         """Decrease slice bank (left arrow)"""
@@ -567,10 +588,10 @@ class MIDIController:
         self.update_led_color()
 
     def update_player_dots(self):
-        """Show quantize state on the 4 player indicator dots beneath the touchpad.
+        """The 5 player dots beneath the touchpad.
 
-        Dot count = subdivision coarseness:
-          0 dots = quantize OFF
+        Quantize off: the sample block (see BLOCK_DOTS).
+        Quantize on: the quantize subdivision (after a block change the block shows for a moment):
           1 dot  = 1/4   (coarsest)
           2 dots = 1/8
           3 dots = 1/16
@@ -580,11 +601,11 @@ class MIDIController:
         on the top-level pydualsense object. The old self.ds.setPlayerID() was
         throwing AttributeError silently caught by except, so dots never changed.
         """
-        if not self.quantize_on:
+        if not self.quantize_on or time.time() < self._block_dots_until:
             try:
-                self.ds.light.setPlayerID(PlayerID(0))
+                self.ds.light.setPlayerID(self.block_dots())
             except Exception as e:
-                print(f"⚠️  Player dots clear failed: {e}")
+                print(f"⚠️  Player dots update failed: {e}")
             return
 
         sub_to_dots = {4: PlayerID.PLAYER_1, 8: PlayerID.PLAYER_2,

@@ -62,6 +62,7 @@ class Ctrl:
     def update_player_dots(self): pass
     def is_motion_enabled(self): return self.motion_enabled[self.current_channel - 1]
     def send_grain_slice(self, m): self.log.append(("slice", self.sample_block))
+    def show_block(self): self.log.append(("dots", self.sample_block))
     def handle_dpad_left(self): self.log.append("sec-")
     def handle_dpad_right(self): self.log.append("sec+")
     def toggle_quantize(self): self.log.append("quant")
@@ -111,6 +112,20 @@ r.on_button("options", True, now=30.1); check(c.sample_block == 0, "Create+Optio
 r.on_button("options", False, now=30.2); r.on_button("create", False, now=30.3)
 check(c.sample_block == 0, "releases change nothing")
 r.on_button("options", True, now=31); r.on_button("options", False, now=31.1); check(c.sample_block == 1, "Options: block up")
+# the first and last block: no rumble, nothing sent, the dots still show where we are
+buzzes = []
+r._buzz = lambda left, right, ms=0.05: buzzes.append((left, right))
+c.sample_block = 0; c.log.clear()
+r.run("block_down", "test")
+check(c.sample_block == 0 and not buzzes and ("slice", 0) not in c.log and ("dots", 0) in c.log,
+      "block_down at the first block: no rumble, no slice, dots shown")
+c.sample_block = 7; c.log.clear()
+r.run("block_up", "test")
+check(c.sample_block == 7 and not buzzes and ("slice", 7) not in c.log and ("dots", 7) in c.log,
+      "block_up at the last block: no rumble, no slice, dots shown")
+c.sample_block = 6; c.log.clear()
+r.run("block_up", "test")
+check(c.sample_block == 7 and buzzes == [(False, True)] and ("slice", 7) in c.log, "block_up into the last block: rumble + slice")
 r.on_button("ps", True, now=32); check(c.strummer.n == 1, "PS: strum on press")
 r.on_button("l3", True, now=33); r.on_button("r3", True, now=33.5); check(cm.log == ["freezeL", "freezeR"], "L3 / R3: freeze")
 r.on_button("touchpad", True, now=34); check(c.log[-1] == "quant", "touchpad click: quantize")

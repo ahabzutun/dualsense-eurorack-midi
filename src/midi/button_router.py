@@ -232,15 +232,21 @@ class ButtonRouter:
                     pass
 
         elif action in ("block_up", "block_down", "block_reset"):
+            old = c.sample_block
             if action == "block_reset":
                 c.sample_block = 0
             elif action == "block_up":
                 c.sample_block = min(c.max_blocks, c.sample_block + 1)
-                self._buzz(False, True)
             else:
                 c.sample_block = max(0, c.sample_block - 1)
-                self._buzz(True, False)
+            moved = c.sample_block != old
+            if moved and action != "block_reset":          # past the first/last block: no rumble
+                self._buzz(action == "block_down", action == "block_up")
+            c.show_block()                                  # the dots show where we are
             base = c.sample_block * 128
+            if not moved:
+                print(f"\n🔢 SAMPLE BLOCK stays {c.sample_block} (slices {base}-{base + 127}) ({source})\n")
+                return
             print(f"\n🔢 SAMPLE BLOCK {c.sample_block} (slices {base}-{base + 127}) ({source})\n")
             c.send_grain_slice(self.midiout)
 
