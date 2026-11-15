@@ -164,15 +164,22 @@ def raw_label(ch: int, kind: str, num: int) -> str:
 # ── what is patched where ──────────────────────────────────────────────────────────────────────
 
 class Patch:
-    """One source → one function. kind: 'dualsense' | 'midi' | 'lfo'."""
+    """One source → one function. kind: 'dualsense' | 'midi' | 'lfo'.
+    extra: what the trace needs (the route of an ER-301 port, the SSP inputs it reaches)."""
 
-    def __init__(self, device, label, func, ref, hold=False, jack=None):
+    def __init__(self, device, label, func, ref, hold=False, jack=None, extra=None):
         self.device, self.label, self.func, self.ref, self.hold = device, label, func, ref, hold
         self._jack = jack
+        self.extra = extra or {}
 
     @property
     def jack(self):
         return self._jack or PORT_OF.get(self.func)
+
+    @property
+    def key(self) -> str:
+        """Stable id of this row (for the trace selection)."""
+        return f"{self.device}|{self.label}|{self.func}"
 
 
 def patches(ctx) -> List[Patch]:
@@ -223,7 +230,9 @@ def er_patches(ctx) -> List[Patch]:
         for src in srcs:
             dev = ER_DEVICE.get(src.device)
             if dev and src.goto is not None:
-                out.append(Patch(dev, src.detail, "er:" + use.id, ("er", use.id), jack=("er", use.id)))
+                route = next((r for r in use.refs if (r[0] == "dualsense") == (dev == "dualsense")), use.refs[0])
+                out.append(Patch(dev, src.detail, "er:" + use.id, ("er", use.id), jack=("er", use.id),
+                                 extra={"use": use, "route": route}))
     return out
 
 
@@ -236,6 +245,7 @@ def ssp_patches(ctx) -> List[Patch]:
     keys = [S.module_key(m) for m in mods]
     shown = set(keys[:SSP_MAX_JACKS - 1] if len(keys) > SSP_MAX_JACKS else keys)
     groups = {}                     # (device, jack) → [labels], in order
+    reach = {}                      # (device, jack, label) → [(module, input)] it reaches
     codes = {}
     for m in mods:
         k = S.module_key(m)
@@ -246,13 +256,196 @@ def ssp_patches(ctx) -> List[Patch]:
                 lst = groups.setdefault((dev, jack), [])
                 if lab not in lst:
                     lst.append(lab)
+                reach.setdefault((dev, jack, lab), []).append((m, i))
     out = []
     for (dev, jack), labs in groups.items():
         if len(labs) > 2:           # e.g. every EC4 push that sends notes on that channel: one row
-            out.append(Patch(dev, f"{labs[0]} + {len(labs) - 1} more", "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack))
+            hits = [h for lab in labs for h in reach[(dev, jack, lab)]]
+            out.append(Patch(dev, f"{labs[0]} + {len(labs) - 1} more", "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack,
+                             extra={"reach": hits, "labels": labs}))
         else:
-            out += [Patch(dev, lab, "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack) for lab in labs]
+            out += [Patch(dev, lab, "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack,
+                          extra={"reach": reach[(dev, jack, lab)], "labels": [lab]}) for lab in labs]
     return out
+
+
+# ── the trace: one control's way through the scripts ──────────────────────────────────────────
+
+DEV_TITLE = {"dualsense": "DualSense", "16n": "16n", "pedal": "MPC-20 pedal", "ec4": "EC4"}
+TT_STRAIGHT_CHANNELS = (2,)    # midi_passthrough: TT_COALESCE_EXEMPT_CHANNELS
+HUB_THIN_MS = 10               # midi_passthrough: TT_FLUSH_INTERVAL
+
+
+def _kind_text(kind: str) -> str:
+    return {"cc": "CC", "note": "note", "nrpn": "NRPN"}.get(kind, kind)
+
+
+def _pedal_slot(ctx, label: str):
+    for inp in ctx.pedals.inputs:
+        for s_ in inp["slots"]:
+            if f"{pedal_name(inp['input'])} · message {s_['slot'] + 1}" == label:
+                return s_
+    return None
+
+
+def _device_message(ctx, pt):
+    """(channel as the device sends it, kind, number) or None."""
+    if pt.ref[0] == "midi":
+        return pt.ref[2], pt.ref[3], pt.ref[4]
+    if pt.device == "pedal":
+        sl = _pedal_slot(ctx, pt.label.split(" + ")[0])
+        if sl:
+            return sl["channel"], sl["kind"], sl["number"]
+    route = pt.extra.get("route")
+    if route and route[0] == "external":
+        _, kind, ch, control = route
+        num = control
+        k = "note" if kind == "note" else ("nrpn" if kind == "nrpn" else "cc")
+        try:
+            num = int(num)
+        except (TypeError, ValueError):
+            pass
+        return ch, k, num
+    for (ch, k, n), lst in S.senders(ctx).items():           # SSP patches
+        if any(d == pt.device and lab in pt.extra.get("labels", [pt.label]) for d, lab in lst):
+            return ch, k, n
+    return None
+
+
+def _ds_own(ctx, pt):
+    """What a DualSense control sends when it is set to MIDI: (kind, number) or None."""
+    m = ctx.mapping
+    iid = None
+    route = pt.extra.get("route")
+    if route and route[0] == "dualsense":
+        iid = route[2]
+    elif pt.ref[0] == "input":
+        iid = pt.ref[1]
+    if iid and iid in M.INPUT:
+        i = M.INPUT[iid]
+        return i.kind, m.number(i)
+    return None
+
+
+def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
+    """Each place the control's message passes, with what happens there."""
+    m = ctx.mapping
+    ds = m.channel
+    hops: List[Tuple[str, str]] = []
+    mod = pt.jack[0] if pt.jack else ""
+    env = ENV_OF.get(mod)
+    msg = None
+    cont = pt.func in M.CONT_FUNCS or pt.func in ("er_lfo_rate",)
+
+    # 1 where it starts
+    if pt.device == "dualsense":
+        what = "a button" if pt.ref[0] in ("input", "chord") and not cont else "a control"
+        hops.append(("DualSense", f"{pt.label}: {what} read by dualsense_midi.py (evdev, over USB / Bluetooth). No MIDI yet."))
+        if env == "pi":
+            if cont:
+                hops.append(("axis router", f"→ {func_title(pt.func)} (config/controls.py). Frozen sticks/triggers (L3 / R3) keep their value."))
+            else:
+                timing = "hold ≥ 1 s" if pt.hold else ("two-button chord" if pt.ref[0] == "chord" else "tap")
+                hops.append(("button router", f"{timing} → {func_title(pt.func)} (config/controls.py, re-read every second)."))
+        else:
+            own = _ds_own(ctx, pt)
+            if own:
+                k, n = own
+                extra = " (14-bit)" if k == "nrpn" else ""
+                hops.append(("axis / button router", f"set to MIDI: sends its own {_kind_text(k)} {n}{extra} on ch {ds}."))
+                msg = (ds, k, n)
+            else:
+                hops.append(("axis / button router", f"sends its own MIDI on ch {ds}."))
+                msg = (ds, "cc", None)
+            hops.append(("port DualSense_Controller", "the script's MIDI out (the loop records it on the way) → the hub's DUALSENSE SCRIPT input."))
+    else:
+        dm = _device_message(ctx, pt)
+        extra = ""
+        if pt.device == "16n":
+            extra = " The fader's curve and range are applied inside the 16n."
+        if dm:
+            ch, k, n = dm
+            hops.append((DEV_TITLE[pt.device], f"{pt.label}: sends ch {ch} {_kind_text(k)} {n} over USB.{extra}"))
+            msg = dm
+        else:
+            hops.append((DEV_TITLE[pt.device], f"{pt.label}.{extra}"))
+        if env == "pi":
+            port = {"16n": "DS 16n In", "pedal": "DS Pedal In", "ec4": "DS EC4 In"}[pt.device]
+            how = "CC 0–127 → " if cont else "CC ≥ 64 (rising) or note on → "
+            hops.append(("device inputs", f"dualsense_midi.py listens on its own port '{port}': {how}{func_title(pt.func)}."))
+            if dm:
+                hops.append(("MIDI hub", f"also gets the raw ch {m.hub_ch(pt.device, dm[0])} {_kind_text(dm[1])} {dm[2]} and passes it to "
+                                         "XIAO-TT and XIAO-SSP; it only does something there if a route or mapping listens."))
+
+    # 2 what a Pi function does with it
+    if env == "pi":
+        if mod == "slice":
+            slice_port = next((u for u in m.port_map() if any(r[0] == "dualsense" and r[2] in ER_PI_FUNCS for r in u.refs)), None)
+            to = f" → hub → XIAO-TT → i2c2midi → SC.{slice_port.kind} {slice_port.port}" if slice_port else ""
+            hops.append(("Slice-Selekteur", f"grain slice 0–1023 (block × 128 + section × 16 + slice) → NRPN 3, 14-bit, on ch {ds}"
+                                            f" → port DualSense_Controller{to}."))
+        elif mod == "loop":
+            hops.append(("Loop-Rekordeur", f"{func_title(pt.func)} on the loop of ch {ds}. It records what leaves DualSense_Controller "
+                                           "(and the pedals); playback sends it out the same port again."))
+        else:
+            fx = {"motion": f"motion control on/off: tilt and twist as 14-bit NRPN on ch {ds}.",
+                  "strum": f"harmonic strum: notes around the d-pad step on ch {ds}.",
+                  "freeze_left": "holds L2, R2 and the left stick at their value; nothing is sent.",
+                  "freeze_right": "holds the right stick at its value; nothing is sent."}.get(pt.func, func_title(pt.func))
+            hops.append(("DualSense-Extras", fx))
+        return hops
+
+    # 3 the MIDI hub
+    if msg:
+        ch, k, n = msg
+        if pt.device == "pedal" and ch == 1:
+            hops.append(("MIDI hub", f"pedal ch 1 → ch {ds} (the DualSense channel, read from /tmp/dualsense_channel)."))
+            ch = ds
+        msg = (ch, k, n)
+        hops.append(("MIDI hub", "sends it to every output: XIAO-TT, XIAO-SSP (and the NerdSEQ, if plugged in)."))
+    ch, k, n = msg if msg else (None, None, None)
+
+    def tt_hop():
+        if k in ("cc", "nrpn") and ch not in TT_STRAIGHT_CHANNELS:
+            hops.append(("→ XIAO-TT", f"CC floods are thinned: only the latest value per CC goes out every {HUB_THIN_MS} ms "
+                                      "(keeps the 115 200-baud link clear)."))
+        else:
+            why = f"ch {ch} is never thinned" if ch in TT_STRAIGHT_CHANNELS else "notes are never thinned"
+            hops.append(("→ XIAO-TT", f"straight through ({why}) → USB host port of the i2c2midi."))
+
+    # 4 where it ends up
+    if mod == "lfo":
+        tt_hop()
+        text, _on, _c = module_output(ctx, "lfo")
+        if pt.func == "er_lfo_rate":
+            hops.append(("i2c2midi LFO", f"rate: 0 = stopped, 1–127 = {m.lfo_min_hz:g} … {m.lfo_max_hz:g} Hz (exponential)."))
+        else:
+            hops.append(("i2c2midi LFO", "reset: ≥ 64 restarts the LFO cycle."))
+        hops.append(("I2C → ER-301", f"pulses on {text} (the i2c2midi's own I2C bus, no Teletype involved)."))
+    elif mod == "er":
+        tt_hop()
+        use = pt.extra.get("use")
+        route = pt.extra.get("route")
+        port = f"SC.{use.kind} {use.port}" if use else "the ER-301"
+        conv = "0–127 → 0–10 V"
+        if route and route[0] == "external":
+            conv = {"nrpn": "14-bit 0–16383 → 0–10 V", "trigger": "≥ 64 = gate high", "note": "note held = gate high"}.get(route[1], conv)
+        elif route and route[0] == "dualsense":
+            conv = "gate: pressed = high" if route[3] else ("14-bit 0–16383 → 0–10 V" if k == "nrpn" else conv)
+        hops.append(("i2c2midi ER-301 routes", f"ch {ch} {_kind_text(k)} {n} → {port} ({conv}). The routing table is "
+                                               "sent by the hub from config/er301_routes.py and kept in the i2c2midi."))
+        hops.append(("I2C → ER-301", f"{port} is set over the i2c2midi's own I2C bus (Wire1), straight away."))
+    elif mod == "ssp":
+        hops.append(("→ XIAO-SSP", "unchanged → the SSP sees it from its MIDI device XIAO-SSP."))
+        for sm, i in pt.extra.get("reach", [])[:6]:
+            mch = sm.get("midi_ch")
+            listen = (f"the module listens on ch {mch} only" if mch not in (0, None, "", "0")
+                      else "the module's MIDI channel is 'all': it reacts to this CC on every channel")
+            hops.append((f"SSP {S.module_title(sm)}", f"{S.input_text(i)} → {S.target_text(sm, i)} ({listen})."))
+        more = len(pt.extra.get("reach", [])) - 6
+        if more > 0:
+            hops.append(("SSP", f"+ {more} more inputs"))
+    return hops
 
 
 def module_output(ctx, key: str) -> Tuple[str, bool, QColor]:
@@ -295,7 +488,9 @@ ENV_OF = {"slice": "pi", "loop": "pi", "extras": "pi", "lfo": "i2c", "er": "i2c"
 ER_ROWS = 12           # ER-301 ports listed in its box before "+ N more"
 DEV_HUB = {"dualsense": "script", "16n": "16n", "pedal": "pedal", "ec4": "ec4"}
 HUB_IN = [("script", "DUALSENSE SCRIPT"), ("16n", "16N"), ("pedal", "PEDALS"), ("ec4", "EC4")]
-HUB_IN_X = HUB_IN + [("nerdseq", "NERDSEQ")]
+HUB_IN_X = HUB_IN + [("nerdseq", "NERDSEQ"), ("tt_in", "I2C2MIDI")]
+HUB_COLS = [("tt", "TT"), ("ssp", "SSP"), ("nerdseq", "NRD")]
+HUB_BLOCKED = {("tt_in", "tt"), ("nerdseq", "nerdseq")}           # not sent back where it came from
 HUB_OUT = [("tt", "XIAO-TT", "→ i2c2midi"), ("ssp", "XIAO-SSP", "→ SSP")]
 HUB_OUT_X = HUB_OUT + [("nerdseq", "NERDSEQ", "if plugged in")]
 # what midi_passthrough does on the way (scripts view)
@@ -308,11 +503,45 @@ HUB_STEPS = [
 ]
 # the parts of the DualSense script next to its routers (scripts view)
 SCRIPT_CARDS = [
-    ("chan", "CHANNELS", "ch 1–3 · freeze · a loop each", "Create / Options switch"),
+    ("chan", "INSTRUMENTS", "1–3 · own freeze + loop each", "nothing switches them now"),
     ("clock", "CLOCK", "NerdSEQ clock, else 120 BPM", "times loop quantize"),
     ("hid", "LED · RUMBLE", "back to the DualSense", "channel colour, dots, haptics"),
 ]
 FOLD_KEYS = ["src_" + d for d, _ in SOURCES] + ["pi", "i2c", "er", "tt", "ssp"]
+LEVELS = ("normal", "scripts", "stages")
+LANE_H = 34.0          # room above and below the DualSense script for cables to the hub
+LANE_STEP = 7.0
+
+# inside the DualSense script (stages view): the cards, and the messages between them
+ST1_W, ST2_W, ST4_W = 204.0, 204.0, 168.0
+ST_GAP1, ST_GAP2 = 150.0, 100.0     # room for the labels on the arrows
+STAGE_CARDS = {
+    "evdev": ("EVDEV READER", "buttons · sticks · triggers · touchpad · motion", "the DualSense's three input devices"),
+    "devin": ("DEVICE INPUTS", "own ports DS 16n In · DS EC4 In · DS Pedal In", "next to the hub's (pedals also feed the loop)"),
+    "chan": ("INSTRUMENTS", "", "own freeze + loop each · nothing switches them now"),
+    "hid": ("LED · RUMBLE", "back to the DualSense (hidraw)", "light bar colour, dots, haptics"),
+    "clock": ("CLOCK", "NerdSEQ clock, else 120 BPM", "times loop quantize"),
+    "brt": ("BUTTON ROUTER", "tap · hold ≥ 1 s · two-button chords", "config/controls.py, re-read every second"),
+    "frz": ("FREEZE", "L3: L2 · R2 · left stick  R3: right stick", "holds the value while frozen"),
+    "art": ("AXIS ROUTER", "sticks · triggers · touchpad · d-pad · motion", "→ a function or its own CC / NRPN"),
+    "plain": ("OWN MIDI", "controls set to MIDI: their CC", "motion: 14-bit NRPN · strum: notes"),
+    "out": ("MIDI OUT", "port DualSense_Controller", "the loop records here; playback re-sends"),
+}
+ST_H = {"evdev": 70.0, "devin": 70.0, "brt": 70.0, "art": 70.0, "out": 70.0}
+# (from, side, to, side, label, dashed)
+STAGE_FLOWS = [
+    ("evdev", "r", "brt", "l", "buttons", False),
+    ("evdev", "r", "frz", "l", "sticks · triggers", False),
+    ("frz", "b", "art", "t", "", False),
+    ("evdev", "r", "art", "l", "touchpad · d-pad · motion", False),
+    ("devin", "r", "brt", "l", "CC ≥ 64 → action", False),
+    ("devin", "r", "art", "l", "CC → function", False),
+    ("brt", "r", "plain", "l", "buttons on MIDI", False),
+    ("art", "r", "plain", "l", "axes on MIDI", False),
+    ("plain", "r", "out", "l", "", False),
+    ("chan", "b", "hid", "t", "light bar colour", True),
+    ("brt", "l", "hid", "r", "rumble", True),
+]
 
 
 def _opaque(p, path, tint: QColor, alpha: float):
@@ -382,6 +611,23 @@ def _arrow(p, tip: QPointF, towards_left: bool, col: QColor):
     p.fillPath(path, col)
 
 
+def _arrow4(p, tip: QPointF, pointing: str, col: QColor):
+    """A small filled arrow head at tip, pointing l / r / u / d."""
+    s_ = 5.5
+    path = QPainterPath()
+    path.moveTo(tip)
+    if pointing in ("l", "r"):
+        k = 1 if pointing == "l" else -1
+        path.lineTo(tip.x() + k * s_, tip.y() - s_ * 0.6)
+        path.lineTo(tip.x() + k * s_, tip.y() + s_ * 0.6)
+    else:
+        k = 1 if pointing == "u" else -1
+        path.lineTo(tip.x() - s_ * 0.6, tip.y() + k * s_)
+        path.lineTo(tip.x() + s_ * 0.6, tip.y() + k * s_)
+    path.closeSubpath()
+    p.fillPath(path, col)
+
+
 def _mod_jacks(r: QRectF, ports, rj: float) -> dict:
     return {pk: QPointF(r.left(), r.top() + 44 + rj * (k + 0.5)) for k, (pk, _l) in enumerate(ports)}
 
@@ -408,11 +654,12 @@ class PiDrawing(Drawing):
                     off[k] = [float(x[0]), float(x[1])]
             except (TypeError, ValueError, IndexError):
                 pass
-        return {"off": off, "fold": {k for k in (v.get("fold") or []) if k in FOLD_KEYS}, "scripts": bool(v.get("scripts"))}
+        level = v.get("level") if v.get("level") in LEVELS else ("scripts" if v.get("scripts") else "normal")
+        return {"off": off, "fold": {k for k in (v.get("fold") or []) if k in FOLD_KEYS}, "level": level}
 
     def _save(self):
         self.ctx.s.setValue("routingView", json.dumps({"off": self.view["off"], "fold": sorted(self.view["fold"]),
-                                                       "scripts": self.view["scripts"]}))
+                                                       "level": self.view["level"]}))
 
     def _changed(self):
         self._save()
@@ -430,10 +677,14 @@ class PiDrawing(Drawing):
         self.view["fold"] ^= {key}
         self._changed()
 
-    def set_scripts(self, on: bool):
-        self.view["scripts"] = bool(on)
+    def set_level(self, level: str):
+        """normal: the Pi functions · scripts: the two services · stages: inside the DualSense script."""
+        self.view["level"] = level if level in LEVELS else "normal"
         self.view["fold"].discard("pi")
         self._changed()
+
+    def set_scripts(self, on: bool):
+        self.set_level("scripts" if on else "normal")
 
     def fold_all(self, fold: bool):
         self.view["fold"] = set(FOLD_KEYS) if fold else set()
@@ -550,8 +801,9 @@ class PiDrawing(Drawing):
             y += h + 14
         size = {"src": (SRC_W, y - 14)}
 
-        mode = "fold" if self.folded("pi") else ("scripts" if view["scripts"] else "normal")
+        mode = "fold" if self.folded("pi") else view["level"]
         mods_h = sum(mod_h(k) for k in PI_MODS) + 18 * (len(PI_MODS) - 1)
+        st = {}                                          # stages: column heights
         if mode == "fold":
             pw, ph = 296.0, ENV_HEAD + 8 + 4 * rj + rh + 18
             aw = ah = hw = hub_h = col1 = 0.0
@@ -559,15 +811,26 @@ class PiDrawing(Drawing):
             if mode == "normal":
                 aw, ah, col1 = 16 + MOD_W + 52, 34 + mods_h + 16, 0.0
                 hw, nin, nout, nsteps = HUB_W, len(HUB_IN), len(HUB_OUT), 0
-            else:
+            elif mode == "scripts":
                 rt_h = 44 + 4 * rj + 34
                 col1 = rt_h + len(SCRIPT_CARDS) * (CARD_H + 12)
                 aw = 16 + RT_W + 54 + MOD_W + 52
                 ah = 34 + max(col1, mods_h) + 16 + 26           # + the lane for the channel file
                 hw, nin, nout, nsteps = HUB_WX, len(HUB_IN_X), len(HUB_OUT_X), len(HUB_STEPS)
-            hub_h = 44 + rj * nin + (28 + nsteps * step_h if nsteps else 0) + 30 + rj * nout + 10
+            else:
+                c1 = [("evdev", 16), ("devin", 30), ("chan", 16), ("hid", 16), ("clock", 0)]
+                c2 = [("brt", 44), ("frz", 30), ("art", 0)]
+                h1 = sum(ST_H.get(k, CARD_H) + g for k, g in c1)
+                h2 = sum(ST_H.get(k, CARD_H) + g for k, g in c2)
+                h3 = mods_h + 26 + CARD_H
+                st = {"c1": c1, "c2": c2, "h1": h1, "h2": h2, "h3": h3}
+                col1 = max(h1, h2, h3)
+                aw = 16 + ST1_W + ST_GAP1 + ST2_W + ST_GAP2 + MOD_W + 60 + ST4_W + 34
+                ah = 34 + col1 + 16 + 26
+                hw, nin, nout, nsteps = HUB_WX, len(HUB_IN_X), len(HUB_OUT_X), len(HUB_STEPS)
+            hub_h = 44 + (16 if nsteps else 0) + rj * nin + (28 + nsteps * step_h if nsteps else 0) + 30 + rj * nout + 10
             pw = 14 + aw + 60 + hw + 16
-            ph = ENV_HEAD + 6 + max(ah, hub_h) + 14
+            ph = ENV_HEAD + 6 + max(ah + 2 * LANE_H, hub_h) + 14
         size["pi"] = (pw, ph)
         er_rows = self._er_rows()
         S["er_rows"] = er_rows
@@ -630,17 +893,17 @@ class PiDrawing(Drawing):
             body = ph - ENV_HEAD - 6 - 14
             ar = QRectF(pr.left() + 14, pr.top() + ENV_HEAD + 6 + (body - ah) / 2, aw, ah)
             pi["A"] = ar
-            inner = ah - 34 - 16 - (26 if mode == "scripts" else 0)
+            inner = ah - 34 - 16 - (26 if mode != "normal" else 0)
             if mode == "normal":
                 mx, my = ar.left() + 16, ar.top() + 34
-            else:
+            elif mode == "scripts":
                 mx = ar.left() + 16 + RT_W + 54
                 my = ar.top() + 34 + max(0.0, (inner - mods_h) / 2)
                 ry = ar.top() + 34 + max(0.0, (inner - col1) / 2)
                 rt = QRectF(ar.left() + 16, ry, RT_W, 44 + 4 * rj + 34)
                 pi["rt"] = rt
-                pi["rt_ds"] = QPointF(rt.left(), rt.top() + 44 + rj * 0.5)
-                pi["rt_dev"] = QPointF(rt.left(), rt.top() + 44 + rj * 1.5)
+                pi["in_ds"] = pi["rt_ds"] = QPointF(rt.left(), rt.top() + 44 + rj * 0.5)
+                pi["in_dev"] = pi["rt_dev"] = QPointF(rt.left(), rt.top() + 44 + rj * 1.5)
                 pi["rt_fn"] = QPointF(rt.right(), rt.top() + 44 + rj * 2.5)
                 pi["rt_cc"] = QPointF(rt.right(), rt.top() + 44 + rj * 3.5)
                 cy2 = rt.bottom() + 12
@@ -649,6 +912,31 @@ class PiDrawing(Drawing):
                     pi["cards"][key] = QRectF(rt.left(), cy2, RT_W, CARD_H)
                     cy2 += CARD_H + 12
                 pi["lane_y"] = ar.bottom() - 16
+                pi["gap_x"] = rt.right() + 14
+            else:
+                x1 = ar.left() + 16
+                x2 = x1 + ST1_W + ST_GAP1
+                mx = x2 + ST2_W + ST_GAP2
+                x4 = mx + MOD_W + 60
+                top0 = ar.top() + 34
+                cards = {}
+                y = top0 + max(0.0, (inner - st["h1"]) / 2)
+                for k, gap in st["c1"]:
+                    cards[k] = QRectF(x1, y, ST1_W, ST_H.get(k, CARD_H))
+                    y += ST_H.get(k, CARD_H) + gap
+                y = cards["evdev"].top()
+                for k, gap in st["c2"]:
+                    cards[k] = QRectF(x2, y, ST2_W, ST_H.get(k, CARD_H))
+                    y += ST_H.get(k, CARD_H) + gap
+                my = top0 + max(0.0, (inner - st["h3"]) / 2)
+                cards["plain"] = QRectF(mx, my + mods_h + 26, MOD_W, CARD_H)
+                cards["out"] = QRectF(x4, my + mods_h / 2 - ST_H["out"] / 2, ST4_W, ST_H["out"])
+                pi["st"] = cards
+                pi["cards"] = cards                     # chan / hid share the scripts' links
+                pi["in_ds"] = QPointF(cards["evdev"].left(), cards["evdev"].center().y())
+                pi["in_dev"] = QPointF(cards["devin"].left(), cards["devin"].center().y())
+                pi["lane_y"] = ar.bottom() - 16
+                pi["gap_x"] = x1 + ST1_W + 14
             mrects = {}
             yy = my
             for k in PI_MODS:
@@ -661,14 +949,21 @@ class PiDrawing(Drawing):
                     S["outs"][k] = (QPointF(r.right(), r.top() + 44 + rj / 2), on, oc)
                 yy += r.height() + 18
             pi["mods"] = mrects
-            pi["A_out"] = QPointF(ar.right(), my + mods_h / 2 if mode == "normal" else my + mods_h / 2)
+            if mode == "stages":
+                pi["A_out"] = QPointF(ar.right(), pi["st"]["out"].center().y())
+            else:
+                pi["A_out"] = QPointF(ar.right(), my + mods_h / 2)
             hr = QRectF(ar.right() + 60, pr.top() + ENV_HEAD + 6 + (body - hub_h) / 2, hw, hub_h)
             pi["hub"] = hr
-            ins, outs, steps = (HUB_IN, HUB_OUT, []) if mode == "normal" else (HUB_IN_X, HUB_OUT_X, HUB_STEPS)
+            detail = mode != "normal"
+            ins, outs, steps = (HUB_IN, HUB_OUT, []) if not detail else (HUB_IN_X, HUB_OUT_X, HUB_STEPS)
             yy = hr.top() + 44
+            if detail:
+                pi["matrix_y"] = yy
+                yy += 16
             pi["hub_in"] = {}
             for k, _t in ins:
-                pi["hub_in"][k] = QPointF(hr.left(), yy + rj / 2)
+                pi["hub_in"][k] = QPointF(hr.right() if k == "tt_in" else hr.left(), yy + rj / 2)
                 yy += rj
             pi["steps"] = {}
             if steps:
@@ -684,6 +979,9 @@ class PiDrawing(Drawing):
                 pi["hub_out"][k] = QPointF(hr.right(), yy + rj / 2)
                 yy += rj
         S["pi"] = pi
+        S["lanes"] = self._lanes(S) if mode != "fold" else {}
+        tk = self.sel[6:] if self.sel.startswith("trace:") else None
+        S["trace"] = next((pt for pt in pts if pt.key == tk), None) if tk else None
 
         # right: i2c2midi (LFO), ER-301 + Teletype, SSP
         ir = g["i2c"]
@@ -741,9 +1039,10 @@ class PiDrawing(Drawing):
     def _environments(self, p, S):
         pi = S["pi"]
         if pi["mode"] != "fold":
-            sub = "DualSense script · MIDI hub" if pi["mode"] == "normal" else \
-                "two services · Kontrolleur writes their config over SSH, both re-read it live"
-            self._env(p, pi["r"], "RASPBERRY PI", sub, Theme.function, "env_pi", self.sel == "env_pi", chrome=130)
+            sub = {"normal": "DualSense script · MIDI hub",
+                   "scripts": "two services · Kontrolleur writes their config over SSH, both re-read it live",
+                   "stages": "inside the DualSense script · click a controller row to trace it"}[pi["mode"]]
+            self._env(p, pi["r"], "RASPBERRY PI", sub, Theme.function, "env_pi", self.sel == "env_pi", chrome=210)
             ar = pi["A"]
             path = QPainterPath()
             path.addRoundedRect(ar, 11, 11)
@@ -752,7 +1051,7 @@ class PiDrawing(Drawing):
             t = D.Text("DUALSENSE SCRIPT", Theme.font(9.5, HEAVY, "mono"), _op(Theme.function, 0.9), tracking=1.3)
             t.paint(p, ar.left() + 14, ar.top() + 9)
             D.Text("dualsense_midi.py" + (" · service dualsense-midi · out port DualSense_Controller"
-                                          if pi["mode"] == "scripts" else " → port DualSense_Controller"),
+                                          if pi["mode"] != "normal" else " → port DualSense_Controller"),
                    Theme.font(8.5, SEMIBOLD, "mono"), Theme.dim, max_w=ar.width() - t.w - 40, min_scale=0.7).paint(
                 p, ar.left() + 22 + t.w, ar.top() + 10)
             self.hits.add(QRectF(ar.left(), ar.top(), ar.width(), 30), lambda: self.ctx.select("pi_sel", "env_pi"),
@@ -806,8 +1105,17 @@ class PiDrawing(Drawing):
             ry = r.top() + head
             if not items:
                 D.Text("— nothing patched", Theme.font(10, REGULAR, "mono"), Theme.dim).paint(p, r.left() + 14, ry + 3)
+            T = S["trace"]
             for pt in items:
                 col = patch_color(pt)
+                row = QRectF(r.left() + 6, ry, r.width() - 12, rh)
+                if T is not None and pt.key == T.key:
+                    hl = QPainterPath()
+                    hl.addRoundedRect(row, 6, 6)
+                    p.fillPath(hl, _op(col, 0.16))
+                    p.strokePath(hl, D.pen(_op(col, 0.8), 1.2))
+                self.hits.add(row, lambda k=pt.key: self.ctx.select("pi_sel", "trace:" + k),
+                              "Trace: follow this control through the scripts")
                 tok = D.Pill(D.Text(token(pt.func), Theme.font(10, BOLD, "mono"), col), 6, 2, _op(col, 0.14))
                 lab = D.Text(pt.label, Theme.font(10.5, SEMIBOLD), _op(Theme.ink, 0.9), max_w=SRC_W - 54 - tok.w, min_scale=0.8)
                 cy = ry + rh / 2
@@ -877,10 +1185,13 @@ class PiDrawing(Drawing):
         t.paint(p, r.left() + 16, r.top() + 9)
         D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=r.width() - 32, min_scale=0.7).paint(
             p, r.left() + 16, r.top() + 11 + t.h)
+        T = S["trace"]
         for pk, plabel in ports:
             on = (key, pk) in used
             jc = S["jacks"][(key, pk)]
             _jack(p, jc, col, on)
+            if T is not None and T.jack == (key, pk):
+                D.circle(p, jc, 22, None, patch_color(T), 2)
             lt = D.Text(plabel, Theme.font(10, HEAVY, "mono"), col if on else Theme.dim, max_w=r.width() - 40, min_scale=0.7)
             lt.paint(p, r.left() + 18, jc.y() - lt.h / 2)
         out = S["outs"].get(key)
@@ -917,6 +1228,8 @@ class PiDrawing(Drawing):
             self._module(p, S["mods"][k], pi["mods"][k], used, S)
         if pi["mode"] == "scripts":
             self._router(p, S)
+        elif pi["mode"] == "stages":
+            self._stages(p, S)
         self._hub(p, S)
         # where the script's MIDI leaves it
         a = pi["A_out"]
@@ -951,24 +1264,54 @@ class PiDrawing(Drawing):
         pi, rj = S["pi"], S["rj"]
         r = pi["hub"]
         col = Theme.function
-        scripts = pi["mode"] == "scripts"
+        detail = pi["mode"] != "normal"
         path = QPainterPath()
         path.addRoundedRect(r, 10, 10)
         _opaque(p, path, col, 0.06)
         p.strokePath(path, D.pen(_op(col, 0.7), 1.3))
+        self.hits.add(path, lambda: self.ctx.select("pi_sel", "env_pi"), "The MIDI hub")
         t = D.Text("MIDI HUB", Theme.font(11, HEAVY, "mono"), col, tracking=1.2)
         t.paint(p, r.left() + 16, r.top() + 9)
-        D.Text("midi_passthrough.py" + (" · service midi-passthrough" if scripts else " on the Pi"),
+        D.Text("midi_passthrough.py" + (" · service midi-passthrough" if detail else " on the Pi"),
                Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=r.width() - 30, min_scale=0.7).paint(p, r.left() + 16, r.top() + 11 + t.h)
         pts = S["pts"]
         via = {DEV_HUB[pt.device] for pt in pts if ENV_OF.get(pt.jack[0]) != "pi"}
         script_on = any(o[1] for k, o in S["outs"].items() if k in PI_MODS) or "script" in via
-        for k, label in (HUB_IN_X if scripts else HUB_IN):
-            on = k in via or (k == "script" and script_on)
-            self._jack_label(p, pi["hub_in"][k], col, on, label + (" · if plugged in" if k == "nerdseq" else ""),
-                             max_w=r.width() - 40)
-        if scripts:
-            D.Text("ON THE WAY", Theme.font(9, HEAVY, "mono"), Theme.dim, tracking=1.2).paint(p, r.left() + 16, pi["steps_y0"])
+        cols_x = {k: r.right() - 22 - (len(HUB_COLS) - 1 - i) * 26 for i, (k, _t) in enumerate(HUB_COLS)}
+        if detail:
+            y = pi["matrix_y"]
+            D.Text("IN  ·  OUT →", Theme.font(8, HEAVY, "mono"), Theme.dim, tracking=1.0).paint(p, r.left() + 16, y + 1)
+            for k, lab in HUB_COLS:
+                tt = D.Text(lab, Theme.font(8, HEAVY, "mono"), Theme.dim)
+                tt.paint(p, cols_x[k] - tt.w / 2, y + 1)
+            self.hits.add(QRectF(r.left() + 8, y - 2, r.width() - 16, 16), None,
+                          "Which input reaches which output: ● as it is · ◉ changed on the way (list below) · × not sent back")
+        label_w = r.width() - 40 - (len(HUB_COLS) * 26 + 8 if detail else 0)
+        for k, label in (HUB_IN_X if detail else HUB_IN):
+            c = pi["hub_in"][k]
+            on = k in via or (k == "script" and script_on) or k == "tt_in"
+            if k == "tt_in":                          # arrives from the right: the XIAO-TT works both ways
+                lt = D.Text("I2C2MIDI ⇠ XIAO-TT", Theme.font(10, HEAVY, "mono"), module_color("lfo"), max_w=label_w, min_scale=0.7)
+                lt.paint(p, r.left() + 16, c.y() - lt.h / 2)
+                _jack(p, c, module_color("lfo"), True, 9)
+            else:
+                self._jack_label(p, c, col, on, label + (" · if plugged in" if k == "nerdseq" else ""), max_w=label_w)
+            if detail:
+                for ok, _lab in HUB_COLS:
+                    cx = QPointF(cols_x[ok], c.y())
+                    if (k, ok) in HUB_BLOCKED:
+                        x = D.Text("×", Theme.font(10, HEAVY, "mono"), Theme.dim)
+                        x.paint(p, cx.x() - x.w / 2, cx.y() - x.h / 2)
+                        continue
+                    changed = k == "pedal" or ok == "tt"
+                    dot = _op(col, 0.85 if on else 0.3)
+                    if changed:
+                        D.circle(p, cx, 9, None, dot, 1.3)
+                        D.circle(p, cx, 3.5, dot)
+                    else:
+                        D.circle(p, cx, 6, dot)
+        if detail:
+            D.Text("ON THE WAY  (◉)", Theme.font(9, HEAVY, "mono"), Theme.dim, tracking=1.2).paint(p, r.left() + 16, pi["steps_y0"])
             for k, text, sub in HUB_STEPS:
                 sr = pi["steps"][k]
                 D.circle(p, QPointF(sr.left() + 20, sr.top() + 9), 4, _op(col, 0.7))
@@ -977,10 +1320,9 @@ class PiDrawing(Drawing):
                 D.Text(sub, Theme.font(8.5, SEMIBOLD, "mono"), Theme.dim, max_w=sr.width() - 44, min_scale=0.7).paint(
                     p, sr.left() + 30, sr.top() + 1 + Theme.font(9.5, BOLD, "mono").pixelSize() * 1.3)
         D.Text("OUT", Theme.font(9, HEAVY, "mono"), Theme.dim, tracking=1.2).paint(p, r.left() + 16, pi["hub_out_y0"])
-        for k, name, to in (HUB_OUT_X if scripts else HUB_OUT):
+        for k, name, to in (HUB_OUT_X if detail else HUB_OUT):
             oc = module_color("lfo" if k == "tt" else "ssp") if k != "nerdseq" else Theme.c("body", 0.6)
             self._jack_label(p, pi["hub_out"][k], oc, k != "nerdseq", f"{name} {to}", right=True, max_w=r.width() - 40)
-        self.hits.add(path, lambda: self.ctx.select("pi_sel", "env_pi"), "The MIDI hub")
 
     # ── right: i2c2midi, ER-301, Teletype, SSP ──
     def _right(self, p, S):
@@ -1011,7 +1353,17 @@ class PiDrawing(Drawing):
                    max_w=er.width() - t.w - 64, min_scale=0.7).paint(p, er.left() + 24 + t.w, er.top() + 12)
         else:
             y = er.top() + 40
+            T = S["trace"]
+            tport = None
+            if T is not None and T.jack and T.jack[0] == "er" and T.extra.get("use"):
+                tport = f"SC.{T.extra['use'].kind} {T.extra['use'].port}"
+            elif T is not None and T.jack and T.jack[0] == "lfo":
+                tport = module_output(self.ctx, "lfo")[0]
             for port, what, c, _from_lfo in rows:
+                if port == tport:
+                    hl = QPainterPath()
+                    hl.addRoundedRect(QRectF(er.left() + 6, y, er.width() - 12, rh), 5, 5)
+                    p.fillPath(hl, _op(patch_color(T), 0.18))
                 pt_t = D.Text(port, Theme.font(10.5, BOLD, "mono"), c)
                 pt_t.paint(p, er.left() + 14, y + (rh - pt_t.h) / 2)
                 D.Text(what, Theme.font(9.5, SEMIBOLD, "mono"), Theme.dim, max_w=er.width() - 100, min_scale=0.7).paint(
@@ -1029,85 +1381,212 @@ class PiDrawing(Drawing):
             D.Text("shown only", Theme.font(9, SEMIBOLD, "mono"), _op(Theme.dim, 0.7)).paint(p, tt.left() + 14, tt.top() + 27 + t.h)
         self.hits.add(QRectF(tt), None, "The Teletype leads the I2C bus (shown only, nothing to set here)")
 
+    # ── the trace and the highlighting of a path ──
+    def _via_hub(self, pt, mode: str) -> bool:
+        """Does this controller cable go straight to a hub input (in a lane)?"""
+        env = ENV_OF.get(pt.jack[0]) if pt.jack else None
+        if mode == "fold" or env == "pi":
+            return False
+        return not (mode in ("scripts", "stages") and pt.device == "dualsense")
+
+    def _on(self, S, part: str, arg=None) -> bool:
+        """Is this piece of the drawing on the traced control's way?"""
+        T = S["trace"]
+        if T is None or not T.jack:
+            return False
+        mod = T.jack[0]
+        env = ENV_OF.get(mod)
+        mode = S["pi"]["mode"]
+        via = env != "pi"
+        ds_script = T.device == "dualsense" and via and mode != "fold"
+        if part == "lane":
+            return arg == T.device and self._via_hub(T, mode)
+        if part == "fan":
+            return arg == T.jack
+        if part == "cc":
+            return ds_script
+        if part == "mod_out":
+            return mod == arg
+        if part == "aout":
+            return (env == "pi" and bool(S["outs"].get(mod, (None, False))[1])) or ds_script
+        if part == "hub_in":
+            return via and DEV_HUB.get(T.device) == arg
+        if part == "hub_out":
+            return (arg == "tt" and env == "i2c") or (arg == "ssp" and mod == "ssp")
+        if part == "er":
+            return mod == "er"
+        if part == "bus":
+            return mod in ("er", "lfo")
+        if part == "jack":
+            return arg == T.jack
+        if part == "flow":
+            return arg in self._trace_flows(T)
+        return False
+
+    def _trace_flows(self, T) -> set:
+        """The arrows inside the DualSense script (stages view) the traced control takes."""
+        mod = T.jack[0]
+        env = ENV_OF.get(mod)
+        cont = T.func in M.CONT_FUNCS
+        if T.device == "dualsense":
+            iid = T.ref[1] if T.ref[0] == "input" else (T.extra.get("route") or (None, None, None))[2]
+            i = M.INPUT.get(iid) if iid else None
+            button = T.ref[0] == "chord" or (i is not None and bool(i.button) and not cont)
+            way = {("evdev", "brt")} if button else {("evdev", "frz"), ("frz", "art"), ("evdev", "art")}
+            if env != "pi":
+                way |= {("brt" if button else "art", "plain"), ("plain", "out")}
+            return way
+        if env == "pi":
+            return {("devin", "art" if cont else "brt")}
+        return set()
+
+    def _style(self, S, on_path: bool, hot: bool, base: float, hot_a: float = 0.9):
+        """(alpha, width factor) of a cable: the traced way stands out, the rest steps back."""
+        if S["trace"] is not None:
+            return (0.95, 1.5) if on_path else (base * 0.35, 1.0)
+        return (hot_a, 1.5) if hot else (base, 1.0)
+
+    def _lanes(self, S):
+        """Cables from the controllers to the hub run in lanes above / below the DualSense script, never behind it."""
+        pi = S["pi"]
+        ar = pi["A"]
+        devs = []
+        for dev, _t, r, _fold, items in S["cards"]:
+            if any(self._via_hub(pt, pi["mode"]) for pt in items):
+                devs.append((dev, r.center().y()))
+        mid = ar.center().y()
+        top = sorted([d for d in devs if d[1] < mid], key=lambda d: d[1])
+        bot = sorted([d for d in devs if d[1] >= mid], key=lambda d: -d[1])
+        lanes = {}
+        for side, lst in (("top", top), ("bot", bot)):
+            n = len(lst)
+            for i, (dev, _y) in enumerate(lst):
+                j = n - 1 - i                    # the outermost card takes the outermost track
+                lanes[dev] = (side, ar.top() - 9 - j * LANE_STEP if side == "top" else ar.bottom() + 9 + j * LANE_STEP)
+        for k, (dev, _y) in enumerate(sorted(devs, key=lambda d: d[1])):
+            side, y = lanes[dev]
+            lanes[dev] = (side, y, ar.right() + 14 + k * LANE_STEP)
+        return lanes
+
+    def _lane_path(self, S, a: QPointF, dev: str, end: QPointF) -> QPainterPath:
+        side, y, xt = S["lanes"][dev]
+        pr = S["pi"]["r"]
+        e = QPointF(pr.left() + 4, y)
+        path = QPainterPath()
+        path.moveTo(a)
+        dx = max(40.0, abs(e.x() - a.x()) * 0.5)
+        path.cubicTo(QPointF(a.x() + dx, a.y()), QPointF(e.x() - dx, y), e)
+        r = min(8.0, abs(end.y() - y) / 2)
+        sgn = 1 if end.y() > y else -1
+        path.lineTo(xt - r, y)
+        path.quadTo(QPointF(xt, y), QPointF(xt, y + sgn * r))
+        path.lineTo(xt, end.y() - sgn * r)
+        path.quadTo(QPointF(xt, end.y()), QPointF(xt + r, end.y()))
+        path.lineTo(end)
+        return path
+
     # ── cables ──
     def _cable_ends(self, S):
-        """(start, end, colour, hot, in front?) of every controller cable."""
+        """(start, end, colour, hot, kind, patch) of every controller cable; kind: front | lane."""
         pi = S["pi"]
         mode = pi["mode"]
         out = []
         for a, pt in S["src_jacks"]:
             mod = pt.jack[0]
             env = ENV_OF.get(mod)
+            kind = "front"
             if mode == "fold":
-                b, front = pi["in"][pt.device], True
-            elif mode == "scripts" and (env == "pi" or pt.device == "dualsense"):
-                b, front = (pi["rt_ds"] if pt.device == "dualsense" else pi["rt_dev"]), True
+                b = pi["in"][pt.device]
+            elif mode in ("scripts", "stages") and (env == "pi" or pt.device == "dualsense"):
+                b = pi["in_ds"] if pt.device == "dualsense" else pi["in_dev"]
             elif env == "pi":
-                b, front = S["jacks"].get(pt.jack), True
+                b = S["jacks"].get(pt.jack)
             else:
-                b, front = pi["hub_in"][DEV_HUB[pt.device]], False
+                b, kind = pi["hub_in"][DEV_HUB[pt.device]], "lane"
             if b is not None:
                 hot = self.sel in ("src_" + pt.device, "mod_" + mod)
-                out.append((a, b, patch_color(pt), hot, front))
+                out.append((a, b, patch_color(pt), hot, kind, pt))
         return out
 
     def _back_cables(self, p, S):
-        for a, b, col, hot, front in self._cable_ends(S):
-            if not front:
-                p.strokePath(_curve(a, b), D.pen(_op(col, 0.85 if hot else 0.28), 2.2 if hot else 1.3))
         pi = S["pi"]
         outs = pi["out"] if pi["mode"] == "fold" else pi["hub_out"]
         for k, target in (("tt", "i2c_in"), ("ssp", "ssp_in")):
             a, b = outs[k], S[target]
             col = module_color("lfo" if k == "tt" else "ssp")
             hot = self.sel == ("mod_lfo" if k == "tt" else "mod_ssp")
-            p.strokePath(_curve(a, b, 0.5), D.pen(_op(col, 0.95 if hot else 0.6), 4.0 if hot else 3.2))
-        # I2C: i2c2midi → ER-301 and Teletype
+            al, wf = self._style(S, self._on(S, "hub_out", k), hot, 0.6, 0.95)
+            p.strokePath(_curve(a, b, 0.5), D.pen(_op(col, al), 3.2 * min(wf, 1.25)))
+        # the way back: what the i2c2midi sends on USB (Teletype I2M on ch 17–32) comes back into the hub
         col = module_color("lfo")
+        a = S["i2c_in"] + QPointF(0, 9)
+        end = pi["hub_in"]["tt_in"] if "tt_in" in pi.get("hub_in", {}) else outs["tt"] + QPointF(0, 9)
+        path = QPainterPath()
+        path.moveTo(a)
+        dx = max(50.0, abs(a.x() - end.x()) * 0.45)
+        path.cubicTo(QPointF(a.x() - dx, a.y()), QPointF(end.x() + dx, end.y()), end + QPointF(5, 0))
+        dim = _op(col, 0.45 if S["trace"] is None else 0.2)
+        p.strokePath(path, D.pen(dim, 1.3, [5, 3]))
+        _arrow(p, end + QPointF(3, 0), True, dim)
+        S["back_label"] = path.pointAtPercent(0.5)
+        # I2C: i2c2midi → ER-301 and Teletype
         bus = S["i2c_bus"]
-        for end in (S["er_i2c"], S["tt_i2c"]):
-            p.strokePath(_vcurve(bus, end), D.pen(_op(col, 0.6), 2.4))
+        for end, on in ((S["er_i2c"], self._on(S, "bus")), (S["tt_i2c"], False)):
+            al, wf = self._style(S, on, False, 0.6)
+            p.strokePath(_vcurve(bus, end), D.pen(_op(col, al), 2.4 * min(wf, 1.25)))
 
     def _front_cables(self, p, S):
         pi, used = S["pi"], S["used"]
-        for a, b, col, hot, front in self._cable_ends(S):
-            if front:
-                p.strokePath(_curve(a, b), D.pen(_op(col, 0.9 if hot else 0.35), 2.4 if hot else 1.5))
-        if pi["mode"] != "fold":
+        mode = pi["mode"]
+        for a, b, col, hot, kind, pt in self._cable_ends(S):
+            on = S["trace"] is not None and pt.key == S["trace"].key
+            al, wf = self._style(S, on, hot, 0.38)
+            path = self._lane_path(S, a, pt.device, b) if kind == "lane" else _curve(a, b)
+            p.strokePath(path, D.pen(_op(col, al), 1.5 * wf))
+        if mode != "fold":
             ao = pi["A_out"]
-            if pi["mode"] == "scripts":
-                # routers → the jacks of the functions; plain CC straight to the script's MIDI out
-                fn = pi["rt_fn"]
+            dim = _op(Theme.function, 0.55 if S["trace"] is None else 0.25)
+            cc_on = any(pt.device == "dualsense" and ENV_OF.get(pt.jack[0]) != "pi" for pt in S["pts"])
+            if mode in ("scripts", "stages"):
+                # routers → the jacks of the functions
                 for (mk, pk), end in S["jacks"].items():
                     if ENV_OF.get(mk) == "pi" and (mk, pk) in used:
                         col = module_color(mk)
-                        hot = self.sel == "mod_" + mk
-                        p.strokePath(_short(fn, end, 0.6), D.pen(_op(col, 0.9 if hot else 0.5), 2.0 if hot else 1.4))
-                cc = pi["rt_cc"]
-                cc_on = any(pt.device == "dualsense" and ENV_OF.get(pt.jack[0]) != "pi" for pt in S["pts"])
-                lane = QPainterPath()
-                lane.moveTo(cc)
-                yb = pi["A"].bottom() - 34
-                lane.cubicTo(QPointF(cc.x() + 30, cc.y()), QPointF(cc.x() + 30, yb), QPointF(cc.x() + 60, yb))
-                lane.lineTo(QPointF(ao.x() - 60, yb))
-                lane.cubicTo(QPointF(ao.x() - 24, yb), QPointF(ao.x() - 24, ao.y()), ao)
-                p.strokePath(lane, D.pen(_op(Theme.function, 0.75 if cc_on else 0.25), 1.8 if cc_on else 1.2,
-                                         None if cc_on else [3, 3]))
+                        if mode == "scripts":
+                            start = pi["rt_fn"]
+                        else:
+                            cont = any(f in M.CONT_FUNCS for f in FUNCS_OF.get((mk, pk), []))
+                            r = pi["st"]["art" if cont else "brt"]
+                            start = QPointF(r.right(), r.center().y())
+                        al, wf = self._style(S, self._on(S, "fan", (mk, pk)), self.sel == "mod_" + mk, 0.5)
+                        p.strokePath(_short(start, end, 0.6), D.pen(_op(col, al), 1.4 * wf))
+                if mode == "scripts":
+                    # plain CC straight to the script's MIDI out, under the functions
+                    cc = pi["rt_cc"]
+                    lane = QPainterPath()
+                    lane.moveTo(cc)
+                    yb = pi["A"].bottom() - 34
+                    lane.cubicTo(QPointF(cc.x() + 30, cc.y()), QPointF(cc.x() + 30, yb), QPointF(cc.x() + 60, yb))
+                    lane.lineTo(QPointF(ao.x() - 60, yb))
+                    lane.cubicTo(QPointF(ao.x() - 24, yb), QPointF(ao.x() - 24, ao.y()), ao)
+                    al, wf = self._style(S, self._on(S, "cc"), False, 0.75 if cc_on else 0.25)
+                    p.strokePath(lane, D.pen(_op(Theme.function, al), (1.8 if cc_on else 1.2) * wf, None if cc_on else [3, 3]))
+                else:
+                    self._stage_flows(p, S, cc_on)
                 # the channel file: DualSense script → hub (pedal channel)
                 ch = pi["cards"]["chan"]
-                st = pi["steps"]["pedal"]
+                stp = pi["steps"]["pedal"]
                 ly = pi["lane_y"]
+                gx = pi["gap_x"]
                 path = QPainterPath()
-                gx = pi["rt"].right() + 14
                 path.moveTo(ch.right(), ch.center().y())
                 path.lineTo(gx, ch.center().y())
                 path.lineTo(gx, ly)
-                path.lineTo(st.left() - 22, ly)
-                path.lineTo(st.left() - 22, st.top() + 9)
-                path.lineTo(st.left(), st.top() + 9)
-                dim = _op(Theme.function, 0.55)
+                path.lineTo(stp.left() - 22, ly)
+                path.lineTo(stp.left() - 22, stp.top() + 9)
+                path.lineTo(stp.left(), stp.top() + 9)
                 p.strokePath(path, D.pen(dim, 1.2, [2, 3]))
-                _arrow(p, QPointF(st.left() + 2, st.top() + 9), False, dim)
+                _arrow(p, QPointF(stp.left() + 2, stp.top() + 9), False, dim)
                 lab = D.Text("/tmp/dualsense_channel", Theme.font(8, SEMIBOLD, "mono"), _op(Theme.dim, 0.9))
                 lab.paint(p, gx + 10, ly - lab.h - 1)
                 # LED / rumble back to the DualSense
@@ -1121,17 +1600,22 @@ class PiDrawing(Drawing):
                 path.cubicTo(QPointF(a.x() - dx, a.y()), QPointF(b.x() + dx, b.y()), b)
                 p.strokePath(path, D.pen(dim, 1.2, [2, 3]))
                 _arrow(p, b, True, dim)
-            # the functions' MIDI → the script's out port → the hub
+            # the functions' MIDI → the script's out port (stages: the MIDI OUT card) → the hub
+            target = QPointF(pi["st"]["out"].left(), pi["st"]["out"].center().y()) if mode == "stages" else ao
             for k in PI_MODS:
                 o = S["outs"].get(k)
                 if not o:
                     continue
                 jc, on, oc = o
-                hot = self.sel == "mod_" + k
-                p.strokePath(_short(jc, ao, 0.6), D.pen(_op(oc, 0.9 if hot else (0.55 if on else 0.2)), 2.0 if hot else 1.5,
-                                                       None if on else [3, 3]))
+                al, wf = self._style(S, self._on(S, "mod_out", k), self.sel == "mod_" + k, 0.55 if on else 0.2)
+                p.strokePath(_short(jc, target, 0.6), D.pen(_op(oc, al), 1.5 * wf, None if on else [3, 3]))
+            if mode == "stages":
+                outr = pi["st"]["out"]
+                al, wf = self._style(S, self._on(S, "aout"), False, 0.75)
+                p.strokePath(_short(QPointF(outr.right(), outr.center().y()), ao, 0.5), D.pen(_op(Theme.function, al), 2.4 * wf))
             end = pi["hub_in"]["script"]
-            p.strokePath(_short(ao, end, 0.5), D.pen(_op(Theme.function, 0.75), 2.8))
+            al, wf = self._style(S, self._on(S, "aout"), False, 0.75)
+            p.strokePath(_short(ao, end, 0.5), D.pen(_op(Theme.function, al), 2.8 * min(wf, 1.25)))
             _jack(p, ao, Theme.function, True, 13)
         # the i2c2midi's ER-301 routing: from where the USB MIDI arrives, out onto the I2C bus
         if "er_card" in S:
@@ -1140,13 +1624,15 @@ class PiDrawing(Drawing):
             path = QPainterPath()
             path.moveTo(a)
             path.cubicTo(QPointF(a.x() + 6, a.y()), QPointF(end.x() - 14, end.y()), end)
-            p.strokePath(path, D.pen(_op(Theme.cv, 0.6 if on else 0.2), 1.6 if on else 1.1, None if on else [3, 3]))
+            al, wf = self._style(S, self._on(S, "er"), False, 0.6 if on else 0.2)
+            p.strokePath(path, D.pen(_op(Theme.cv, al), (1.6 if on else 1.1) * wf, None if on else [3, 3]))
             bus = S["i2c_bus"]
             x = min(max(bus.x(), er_r.left() + 20), er_r.right() - 20)
             path = QPainterPath()
             path.moveTo(QPointF(x, er_r.bottom()))
             path.cubicTo(QPointF(x, er_r.bottom() + 8), QPointF(bus.x(), bus.y() - 8), bus)
-            p.strokePath(path, D.pen(_op(module_color("lfo"), 0.6), 2.0))
+            al, wf = self._style(S, self._on(S, "er"), False, 0.6)
+            p.strokePath(path, D.pen(_op(module_color("lfo"), al), 2.0 * wf))
         # inside the i2c2midi and the SSP: from where the USB MIDI arrives to the inputs that listen
         for env, mod, fold in (("i2c_in", "lfo", "i2c"), ("ssp_in", "ssp", "ssp")):
             a = S[env]
@@ -1158,13 +1644,92 @@ class PiDrawing(Drawing):
                         path = QPainterPath()
                         path.moveTo(a)
                         path.cubicTo(QPointF(a.x() + 6, a.y()), QPointF(end.x() - 14, end.y()), end)
-                        p.strokePath(path, D.pen(_op(col, 0.9 if hot else 0.55), 1.8 if hot else 1.4))
+                        al, wf = self._style(S, self._on(S, "jack", (mk, pk)), hot, 0.55)
+                        p.strokePath(path, D.pen(_op(col, al), 1.4 * wf))
             _jack(p, a, col, True, 13)
         col = module_color("lfo")
         for c in (S["i2c_bus"], S["er_i2c"], S["tt_i2c"]):
             _jack(p, c, col, True, 11)
         bus = S["i2c_bus"]
         D.Text("I2C", Theme.font(9, HEAVY, "mono"), _op(col, 0.9), tracking=1.4).paint(p, bus.x() + 10, bus.y() + 4)
+        # the label of the way back from the i2c2midi (on top, so no box hides it)
+        if "back_label" in S:
+            mid = S["back_label"]
+            lab = D.Text("← Teletype", Theme.font(8, SEMIBOLD, "mono"), _op(Theme.dim, 0.95))
+            pill = QPainterPath()
+            pill.addRoundedRect(QRectF(mid.x() - lab.w / 2 - 4, mid.y() + 2, lab.w + 8, lab.h + 2), 4, 4)
+            p.fillPath(pill, _op(Theme.bg, 0.9))
+            lab.paint(p, mid.x() - lab.w / 2, mid.y() + 3)
+        # rings on the hub jacks the traced message passes
+        if S["trace"] is not None and mode != "fold":
+            tc = patch_color(S["trace"])
+            for k, c in pi["hub_in"].items():
+                if self._on(S, "hub_in", k):
+                    D.circle(p, c, 20, None, tc, 2)
+            for k, c in pi["hub_out"].items():
+                if self._on(S, "hub_out", k):
+                    D.circle(p, c, 20, None, tc, 2)
+
+    # ── inside the DualSense script (stages) ──
+    def _stage_flows(self, p, S, cc_on: bool):
+        cards = S["pi"]["st"]
+        uses = {}
+        for fa, sa, fb, sb, *_r in STAGE_FLOWS:
+            uses.setdefault((fa, sa), []).append(fb)
+            uses.setdefault((fb, sb), []).append(fa)
+        seen = {}
+
+        def at(key, side, other):
+            lst = uses[(key, side)]
+            i = lst.index(other)
+            n = len(lst)
+            r = cards[key]
+            f = (i + 1) / (n + 1)
+            return {"l": QPointF(r.left(), r.top() + r.height() * f), "r": QPointF(r.right(), r.top() + r.height() * f),
+                    "t": QPointF(r.left() + r.width() * f, r.top()), "b": QPointF(r.left() + r.width() * f, r.bottom())}[side]
+
+        out = {"l": QPointF(-1, 0), "r": QPointF(1, 0), "t": QPointF(0, -1), "b": QPointF(0, 1)}
+        for fa, sa, fb, sb, label, dashed in STAGE_FLOWS:
+            a, b = at(fa, sa, fb), at(fb, sb, fa)
+            seen[(fa, fb)] = True
+            d = max(22.0, ((a.x() - b.x()) ** 2 + (a.y() - b.y()) ** 2) ** 0.5 * 0.4)
+            path = QPainterPath()
+            path.moveTo(a)
+            path.cubicTo(a + out[sa] * d, b + out[sb] * d, b)
+            on_path = (fa in ("brt", "art") and fb == "plain") or (fa == "plain")
+            on = cc_on if on_path else True
+            al, wf = self._style(S, self._on(S, "flow", (fa, fb)), False, (0.6 if on else 0.22) if not dashed else 0.45)
+            col = _op(Theme.function, al)
+            p.strokePath(path, D.pen(col, (1.2 if dashed else 1.6) * wf, [2, 3] if dashed else (None if on else [3, 3])))
+            tip = {"l": "r", "r": "l", "t": "d", "b": "u"}[sb]
+            _arrow4(p, b, tip, col)
+            if label:
+                mid = path.pointAtPercent(0.5)
+                t = D.Text(label, Theme.font(8, SEMIBOLD, "mono"), _op(Theme.dim, 0.95))
+                pill = QPainterPath()
+                pill.addRoundedRect(QRectF(mid.x() - t.w / 2 - 4, mid.y() - t.h / 2 - 1, t.w + 8, t.h + 2), 4, 4)
+                p.fillPath(pill, _op(Theme.bg, 0.92))
+                t.paint(p, mid.x() - t.w / 2, mid.y() - t.h / 2)
+
+    def _stages(self, p, S):
+        pi = S["pi"]
+        cards = pi["st"]
+        m = self.ctx.mapping
+        col = Theme.function
+        pts = S["pts"]
+        on = {"evdev": any(pt.device == "dualsense" for pt in pts),
+              "devin": any(pt.device != "dualsense" and ENV_OF.get(pt.jack[0]) == "pi" for pt in pts),
+              "plain": any(pt.device == "dualsense" and ENV_OF.get(pt.jack[0]) != "pi" for pt in pts)}
+        for key, (title, sub, sub2) in STAGE_CARDS.items():
+            r = cards[key]
+            if key == "chan":
+                sub = f"1 · 2 · 3 · now 1 = MIDI ch {m.channel}"
+            path = self._card(p, r, title, sub, col, on.get(key, True), False, sub2)
+            self.hits.add(path, lambda: self.ctx.select("pi_sel", "env_pi"), title.title())
+        _jack(p, pi["in_ds"], col, on["evdev"])
+        _jack(p, pi["in_dev"], col, on["devin"])
+        outr = cards["out"]
+        _jack(p, QPointF(outr.left(), outr.center().y()), col, True, 9)
 
     # ── fold buttons, the scripts switch ──
     def _chrome(self, p, S):
@@ -1182,15 +1747,21 @@ class PiDrawing(Drawing):
         pr = g["pi"]
         chev(QPointF(pr.right() - 22, pr.top() + 17), "pi", "the Raspberry Pi")
         if S["pi"]["mode"] != "fold":
-            on = self.view["scripts"]
+            lvl = self.view["level"]
             col = Theme.function
-            chip = D.Pill(D.Text("SCRIPTS", Theme.font(9, HEAVY, "mono"), Theme.bg if on else col, tracking=1.2), 9, 3,
-                          col if on else _op(col, 0.08), col, 1.2)
-            x = pr.right() - 44 - chip.w
-            y = pr.top() + 17 - chip.h / 2
-            chip.paint(p, x, y)
-            self.hits.add(QRectF(x, y, chip.w, chip.h), lambda: self.set_scripts(not self.view["scripts"]),
-                          "Hide how the scripts work inside" if on else "Show how the two scripts on the Pi work together")
+            x = pr.right() - 44
+            for name, on, nxt, tip in (
+                    ("STAGES", lvl == "stages", "scripts" if lvl == "stages" else "stages",
+                     "Back to the two scripts" if lvl == "stages" else "Open up the DualSense script: its stages and the messages between them"),
+                    ("SCRIPTS", lvl != "normal", "normal" if lvl != "normal" else "scripts",
+                     "Back to the Pi functions" if lvl != "normal" else "Show how the two scripts on the Pi work together")):
+                chip = D.Pill(D.Text(name, Theme.font(9, HEAVY, "mono"), Theme.bg if on else col, tracking=1.2), 9, 3,
+                              col if on else _op(col, 0.08), col, 1.2)
+                x -= chip.w
+                y = pr.top() + 17 - chip.h / 2
+                chip.paint(p, x, y)
+                self.hits.add(QRectF(x, y, chip.w, chip.h), lambda n=nxt: self.set_level(n), tip)
+                x -= 8
         for key in ("i2c", "ssp"):
             r = g[key]
             chev(QPointF(r.right() - 22, r.top() + 17), key, GROUP_NAME[key])
@@ -1199,8 +1770,8 @@ class PiDrawing(Drawing):
             chev(QPointF(r.right() - 20, r.top() + 18), key, GROUP_NAME[key])
 
 
-SCRIPT_SUB = {"slice": "grain slice → NRPN 3 · Create/Options pick ch",
-              "loop": "records the DualSense + pedals, plays back",
+SCRIPT_SUB = {"slice": "grain slice → NRPN 3 · Create/Options = block",
+              "loop": "records what goes out + the pedals, plays back",
               "extras": "motion NRPN · strum CC · freezes the sticks"}
 
 
@@ -1234,6 +1805,8 @@ def build_panel(ctx, tab: str, col: QVBoxLayout):
         ssp_panel(ctx, col)
     elif sel == "env_pi":
         pi_panel(ctx, col)
+    elif sel.startswith("trace:"):
+        trace_panel(ctx, sel[6:], col)
     else:
         module_panel(ctx, sel[4:] if sel.startswith("mod_") else "slice", col)
     if not ctx.mapping.controls_on_pi:
@@ -1435,9 +2008,10 @@ PI_SCRIPT_TEXT = [
     "Loop-Rekordeur, the DualSense extras) or plain MIDI.",
     "Everything it sends leaves through its own MIDI port, DualSense_Controller, which the hub picks up: the controls "
     "set to MIDI, the grain slice (NRPN 3), loop playback, motion and strum. That is the hub's DUALSENSE SCRIPT input.",
-    "Channels 1–3 (Create / Options) each keep their own freeze and loop; the current one is written to "
-    "/tmp/dualsense_channel. Loop quantize follows the NerdSEQ clock, else 120 BPM. LED colour, player dots and "
-    "rumble go back to the controller.",
+    "It knows three instruments (1 = MIDI ch 2), each with its own freeze and loop; the current one's channel is "
+    "written to /tmp/dualsense_channel for the hub. No control switches the instrument at the moment (Create / "
+    "Options step through the sample blocks). Loop quantize follows the NerdSEQ clock, else 120 BPM. LED colour, "
+    "player dots and rumble go back to the controller.",
 ]
 PI_HUB_TEXT = [
     "Connects the MIDI devices on the Pi: what comes from DualSense_Controller, the 16n, the pedals, the EC4 and "
@@ -1469,7 +2043,7 @@ def pi_panel(ctx, col: QVBoxLayout):
 
 def _view_card(d, col: QVBoxLayout):
     card = W.Card("View", Theme.function)
-    mode = "fold" if d.folded("pi") else ("scripts" if d.view["scripts"] else "normal")
+    mode = "fold" if d.folded("pi") else d.view["level"]
 
     def pick(v):
         if v == "fold":
@@ -1478,11 +2052,38 @@ def _view_card(d, col: QVBoxLayout):
         else:
             if d.folded("pi"):
                 d.toggle_fold("pi")
-            d.set_scripts(v == "scripts")
+            d.set_level(v)
 
-    card.add(W.Segmented([("fold", "Folded"), ("normal", "Functions"), ("scripts", "Scripts")], mode, pick))
-    card.add(W.hint("Drag a box to move it, ▾ folds it. Fold all and Reset layout are in the corner of the drawing."))
+    card.add(W.Segmented([("fold", "Folded"), ("normal", "Functions"), ("scripts", "Scripts"), ("stages", "Stages")],
+                         mode, pick))
+    card.add(W.hint("Drag a box to move it, ▾ folds it. Fold all and Reset layout are in the corner of the drawing. "
+                    "Click a controller's row to trace its way through the scripts."))
     col.addWidget(card)
+
+
+# ── the trace ──────────────────────────────────────────────────────────────────────────────────
+
+def trace_panel(ctx, key: str, col: QVBoxLayout):
+    pt = next((x for x in patches(ctx) if x.key == key), None)
+    if pt is None:                       # the mapping changed: back to the device
+        device_panel(ctx, key.split("|")[0], col)
+        return
+    c = patch_color(pt)
+    col.addWidget(W.title("Signal path"))
+    dev = DEV_TITLE.get(pt.device, pt.device)
+    col.addWidget(W.hint(f"{dev} · {pt.label} → {token(pt.func)}. Lit up in the drawing; the rest steps back. "
+                         "Click the row again or another one to follow something else."))
+    card = W.Card("Hop by hop", c)
+    for n, (where, text) in enumerate(trace_hops(ctx, pt), 1):
+        head = W.label(f"{n}  {where.upper()}", 10, HEAVY, "mono", c)
+        card.add(head)
+        card.add(W.label(text, 12, REGULAR, "ui", Theme.ink, wrap=True))
+    col.addWidget(card)
+    d = ctx.tabs["pi"][3] if "pi" in getattr(ctx, "tabs", {}) else None
+    btns = [W.small_button(f"All of the {dev}", lambda: ctx.select("pi_sel", "src_" + pt.device))]
+    if d is not None and d.view["level"] != "stages":
+        btns.append(W.small_button("Show the stages", lambda: d.set_level("stages")))
+    col.addWidget(W.hbox(*btns, stretch_end=True))
 
 
 # ── the SSP ────────────────────────────────────────────────────────────────────────────────────
@@ -1551,7 +2152,7 @@ def ssp_panel(ctx, col: QVBoxLayout):
         col.addWidget(card)
     if mods:
         col.addWidget(W.hint("Parameter numbers as the SSP counts them inside each module. The DualSense sends on "
-                             "channels 1–3 (Create / Options switch them)."))
+                             f"its instrument channel (ch {ctx.mapping.channel})."))
     card = W.Card("Connection")
 
     def seth(k, v):

@@ -13,7 +13,7 @@ from . import model as M
 from . import store
 
 DEFAULT_HOSTS = "ssp-eth ssp-wifi ssp ssp-studio"
-DS_CHANNELS = (1, 2, 3)          # the DualSense switches between channels 1–3 (Create / Options)
+DS_CHANNELS = (1, 2, 3)          # unused: the DualSense script sends on its instrument channel (mapping.channel)
 
 
 class SSPState:
@@ -167,9 +167,8 @@ def senders(ctx) -> Dict[tuple, List[Tuple[str, str]]]:
             lst.append((dev, lab))
 
     for i in M.ALL_INPUTS:
-        if i.kind == "cc" and m.sends_midi(i):
-            for ch in DS_CHANNELS:
-                add((ch, "cc", m.number(i)), "dualsense", f"{short_name(i)} (ch {ch})")
+        if i.kind == "cc" and m.sends_midi(i):           # on the script's instrument channel
+            add((m.channel, "cc", m.number(i)), "dualsense", short_name(i))
     for k, f in enumerate(ctx.bank.faders):
         add((f["usb_channel"], "cc", f["usb_cc"]), "16n", f"Fader {k + 1}")
     from .devices import pedal_name
