@@ -31,7 +31,7 @@ MODULES = [
      [("motion", "MOTION"), ("strum", "STRUM"), ("freeze_l", "FREEZE L"), ("freeze_r", "FREEZE R")]),
 ]
 MOD_NAME = {"slice": "Slice-Selekteur", "loop": "Loop-Rekordeur", "lfo": "LFO", "extras": "DualSense-Extras",
-            "ssp": "Percussa SSP"}
+            "ssp": "Percussa SSP", "er": "ER-301"}
 PORT_OF = {
     "slice_fine": ("slice", "slice"), "slice_section": ("slice", "section"), "section_up": ("slice", "section"),
     "section_down": ("slice", "section"), "slice_block": ("slice", "block"), "block_up": ("slice", "block"),
@@ -85,9 +85,19 @@ def module_color(mod: str) -> QColor:
     return Theme.c(next(c for k, _t, _s, c, _p in MODULES if k == mod))
 
 
+def patch_color(pt) -> QColor:
+    """Colour of a patch's cable and tag: its module's, or CV / TR for a direct ER-301 route."""
+    j = pt.jack
+    if j and j[0] == "er":
+        return Theme.trig if j[1].startswith("TR") else Theme.cv
+    return module_color(j[0])
+
+
 def token(f: str) -> str:
     if f.startswith("ssp:"):
         return f[4:]
+    if f.startswith("er:"):
+        return f[3:]
     return LFO_TOKEN.get(f) or M.AXIS_TOKEN.get(f) or M.ACTION_TOKEN.get(f, f.upper())
 
 
@@ -184,7 +194,37 @@ def patches(ctx) -> List[Patch]:
     for f, src in (("er_lfo_rate", m.lfo_rate_src), ("er_lfo_reset", m.lfo_reset_src)):
         if src:
             out.append(Patch(src[0], source_label(ctx, src[0], src[1], "cc", src[2]), f, ("midi", src[0], src[1], "cc", src[2])))
-    return out + ssp_patches(ctx)
+    return out + er_patches(ctx) + ssp_patches(ctx)
+
+
+ER_DEVICE = {"DualSense": "dualsense", "16n": "16n", "MPC-20": "pedal", "EC4": "ec4"}
+ER_PI_FUNCS = ("nrpn_grain_slice",)        # ER-301 ports fed by a Pi function (drawn as that function)
+
+
+def er_routes(ctx):
+    """Every routed ER-301 port with what feeds it: [(PortUse, [Source])] (ER-301 tab's view)."""
+    from . import er301 as ER
+    out = []
+    for use in ctx.mapping.port_map():
+        srcs = []
+        for ref in use.refs:
+            if ref[0] == "dualsense" and ref[2] in ER_PI_FUNCS:
+                srcs.append(ER.Source("Pi", "grain slice (Slice-Selekteur)"))
+                continue
+            srcs += ER.describe(ctx, ref)
+        out.append((use, srcs))
+    return out
+
+
+def er_patches(ctx) -> List[Patch]:
+    """Controllers routed straight to an ER-301 port (MIDI → hub → XIAO-TT → i2c2midi → I2C → ER-301)."""
+    out = []
+    for use, srcs in er_routes(ctx):
+        for src in srcs:
+            dev = ER_DEVICE.get(src.device)
+            if dev and src.goto is not None:
+                out.append(Patch(dev, src.detail, "er:" + use.id, ("er", use.id), jack=("er", use.id)))
+    return out
 
 
 def ssp_patches(ctx) -> List[Patch]:
@@ -240,8 +280,8 @@ def module_output(ctx, key: str) -> Tuple[str, bool, QColor]:
 # the i2c2midi (Teletype expander, with its LFO) · the ER-301 and the Teletype on its I2C bus · the SSP.
 # MIDI for the i2c2midi and the SSP leaves the Pi through the hub (XIAO-TT / XIAO-SSP).
 
-R_W = 420.0
-ER_W, TT_W = 250.0, 152.0
+R_W = 460.0
+ER_W, TT_W = 300.0, 142.0
 ENV_HEAD = 34.0
 HUB_W, HUB_WX = 214.0, 262.0
 RT_W = 196.0
@@ -251,7 +291,8 @@ GROUPS = ("src", "pi", "i2c", "er", "tt", "ssp")
 GROUP_NAME = {"src": "the controllers", "pi": "the Raspberry Pi", "i2c": "the i2c2midi", "er": "the ER-301",
               "tt": "the Teletype", "ssp": "the SSP"}
 PI_MODS = ("slice", "loop", "extras")
-ENV_OF = {"slice": "pi", "loop": "pi", "extras": "pi", "lfo": "i2c", "ssp": "ssp"}
+ENV_OF = {"slice": "pi", "loop": "pi", "extras": "pi", "lfo": "i2c", "er": "i2c", "ssp": "ssp"}
+ER_ROWS = 12           # ER-301 ports listed in its box before "+ N more"
 DEV_HUB = {"dualsense": "script", "16n": "16n", "pedal": "pedal", "ec4": "ec4"}
 HUB_IN = [("script", "DUALSENSE SCRIPT"), ("16n", "16N"), ("pedal", "PEDALS"), ("ec4", "EC4")]
 HUB_IN_X = HUB_IN + [("nerdseq", "NERDSEQ")]
@@ -451,18 +492,29 @@ class PiDrawing(Drawing):
         return 44 + (self._row_h() + 2) * max(1, len(ports)) + 8
 
     def _er_rows(self) -> List[Tuple[str, str, QColor, bool]]:
-        """ER-301 ports reached through the i2c2midi: (port, what, colour, from the LFO?)."""
-        m = self.ctx.mapping
+        """ER-301 ports reached through the i2c2midi: (port, from what, colour, from the LFO?)."""
+        from . import er301 as ER
         rows = []
-        text, on, col = module_output(self.ctx, "slice")
-        if on:
-            rows.append((text, "grain slice (Pi)", col, False))
-        text, on, col = module_output(self.ctx, "lfo")
-        if on:
-            rows.append((text, "LFO pulses (i2c2midi)", col, True))
-        n = len(m.port_map()) - len(rows)
-        rows.append((f"+ {n}" if n > 0 else "—", "more ports routed (ER-301 tab)" if n > 0 else "no other routes", Theme.dim, False))
-        return rows
+        for use, srcs in er_routes(self.ctx):
+            port = f"SC.{use.kind} {use.port}"
+            if not srcs:
+                rows.append((port, "—", Theme.dim, False))
+                continue
+            first = srcs[0]
+            if first.device == "i2c2midi":
+                what = "LFO pulses (i2c2midi)" if "LFO" in first.detail else "pitch V/Oct (i2c2midi)"
+                col = module_color("lfo") if "LFO" in first.detail else Theme.cv
+            elif first.device == "Pi":
+                what, col = first.detail, module_color("slice")
+            else:
+                dev = {"MPC-20": "pedal", "MIDI": "MIDI"}.get(first.device, first.device)
+                what, col = f"{dev} · {first.detail}", ER.device_color(first.device)
+            if len(srcs) > 1:
+                what += f"  +{len(srcs) - 1}"
+            rows.append((port, what, col, "LFO" in what))
+        if len(rows) > ER_ROWS:
+            rows = rows[:ER_ROWS - 1] + [(f"+ {len(rows) - ER_ROWS + 1}", "more ports (ER-301 tab)", Theme.dim, False)]
+        return rows or [("—", "no ports routed", Theme.dim, False)]
 
     @property
     def base(self):
@@ -519,7 +571,7 @@ class PiDrawing(Drawing):
         size["pi"] = (pw, ph)
         er_rows = self._er_rows()
         S["er_rows"] = er_rows
-        size["i2c"] = (R_W, ENV_HEAD + 8) if self.folded("i2c") else (R_W, ENV_HEAD + mod_h("lfo") + 18)
+        size["i2c"] = (R_W, ENV_HEAD + 8) if self.folded("i2c") else (R_W, ENV_HEAD + mod_h("lfo") + 12 + CARD_H + 18)
         size["er"] = (ER_W, 40.0) if self.folded("er") else (ER_W, 40 + rh * len(er_rows) + 10)
         size["tt"] = (TT_W, 40.0) if self.folded("tt") else (TT_W, 78.0)
         size["ssp"] = (R_W, ENV_HEAD + 8) if self.folded("ssp") else (R_W, ENV_HEAD + mod_h("ssp") + 18)
@@ -644,6 +696,9 @@ class PiDrawing(Drawing):
                 S["jacks"][("lfo", pk)] = c
             text, on, oc = module_output(ctx, "lfo")
             S["outs"]["lfo"] = (QPointF(r.right(), r.top() + 44 + rj / 2), on, oc)
+            er_r = QRectF(r.left(), r.bottom() + 12, MOD_W, CARD_H)
+            S["er_card"] = er_r
+            S["er_card_in"] = QPointF(er_r.left(), er_r.top() + CARD_H / 2)
         sr = g["ssp"]
         S["ssp_in"] = QPointF(sr.left(), sr.top() + ENV_HEAD / 2 + (6 if not self.folded("ssp") else 4))
         if not self.folded("ssp"):
@@ -742,8 +797,8 @@ class PiDrawing(Drawing):
             self.hits.add(path, lambda key=key: self.ctx.select("pi_sel", key), title.title())
             if fold:
                 if items:
-                    cols = {module_color(pt.jack[0]).name() for pt in items}
-                    col = module_color(items[0].jack[0]) if len(cols) == 1 else Theme.function
+                    cols = {patch_color(pt).name() for pt in items}
+                    col = patch_color(items[0]) if len(cols) == 1 else Theme.function
                     jc = QPointF(r.right(), r.center().y())
                     D.circle(p, jc, 11, col, _op(col, 0.9), 1.2)
                     D.circle(p, jc, 4, Theme.bg)
@@ -752,7 +807,7 @@ class PiDrawing(Drawing):
             if not items:
                 D.Text("— nothing patched", Theme.font(10, REGULAR, "mono"), Theme.dim).paint(p, r.left() + 14, ry + 3)
             for pt in items:
-                col = module_color(pt.jack[0])
+                col = patch_color(pt)
                 tok = D.Pill(D.Text(token(pt.func), Theme.font(10, BOLD, "mono"), col), 6, 2, _op(col, 0.14))
                 lab = D.Text(pt.label, Theme.font(10.5, SEMIBOLD), _op(Theme.ink, 0.9), max_w=SRC_W - 54 - tok.w, min_scale=0.8)
                 cy = ry + rh / 2
@@ -932,6 +987,13 @@ class PiDrawing(Drawing):
         used = S["used"]
         if "lfo_r" in S:
             self._module(p, S["mods"]["lfo"], S["lfo_r"], used, S)
+        if "er_card" in S:
+            n = len(self.ctx.mapping.port_map())
+            ext = sum(1 for pt in S["pts"] if pt.jack and pt.jack[0] == "er")
+            path = self._card(p, S["er_card"], "ER-301 ROUTES", f"MIDI → SC.CV / SC.TR · {n} port{'s' if n != 1 else ''}",
+                              Theme.cv, n > 0, False, f"{ext} from the controllers · kept in the i2c2midi")
+            _jack(p, S["er_card_in"], Theme.cv, ext > 0)
+            self.hits.add(path, lambda: self.ctx.set_mode("er301"), "The ER-301 routing (ER-301 tab)")
         if "ssp_r" in S:
             self._module(p, S["mods"]["ssp"], S["ssp_r"], used, S)
         rh = S["rh"]
@@ -986,7 +1048,7 @@ class PiDrawing(Drawing):
                 b, front = pi["hub_in"][DEV_HUB[pt.device]], False
             if b is not None:
                 hot = self.sel in ("src_" + pt.device, "mod_" + mod)
-                out.append((a, b, module_color(mod), hot, front))
+                out.append((a, b, patch_color(pt), hot, front))
         return out
 
     def _back_cables(self, p, S):
@@ -1071,6 +1133,20 @@ class PiDrawing(Drawing):
             end = pi["hub_in"]["script"]
             p.strokePath(_short(ao, end, 0.5), D.pen(_op(Theme.function, 0.75), 2.8))
             _jack(p, ao, Theme.function, True, 13)
+        # the i2c2midi's ER-301 routing: from where the USB MIDI arrives, out onto the I2C bus
+        if "er_card" in S:
+            a, end, er_r = S["i2c_in"], S["er_card_in"], S["er_card"]
+            on = any(pt.jack and pt.jack[0] == "er" for pt in S["pts"])
+            path = QPainterPath()
+            path.moveTo(a)
+            path.cubicTo(QPointF(a.x() + 6, a.y()), QPointF(end.x() - 14, end.y()), end)
+            p.strokePath(path, D.pen(_op(Theme.cv, 0.6 if on else 0.2), 1.6 if on else 1.1, None if on else [3, 3]))
+            bus = S["i2c_bus"]
+            x = min(max(bus.x(), er_r.left() + 20), er_r.right() - 20)
+            path = QPainterPath()
+            path.moveTo(QPointF(x, er_r.bottom()))
+            path.cubicTo(QPointF(x, er_r.bottom() + 8), QPointF(bus.x(), bus.y() - 8), bus)
+            p.strokePath(path, D.pen(_op(module_color("lfo"), 0.6), 2.0))
         # inside the i2c2midi and the SSP: from where the USB MIDI arrives to the inputs that listen
         for env, mod, fold in (("i2c_in", "lfo", "i2c"), ("ssp_in", "ssp", "ssp")):
             a = S[env]
@@ -1173,12 +1249,17 @@ def _patch_row(ctx, pt: Patch, show_func: bool) -> QWidget:
     lb = W.label(text, 12, REGULAR, "ui", Theme.ink, wrap=True)
     parts = [lb]
     if show_func:
-        parts.append(W.label(token(pt.func), 10, BOLD, "mono", module_color(pt.jack[0])))
+        parts.append(W.label(token(pt.func), 10, BOLD, "mono", patch_color(pt)))
     parts.append("stretch")
     if pt.ref[0] == "ssp":
         def go_ssp():
             ctx.select("pi_sel", "mod_ssp")
         parts.append(W.icon_button("→", go_ssp, "Show the SSP patch"))
+    elif pt.ref[0] == "er":
+        def go_er(pid=pt.ref[1]):
+            ctx.set_mode("er301")
+            ctx.select("er_port", pid, "Ports")
+        parts.append(W.icon_button("→", go_er, "Show this port in the ER-301 tab"))
     elif pt.ref[0] == "midi":
         _, d, c, k, n = pt.ref
 
