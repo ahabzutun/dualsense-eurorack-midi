@@ -6,11 +6,11 @@ Raspberry Pi OS) and **macOS**; Python + Qt (PySide6).
 | Tab | Device | How it talks to it |
 |---|---|---|
 | DualSense | PS5 controller on the SSH host | `er301_routes.py` + `controls.py` over SSH (`scripts/er301_routes_tool.py`) |
-| Routing | where the MIDI goes: the controllers, the Raspberry Pi (DualSense script + MIDI hub; *Scripts* shows how the two services work together), the i2c2midi with its LFO, the ER-301 and Teletype on I2C, the Percussa SSP's patch. Boxes can be dragged and folded | patched from the DualSense, 16n, pedals or EC4: `controls.py` (`MIDI_INPUTS`) + `er301_routes.py`; SSP: `scripts/ssp_tool.py` over ssh to the SSP (reads the MIDI learn / MIDI modules of its presets) |
-| 16n | 16n faderbank (fork with curves) | `scripts/fader16_tool.py`, over SSH or on a cable to this computer |
+| Routing | where the MIDI goes: the controllers, the Raspberry Pi (DualSense script + MIDI hub; *Scripts* shows how the two services work together, *Stages* opens up the DualSense script), the i2c2midi with its LFO and ER-301 routes, the ER-301 and Teletype on I2C, the Percussa SSP's patch. Click a controller's row to trace it hop by hop. Boxes can be dragged and folded | patched from the DualSense, 16n, pedals or EC4: `controls.py` (`MIDI_INPUTS`) + `er301_routes.py`; SSP: `scripts/ssp_tool.py` over ssh to the SSP (reads the MIDI learn / MIDI modules of its presets) |
+| 16n | 16n faderbank (fork with curves and output ranges) | `scripts/fader16_tool.py`, over SSH or on a cable to this computer |
 | Pedals | DOREMiDi MPC-20 | `scripts/mpc20_tool.py`, over SSH or on a cable |
 | EC4 | Faderfox EC4 | `scripts/ec4_tool.py`, over SSH or on a cable (transfers are started on the EC4) |
-| ER-301 | i2c2midi → ER-301 | port overview, MIDI routes, pitch & LFO |
+| ER-301 | i2c2midi → ER-301 | port overview (each source links to its control), MIDI routes, pitch & LFO |
 
 Also: notes per control (also written into `er301_routes.py` comments), saved configurations
 (`~/Documents/Kontrolleur/*.dsmconfig`), adjustable colours / fonts / text size, zoomable drawings
@@ -21,7 +21,7 @@ Also: notes per control (also written into `er301_routes.py` comments), saved co
 **Linux**
 
 ```sh
-git clone -b kontrolleur-and-device-tools https://github.com/ahabzutun/dualsense-eurorack-midi.git ~/dualsense-eurorack-midi
+git clone https://github.com/ahabzutun/dualsense-eurorack-midi.git ~/dualsense-eurorack-midi
 cd ~/dualsense-eurorack-midi/kontrolleur
 ./install-linux.sh           # venv with PySide6-Essentials, alsa-midi, pyusb; launcher + menu entry
 ./install-linux.sh --udev    # same, plus access to an MPC-20 plugged into this computer (sudo)
@@ -39,6 +39,8 @@ cd kontrolleur
 ```
 
 Or run it straight from the repository: `python3 kontrolleur.py` (with PySide6 or PySide6-Essentials installed).
+To update: `git pull` in the repository and restart the app. `packaging/build-mac-dmg.sh` builds a standalone
+`.dmg` (PyInstaller) for a Mac without the repository.
 
 ## Where things are kept
 
@@ -51,6 +53,8 @@ Or run it straight from the repository: `python3 kontrolleur.py` (with PySide6 o
 Configuration files are the same on both systems.
 
 ## Checking the UI without devices
+
+`KONTROLLEUR_DEBUG_WINDOWS=1` logs every window shown besides the main one to `windows.log` in the data folder.
 
 `KONTROLLEUR_OFFLINE=<folder with export.json, fader16.json, mpc20.json, ec4-last.json>` loads data from
 files instead of the devices; `KONTROLLEUR_SNAPSHOT=out.png` (+ `KONTROLLEUR_MODE`, `_TAB`, `_SIZE`, `_SCALE`,

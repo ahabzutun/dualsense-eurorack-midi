@@ -408,7 +408,7 @@ def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
     def tt_hop():
         if k in ("cc", "nrpn") and ch not in TT_STRAIGHT_CHANNELS:
             hops.append(("→ XIAO-TT", f"CC floods are thinned: only the latest value per CC goes out every {HUB_THIN_MS} ms "
-                                      "(keeps the 115 200-baud link clear)."))
+                                      "(keeps the XIAO serial link clear)."))
         else:
             why = f"ch {ch} is never thinned" if ch in TT_STRAIGHT_CHANNELS else "notes are never thinned"
             hops.append(("→ XIAO-TT", f"straight through ({why}) → USB host port of the i2c2midi."))
@@ -497,7 +497,7 @@ HUB_OUT_X = HUB_OUT + [("nerdseq", "NERDSEQ", "if plugged in")]
 HUB_STEPS = [
     ("pedal", "pedals ch 1 → DualSense channel", "reads /tmp/dualsense_channel"),
     ("16n", "16n → SSP: fader values rescaled", "the other outputs get them as sent"),
-    ("tt", "→ XIAO-TT: CC floods thinned out", "keeps the 115 200-baud link clear"),
+    ("tt", "→ XIAO-TT: CC floods thinned out", "latest value every 10 ms, ch 2 straight"),
     ("er", "ER-301 routes → i2c2midi setup", "config/er301_routes.py, re-read live"),
     ("osc", "OSC tap → OpenMW on the Mac", "UDP, adds no MIDI port"),
 ]
