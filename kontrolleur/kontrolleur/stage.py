@@ -10,7 +10,7 @@ import os
 from typing import Optional, Tuple
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QCursor, QPainter, QTransform
+from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolTip, QWidget, QFrame
 
 from . import draw
@@ -63,6 +63,7 @@ class Stage(QWidget):
         self._press_scale = 1.0
         self._xf = QTransform()
         self._stage_size = drawing.base
+        self._bd, self._bd_key = None, None     # cached backdrop (see _backdrop)
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_AcceptTouchEvents, True)
         self.setMinimumSize(320, 240)
@@ -93,9 +94,6 @@ class Stage(QWidget):
     # ── painting ──
     def paintEvent(self, ev):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setRenderHint(QPainter.TextAntialiasing, True)
-        p.fillRect(self.rect(), Theme.bg)
         item, sw, sh = self._sizes()
         self._stage_size = (sw, sh)
         fit = self._fit(sw, sh)
@@ -105,10 +103,12 @@ class Stage(QWidget):
         xf.scale(s, s)
         xf.translate(-sw / 2, -sh / 2)
         self._xf = xf
+        p.drawPixmap(0, 0, self._backdrop(xf, sw, sh))
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
         p.setTransform(xf)
         if self.drawing.clip:
             p.setClipRect(QRectF(0, 0, sw, sh))
-        draw.grid(p, sw, sh)
         self.drawing.hits.clear()
         if item is not None:
             iw, ih = item.size()
@@ -120,6 +120,26 @@ class Stage(QWidget):
         self._out.setEnabled(self.zoom > 1.001)
         self._in.setEnabled(self.zoom < MAX_ZOOM - 0.001)
         self._sync_actions()
+
+    def _backdrop(self, xf: QTransform, sw: float, sh: float) -> QPixmap:
+        """Background + blueprint grid, rendered once per size/zoom/pan and reused while boxes move
+        or the pointer hovers (antialiased grid lines were a third of every frame)."""
+        dpr = self.devicePixelRatioF()
+        key = (self.width(), self.height(), dpr, xf.m11(), xf.dx(), xf.dy(), sw, sh, bool(self.drawing.clip),
+               Theme.bg.rgba(), Theme.c("body").rgba())
+        if self._bd_key != key:
+            pm = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            q = QPainter(pm)
+            q.fillRect(QRectF(0, 0, self.width(), self.height()), Theme.bg)
+            q.setRenderHint(QPainter.Antialiasing, True)
+            q.setTransform(xf)
+            if self.drawing.clip:
+                q.setClipRect(QRectF(0, 0, sw, sh))
+            draw.grid(q, sw, sh)
+            q.end()
+            self._bd, self._bd_key = pm, key
+        return self._bd
 
     def to_drawing(self, pos: QPointF) -> QPointF:
         inv, ok = self._xf.inverted()

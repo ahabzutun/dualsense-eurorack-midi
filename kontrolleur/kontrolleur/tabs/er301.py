@@ -91,13 +91,17 @@ def describe(ctx, ref: tuple) -> List[Source]:
         for si, su in enumerate(ctx.ec4.setups):
             for gi, g in enumerate(su["groups"]):
                 for ei, e in enumerate(g["encoders"]):
+                    enc = not note and e["type"] == "cc" and e["channel"] == ch and e["number"] == cc
+                    pu = e["push"]
+                    push = pu["type"] == want and pu["channel"] == ch and pu["number"] == cc
+                    if not (enc or push):
+                        continue                      # names only for matches: 4096 encoders per lookup
                     where = f"{_ec4_name(su['name'], f'setup {si + 1}')} · {_ec4_name(g['name'], f'group {gi + 1}')} · " \
                             f"{_ec4_name(e['name'], f'enc {ei + 1}')}"
-                    if not note and e["type"] == "cc" and e["channel"] == ch and e["number"] == cc:
+                    if enc:
                         hits.append(Source("EC4", where, notes.note(NotesStore.ec4(si, gi, ei)),
                                            _open_ec4(ctx, si, gi, ei, False), "EC4 tab"))
-                    pu = e["push"]
-                    if pu["type"] == want and pu["channel"] == ch and pu["number"] == cc:
+                    if push:
                         hits.append(Source("EC4", where + " push", notes.note(NotesStore.ec4_push(si, gi, ei)),
                                            _open_ec4(ctx, si, gi, ei, True), "EC4 tab"))
         # every match on its own line, so stale mappings in other setups show up (and can be opened)

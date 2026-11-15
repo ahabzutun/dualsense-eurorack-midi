@@ -182,7 +182,7 @@ class Patch:
         return f"{self.device}|{self.label}|{self.func}"
 
 
-def patches(ctx) -> List[Patch]:
+def patches(ctx, routes=None) -> List[Patch]:
     from .dualsense import pill_keys, short_name
     m = ctx.mapping
     out = []
@@ -201,7 +201,7 @@ def patches(ctx) -> List[Patch]:
     for f, src in (("er_lfo_rate", m.lfo_rate_src), ("er_lfo_reset", m.lfo_reset_src)):
         if src:
             out.append(Patch(src[0], source_label(ctx, src[0], src[1], "cc", src[2]), f, ("midi", src[0], src[1], "cc", src[2])))
-    return out + er_patches(ctx) + ssp_patches(ctx)
+    return out + er_patches(ctx, routes) + ssp_patches(ctx)
 
 
 ER_DEVICE = {"DualSense": "dualsense", "16n": "16n", "MPC-20": "pedal", "EC4": "ec4"}
@@ -223,10 +223,10 @@ def er_routes(ctx):
     return out
 
 
-def er_patches(ctx) -> List[Patch]:
+def er_patches(ctx, routes=None) -> List[Patch]:
     """Controllers routed straight to an ER-301 port (MIDI → hub → XIAO-TT → i2c2midi → I2C → ER-301)."""
     out = []
-    for use, srcs in er_routes(ctx):
+    for use, srcs in (routes if routes is not None else er_routes(ctx)):
         for src in srcs:
             dev = ER_DEVICE.get(src.device)
             if dev and src.goto is not None:
@@ -448,7 +448,7 @@ def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
     return hops
 
 
-def module_output(ctx, key: str) -> Tuple[str, bool, QColor]:
+def module_output(ctx, key: str, pts=None) -> Tuple[str, bool, QColor]:
     """(text, on, colour) of where a module's result goes."""
     m = ctx.mapping
     if key == "slice":
@@ -462,7 +462,7 @@ def module_output(ctx, key: str) -> Tuple[str, bool, QColor]:
     if key == "loop":
         return f"MIDI ch {m.channel}", True, Theme.function
     if key == "extras":
-        on = any(pt.jack in (("extras", "motion"), ("extras", "strum")) for pt in patches(ctx))
+        on = any(pt.jack in (("extras", "motion"), ("extras", "strum")) for pt in (pts if pts is not None else patches(ctx)))
         return "motion · strum", on, Theme.function
     return "", False, Theme.dim
 
@@ -638,6 +638,8 @@ class PiDrawing(Drawing):
         self.ctx = ctx
         self.view = self._load()
         self._S = None
+        self._cache = None
+        self._scene_memo = None
         self._frozen = None            # (base, shift) while a group is dragged
 
     # ── the view: positions, folds, scripts ──
@@ -742,11 +744,11 @@ class PiDrawing(Drawing):
     def _mod_h(self, ports) -> float:
         return 44 + (self._row_h() + 2) * max(1, len(ports)) + 8
 
-    def _er_rows(self) -> List[Tuple[str, str, QColor, bool]]:
+    def _er_rows(self, routes=None) -> List[Tuple[str, str, QColor, bool]]:
         """ER-301 ports reached through the i2c2midi: (port, from what, colour, from the LFO?)."""
         from . import er301 as ER
         rows = []
-        for use, srcs in er_routes(self.ctx):
+        for use, srcs in (routes if routes is not None else er_routes(self.ctx)):
             port = f"SC.{use.kind} {use.port}"
             if not srcs:
                 rows.append((port, "—", Theme.dim, False))
@@ -767,6 +769,26 @@ class PiDrawing(Drawing):
             rows = rows[:ER_ROWS - 1] + [(f"+ {len(rows) - ER_ROWS + 1}", "more ports (ER-301 tab)", Theme.dim, False)]
         return rows or [("—", "no ports routed", Theme.dim, False)]
 
+    DATA_MAX_AGE = 2.0          # seconds: recompute at least this often, even without a change signal
+
+    def _data(self) -> dict:
+        """The model data the drawing needs, computed once per change (not once per frame):
+        moving boxes, zooming and hovering reuse it."""
+        import time as _t
+        gen = getattr(self.ctx, "data_gen", 0)
+        now = _t.monotonic()
+        c = self._cache
+        if c is not None and c["gen"] == gen and (now - c["t"] < self.DATA_MAX_AGE or self._frozen is not None):
+            return c
+        ctx = self.ctx
+        routes = er_routes(ctx)
+        pts = patches(ctx, routes)
+        mods = {m[0]: m for m in modules(ctx)}
+        mo = {k: module_output(ctx, k, pts) for k in ("slice", "loop", "extras", "lfo")}
+        self._cache = {"gen": gen, "t": now, "routes": routes, "pts": pts, "mods": mods, "mo": mo,
+                       "er_rows": self._er_rows(routes), "ports": len(routes)}
+        return self._cache
+
     @property
     def base(self):
         if self._frozen is not None:
@@ -775,13 +797,25 @@ class PiDrawing(Drawing):
 
     # ── geometry: every box and jack, before anything is painted ──
     def _scene(self) -> dict:
+        """The scene for the current data, view and selection; the stage asks for it twice per frame
+        (size, then paint), and hovering repaints without changing any of it."""
+        data = self._data()
+        key = (id(data), data["t"], json.dumps(self.view, sort_keys=True, default=sorted), self.sel, self._row_h(), self._frozen)
+        if self._scene_memo is not None and self._scene_memo[0] == key:
+            return self._scene_memo[1]
+        S = self._build_scene()
+        self._scene_memo = (key, S)
+        return S
+
+    def _build_scene(self) -> dict:
         ctx, view = self.ctx, self.view
         rh = self._row_h()
         rj = rh + 2
         head = 44 * Theme.grow ** 0.5
         step_h = rh * 1.6
-        mods = {m[0]: m for m in modules(ctx)}
-        pts = patches(ctx)
+        data = self._data()
+        mods = data["mods"]
+        pts = data["pts"]
         by_dev = {}
         for pt in pts:
             by_dev.setdefault(pt.device, []).append(pt)
@@ -832,8 +866,10 @@ class PiDrawing(Drawing):
             pw = 14 + aw + 60 + hw + 16
             ph = ENV_HEAD + 6 + max(ah + 2 * LANE_H, hub_h) + 14
         size["pi"] = (pw, ph)
-        er_rows = self._er_rows()
+        er_rows = data["er_rows"]
         S["er_rows"] = er_rows
+        S["mo"] = data["mo"]
+        S["ports"] = data["ports"]
         size["i2c"] = (R_W, ENV_HEAD + 8) if self.folded("i2c") else (R_W, ENV_HEAD + mod_h("lfo") + 12 + CARD_H + 18)
         size["er"] = (ER_W, 40.0) if self.folded("er") else (ER_W, 40 + rh * len(er_rows) + 10)
         size["tt"] = (TT_W, 40.0) if self.folded("tt") else (TT_W, 78.0)
@@ -944,7 +980,7 @@ class PiDrawing(Drawing):
                 mrects[k] = r
                 for pk, c in _mod_jacks(r, mods[k][4], rj).items():
                     S["jacks"][(k, pk)] = c
-                text, on, oc = module_output(ctx, k)
+                text, on, oc = data["mo"][k]
                 if text:
                     S["outs"][k] = (QPointF(r.right(), r.top() + 44 + rj / 2), on, oc)
                 yy += r.height() + 18
@@ -992,7 +1028,7 @@ class PiDrawing(Drawing):
             S["lfo_r"] = r
             for pk, c in _mod_jacks(r, mods["lfo"][4], rj).items():
                 S["jacks"][("lfo", pk)] = c
-            text, on, oc = module_output(ctx, "lfo")
+            text, on, oc = data["mo"]["lfo"]
             S["outs"]["lfo"] = (QPointF(r.right(), r.top() + 44 + rj / 2), on, oc)
             er_r = QRectF(r.left(), r.bottom() + 12, MOD_W, CARD_H)
             S["er_card"] = er_r
@@ -1198,7 +1234,7 @@ class PiDrawing(Drawing):
         if out:
             jc, on, oc = out
             _jack(p, jc, oc, on)
-            text = module_output(self.ctx, key)[0]
+            text = S["mo"][key][0]
             lt = D.Text(text.upper() if key == "extras" else "OUT", Theme.font(9 if key == "extras" else 10, HEAVY, "mono"),
                         Theme.dim, max_w=r.width() / 2, min_scale=0.7)
             lt.paint(p, r.right() - 22 - lt.w, jc.y() - lt.h / 2)
@@ -1330,7 +1366,7 @@ class PiDrawing(Drawing):
         if "lfo_r" in S:
             self._module(p, S["mods"]["lfo"], S["lfo_r"], used, S)
         if "er_card" in S:
-            n = len(self.ctx.mapping.port_map())
+            n = S["ports"]
             ext = sum(1 for pt in S["pts"] if pt.jack and pt.jack[0] == "er")
             path = self._card(p, S["er_card"], "ER-301 ROUTES", f"MIDI → SC.CV / SC.TR · {n} port{'s' if n != 1 else ''}",
                               Theme.cv, n > 0, False, f"{ext} from the controllers · kept in the i2c2midi")
@@ -1348,7 +1384,7 @@ class PiDrawing(Drawing):
         t.paint(p, er.left() + 14, er.top() + 9)
         rows = S["er_rows"]
         if self.folded("er"):
-            n = len(self.ctx.mapping.port_map())
+            n = S["ports"]
             D.Text(f"{n} port{'s' if n != 1 else ''} from the i2c2midi", Theme.font(9, SEMIBOLD, "mono"), Theme.dim,
                    max_w=er.width() - t.w - 64, min_scale=0.7).paint(p, er.left() + 24 + t.w, er.top() + 12)
         else:
@@ -1358,7 +1394,7 @@ class PiDrawing(Drawing):
             if T is not None and T.jack and T.jack[0] == "er" and T.extra.get("use"):
                 tport = f"SC.{T.extra['use'].kind} {T.extra['use'].port}"
             elif T is not None and T.jack and T.jack[0] == "lfo":
-                tport = module_output(self.ctx, "lfo")[0]
+                tport = S["mo"]["lfo"][0]
             for port, what, c, _from_lfo in rows:
                 if port == tport:
                     hl = QPainterPath()

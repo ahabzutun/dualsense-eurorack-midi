@@ -151,6 +151,7 @@ class Main(QMainWindow):
 
     # ── called by the tabs ──
     def changed(self, rebuild: bool = False):
+        self.data_gen = getattr(self, "data_gen", 0) + 1       # drawings that cache model data recompute
         self.stage.update()
         if rebuild:
             self.inspector.rebuild()
@@ -158,6 +159,7 @@ class Main(QMainWindow):
 
     def set_note(self, key: str, text: str):
         self.notes.set(key, text)
+        self.data_gen = getattr(self, "data_gen", 0) + 1
         self.stage.update()
 
     def select_ds(self, g: str):
@@ -171,6 +173,7 @@ class Main(QMainWindow):
 
     def select(self, attr: str, value, tab: Optional[str] = None):
         setattr(self, attr, value)
+        self.data_gen = getattr(self, "data_gen", 0) + 1
         if attr == "er_port" and value:
             self.er_view = value[:2]       # a TR port picked in the list: show the SC.TR matrix
         if tab and self.inspector.tab != tab and tab in self.inspector.tabs:
@@ -308,6 +311,7 @@ class Main(QMainWindow):
         if mode == self.mode:
             return
         self.mode = mode
+        self.data_gen = getattr(self, "data_gen", 0) + 1     # edits made in other tabs show up in Routing
         if not self.offline:
             self.s.setValue("deviceMode", mode)
         self.mode_seg.set_current(mode)
@@ -748,6 +752,7 @@ class Main(QMainWindow):
             self.upload_routing()
 
     def refresh_all(self):
+        self.data_gen = getattr(self, "data_gen", 0) + 1
         for page, stage, insp, drawing in self.tabs.values():
             stage.update()
         self.inspector.rebuild()
