@@ -7,7 +7,8 @@ from typing import Dict, List, Optional
 
 # ── 16n ─────────────────────────────────────────────────────────────────────────────────────────
 
-FADER_DEFAULT = dict(usb_channel=16, usb_cc=80, usb_14bit=False, trs_channel=1, trs_cc=32, trs_14bit=False, curve=64)
+FADER_DEFAULT = dict(usb_channel=16, usb_cc=80, usb_14bit=False, trs_channel=1, trs_cc=32, trs_14bit=False, curve=64,
+                     range_min=0, range_max=127)
 OPTIONS_DEFAULT = dict(led_on=True, led_flash=True, rotate=False, i2c_leader=False, midi_thru=False,
                        fader_min=15, fader_max=8135)
 
@@ -29,6 +30,21 @@ def curve_name(v: int) -> str:
 
 
 CURVE_PRESETS = [("Log+", 32), ("Log", 48), ("Lin", 64), ("Exp", 80), ("Exp+", 96)]
+RANGE_PRESETS = [("Full", 0, 127), ("Upper half", 64, 127), ("Lower half", 0, 63), ("Reverse", 127, 0)]
+
+
+def fader_out(x: float, f: dict) -> float:
+    """What a fader sends at travel x (0–1), as 0–1 of the full MIDI range: curve, then range (as the 16n fork)."""
+    lo, hi = f.get("range_min", 0) / 127, f.get("range_max", 127) / 127
+    return lo + (hi - lo) * curve_apply(x, f.get("curve", 64))
+
+
+def full_range(f: dict) -> bool:
+    return f.get("range_min", 0) == 0 and f.get("range_max", 127) == 127
+
+
+def range_text(f: dict) -> str:
+    return f"{f.get('range_min', 0)}–{f.get('range_max', 127)}"
 
 
 def _json(obj) -> str:
@@ -43,6 +59,7 @@ class Faderbank:
         self.device = ""
         self.firmware = ""
         self.curves_supported = False
+        self.ranges_supported = False
         self.hires_supported = False
         self.port = ""
 
@@ -55,9 +72,19 @@ class Faderbank:
         self.device = d.get("device") or ""
         self.firmware = d.get("firmware") or ""
         self.curves_supported = bool(d.get("curves_supported"))
+        self.ranges_supported = bool(d.get("ranges_supported"))
         self.hires_supported = bool(d.get("hires_supported"))
         self.port = d.get("port") or ""
         self.loaded = True
+
+    def set_faders(self, faders: List[dict]):
+        """Faders from a saved config (older ones have no range yet)."""
+        self.faders = [dict(FADER_DEFAULT, **x) for x in faders]
+
+    @property
+    def firmware_text(self) -> str:
+        extra = " + curves + ranges" if self.ranges_supported else (" + curves" if self.curves_supported else "")
+        return f"firmware {self.firmware}{extra}"
 
     @property
     def json(self) -> str:

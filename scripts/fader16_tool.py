@@ -7,7 +7,9 @@ Used by the DualSense Mapper app; runs on the Mac (16n plugged in there) or on t
     fader16_tool.py install    <- JSON on stdin (same shape); writes, reads back, verifies
 
 Faders: usb/trs channel (1-16) and CC, usb/trs 14-bit flag, curve (0-127, 64 = linear;
-curves need the curve firmware fork, otherwise "curves_supported" is false and they are skipped).
+curves need the curve firmware fork, otherwise "curves_supported" is false and they are skipped),
+range_min / range_max (0-127 each, output range on the 7-bit scale, min > max reverses; needs the
+fork with ranges, which also stores curves in steps of 2, otherwise "ranges_supported" is false).
 Writes are split into the 16n's partial messages (0D / 0C / 0B / 0A): a Teensy LC only
 receives SysEx up to 60 bytes, so the full-config message would be cut off.
 """
@@ -16,6 +18,7 @@ import sys
 import time
 
 HDR = [0xF0, 0x7D, 0x00, 0x00]
+FADER_RANGE_DEFAULT = {"range_min": 0, "range_max": 127}
 
 
 def _rtmidi():
@@ -75,6 +78,8 @@ def read_state(o, got):
         cfg += [0] * 6
     cur = _ask(o, got, HDR + [0x2F, 0xF7], 0x09, wait=0.8)
     curves = list(cur[5:-1]) if cur else [64] * 16
+    rng = _ask(o, got, HDR + [0x2E, 0xF7], 0x08, wait=0.8) if cur else None
+    ranges = list(rng[5:-1]) if rng and len(rng) >= 5 + 32 + 1 else None
     usb_hi, trs_hi = _flags(cfg[80:83]), _flags(cfg[83:86])
     faders = []
     for k in range(16):
@@ -82,6 +87,8 @@ def read_state(o, got):
             "usb_channel": cfg[16 + k], "usb_cc": cfg[48 + k], "usb_14bit": bool((usb_hi >> k) & 1),
             "trs_channel": cfg[32 + k], "trs_cc": cfg[64 + k], "trs_14bit": bool((trs_hi >> k) & 1),
             "curve": curves[k] if k < len(curves) else 64,
+            "range_min": ranges[k] if ranges else 0,
+            "range_max": ranges[16 + k] if ranges else 127,
         })
     return {
         "ok": True,
@@ -89,6 +96,7 @@ def read_state(o, got):
         "firmware": ".".join(str(x) for x in info[6:9]),
         "hires_supported": hires,
         "curves_supported": cur is not None,
+        "ranges_supported": ranges is not None,
         "options": {
             "led_on": bool(cfg[0]), "led_flash": bool(cfg[1]), "rotate": bool(cfg[2]),
             "i2c_leader": bool(cfg[3]), "midi_thru": bool(cfg[8]),
@@ -114,6 +122,8 @@ def install(want, o, got):
         for key in ("usb_cc", "trs_cc"):
             _check(0 <= int(f[key]) <= 127, f"fader {k + 1}: {key} must be 0-127")
         _check(0 <= int(f.get("curve", 64)) <= 127, f"fader {k + 1}: curve must be 0-127")
+        for key in ("range_min", "range_max"):
+            _check(0 <= int(f.get(key, 0)) <= 127, f"fader {k + 1}: {key} must be 0-127")
         if f.get("usb_14bit"):
             _check(int(f["usb_cc"]) < 96, f"fader {k + 1}: 14-bit needs a CC below 96 (LSB = CC + 32)")
         if f.get("trs_14bit"):
@@ -140,8 +150,17 @@ def install(want, o, got):
                  HDR + [0x0B] + trs + _flag_bytes(trs_mask) + [0xF7]]
     else:
         msgs += [HDR + [0x0C] + usb + [0xF7], HDR + [0x0B] + trs + [0xF7]]
+    ranges = before["ranges_supported"]
+
+    def curve(f):           # the fork with ranges keeps curves in steps of 2
+        v = int(f.get("curve", 64))
+        return v & 0x7E if ranges else v
+
     if before["curves_supported"]:
-        msgs.append(HDR + [0x0A] + [int(f.get("curve", 64)) for f in faders] + [0xF7])
+        msgs.append(HDR + [0x0A] + [curve(f) for f in faders] + [0xF7])
+    if ranges:
+        msgs.append(HDR + [0x07] + [int(f.get("range_min", 0)) for f in faders]
+                    + [int(f.get("range_max", 127)) for f in faders] + [0xF7])
     for m in msgs:
         assert len(m) <= 60
         o.send_message(m)
@@ -153,11 +172,23 @@ def install(want, o, got):
         keys += ["usb_14bit", "trs_14bit"]
     if before["curves_supported"]:
         keys += ["curve"]
-    mismatch = [f"fader {k + 1} {key}" for k in range(16) for key in keys
-                if after["faders"][k][key] != (bool(faders[k].get(key)) if key.endswith("14bit") else int(faders[k][key]))]
+    if ranges:
+        keys += ["range_min", "range_max"]
+
+    def want_value(k, key):
+        if key.endswith("14bit"):
+            return bool(faders[k].get(key))
+        if key == "curve":
+            return curve(faders[k])
+        return int(faders[k].get(key, FADER_RANGE_DEFAULT.get(key, 0)))
+
+    mismatch = [f"fader {k + 1} {key}" for k in range(16) for key in keys if after["faders"][k][key] != want_value(k, key)]
     after.pop("_raw_flags", None)
     return {"ok": not mismatch, "verified": not mismatch, "mismatch": mismatch[:8], "state": after,
-            "skipped": [s for s, sup in (("14-bit", before["hires_supported"]), ("curves", before["curves_supported"])) if not sup]}
+            "skipped": [s for s, sup in (("14-bit", before["hires_supported"]), ("curves", before["curves_supported"]),
+                                         ("ranges", ranges)) if not sup
+                        and (s != "ranges" or any(not (int(f.get("range_min", 0)) == 0 and int(f.get("range_max", 127)) == 127)
+                                                  for f in faders))]}
 
 
 def main():

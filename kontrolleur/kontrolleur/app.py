@@ -543,8 +543,9 @@ class Main(QMainWindow):
             else:
                 self.bank.apply(d)
                 self.synced_bank = self.bank.json
-                fw = f"{self.bank.device}, firmware {self.bank.firmware}{' + curves' if self.bank.curves_supported else ' (no curves)'}"
-                self.set_status("ok" if self.bank.curves_supported else "warn", f"Loaded the 16n ({fw}) via {via}.")
+                fw = f"{self.bank.device}, {self.bank.firmware_text}" + ("" if self.bank.curves_supported else " (no curves)")
+                note = "" if self.bank.ranges_supported else " Its firmware has no fader ranges yet (flash the 16n fork)."
+                self.set_status("ok" if self.bank.ranges_supported else "warn", f"Loaded the 16n ({fw}) via {via}.{note}")
                 self.refresh_all()
             if then:
                 then()
@@ -824,7 +825,8 @@ class Main(QMainWindow):
             self.mapping.restore(c["mapping"])
             done.append("DualSense")
         if "faderbank" in parts and c.get("faderbank") and len(c["faderbank"]["faders"]) == 16:
-            self.bank.faders, self.bank.options = c["faderbank"]["faders"], c["faderbank"]["options"]
+            self.bank.set_faders(c["faderbank"]["faders"])
+            self.bank.options = c["faderbank"]["options"]
             self.bank.loaded = True
             done.append("16n")
         if "pedals" in parts and c.get("pedals") and len(c["pedals"]) >= 4:
