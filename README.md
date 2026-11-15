@@ -1,22 +1,24 @@
 # DualSense → Eurorack MIDI
 
-A Raspberry Pi 4 sits in the middle of a eurorack rig and turns a PS5 DualSense into an instrument, adds a
-few performance functions (grain-slice selection, a loop recorder, freeze, motion control, strum) and routes
-the MIDI of every controller (DualSense, 16n faderbank, DOREMiDi MPC-20 pedals, Faderfox EC4) to the
-**i2c2midi → ER-301** and the **Percussa SSP**. **Kontrolleur**, a desktop app for macOS and Linux, configures
-all of it from one place and shows where every signal goes.
+A Raspberry Pi 4 sits in the middle of a eurorack rig and turns a PS5 DualSense (on a USB cable) into an
+instrument, adds a few performance functions (grain-slice selection, a loop recorder, freeze, motion control,
+strum) and acts as a MIDI hub for the other controllers (16n faderbank, Faderfox EC4, DOREMiDi MPC-20 pedals).
+The MIDI goes to USB-host modules through small XIAO bridges — so far an **i2c2midi** (→ ER-301 and Teletype), a
+**Percussa SSP** and a **NerdSEQ**; none of them is required. **Kontrolleur**, a desktop app for macOS and Linux,
+configures all of it from one place and shows where every signal goes.
 
 ```
                          ┌──────────────── Raspberry Pi 4 ("ahab") ────────────────┐
- DualSense ─ BT / USB ──▶│ dualsense_midi.py ──▶ port DualSense_Controller ──┐     │
+ DualSense ─ USB cable ─▶│ dualsense_midi.py ──▶ port DualSense_Controller ──┐     │
  16n ──────── USB ───────┤        ▲ (own ports for the Pi functions)          ▼     │
  MPC-20 ─── USB (CH345) ─┤────────┴──────────────────────────────▶ midi_passthrough.py (MIDI hub)
- EC4 ──────── USB ───────┘                                            │       │        │
+ EC4 ──────── USB ───────┘   (each controller optional)               │       │        │
                                                                       │       │        └─▶ NerdSEQ (optional)
                          XIAO-TT ⇄ XIAO ─▶ i2c2midi ─ I2C ─▶ ER-301 ◀─┘       │
                                               ▲   (Teletype leads the bus)     │
                                               └─ Teletype I2M ch 17–32 ─▶ back into the hub
                          XIAO-SSP ⇄ XIAO ─▶ Percussa SSP ◀──────────────────────┘
+                         (each target optional; XIAO pairs = modified usb-midi-host2host)
 
  Kontrolleur (Mac / Fedora) ── SSH ──▶ Pi: controls.py, er301_routes.py, device tools
                             ── SSH ──▶ SSP: reads the MIDI mappings of its patches
@@ -24,6 +26,7 @@ all of it from one place and shows where every signal goes.
 
 ## Contents
 
+1. [What you need](#what-you-need)
 1. [What runs where](#what-runs-where)
 2. [The repository](#the-repository)
 3. [The DualSense script](#the-dualsense-script)
@@ -38,13 +41,29 @@ all of it from one place and shows where every signal goes.
 12. [Things worth knowing](#things-worth-knowing)
 13. [History](#history)
 
+## What you need
+
+| | Needed? | Notes |
+|---|---|---|
+| Raspberry Pi 4 | yes | Raspberry Pi OS Lite 64-bit (Debian 13 "trixie" runs here) |
+| PS5 DualSense + USB data cable | yes | plugged into the Pi; no Bluetooth pairing |
+| A computer for Kontrolleur | recommended | macOS or Linux; everything can also be edited by hand |
+| Powered USB hub | with several devices | the Pi's ports don't power many devices at once |
+| A pair of Seeed XIAO SAMD21 per USB-host target | per target | the i2c2midi and the SSP are USB *hosts* like the Pi, so each link is two XIAOs joined by UART ([firmware](#firmware)) |
+| i2c2midi MK2 with *ER-301 direct* + ER-301 | optional | for the ER-301 routing and the trigger LFO; a Teletype on the same bus is optional too |
+| Percussa SSP | optional | gets the hub's MIDI through its own XIAO pair |
+| NerdSEQ | optional | gets the hub's MIDI when plugged into the Pi |
+| 16n · Faderfox EC4 · MPC-20 pedals (via DOREMiDi) | optional | extra controllers; any can drive the Pi functions or the targets |
+
+No power/data splitter is needed: that was for the old USB-gadget setup (see [History](#history)).
+
 ## What runs where
 
 | Where | What | Started by |
 |---|---|---|
 | Raspberry Pi | `src/dualsense_midi.py` — reads the DualSense, runs the Pi functions, sends MIDI on its own port `DualSense_Controller` | `dualsense-midi.service` |
 | Raspberry Pi | `src/midi_passthrough.py` — the MIDI hub between every USB MIDI device | `midi-passthrough.service` |
-| XIAO SAMD21 pairs | `firmware/xiao-midi-bridge` — USB host ⇄ USB host bridges Pi ⇄ i2c2midi (`XIAO-TT`) and Pi ⇄ SSP (`XIAO-SSP`) | power from the hosts |
+| XIAO SAMD21 pairs | `firmware/xiao-midi-bridge`, a modified [usb-midi-host2host](https://github.com/marchingband/usb-midi-host2host) — USB host ⇄ USB host bridges Pi ⇄ i2c2midi (`XIAO-TT`) and Pi ⇄ SSP (`XIAO-SSP`) | power from the hosts |
 | i2c2midi (Teletype expander) | i2c2midi firmware with *ER-301 direct* (not in this repo): MIDI → SC.CV / SC.TR straight over its own I2C bus, plus a trigger LFO | — |
 | Percussa SSP | `scripts/ssp_mdns.py` (`ssp.local`) and `scripts/ssp_synthor_log.py` (which patch is loaded) | the SSP's init scripts |
 | Mac / Linux | `kontrolleur/` — the configuration app | you |
@@ -58,7 +77,7 @@ out while they run. Their settings files are re-read while running, so a change 
 |---|---|
 | `src/dualsense_midi.py` | the DualSense script (main loop, evdev reading, MIDI out) |
 | `src/midi/` | `button_router.py` (tap / hold / chords → actions), `axis_router.py` (axes → functions or own CC), `device_inputs.py` (16n / EC4 / pedals → the same functions), `controller.py` (MIDI, grain slice, LEDs), `dualsense_hid.py` (light bar, dots, rumble over hidraw), `harmonic_strummer.py` |
-| `src/state/` | `channel_manager.py` (instruments 1–3, freeze), `loop.py` (loop recorder), `freeze.py`, `clock_source.py` (NerdSEQ clock, else 120 BPM) |
+| `src/state/` | `channel_manager.py` (instruments 1–3, freeze), `loop.py` (loop recorder), `freeze.py`, `clock_source.py` (tempo for the loop recorder: a NerdSEQ's MIDI clock if one is plugged in, else 120 BPM) |
 | `src/controls_config.py` | reads and checks `config/controls.py` |
 | `src/config/controls.py` | what each DualSense button / axis does, and which 16n / pedal / EC4 messages run Pi functions — written by Kontrolleur |
 | `src/config/er301_routes.py` | which MIDI goes to which ER-301 port, pitch and LFO settings — written by Kontrolleur |
@@ -68,16 +87,18 @@ out while they run. Their settings files are re-read while running, so a change 
 | `src/osc_out.py`, `src/osc_map.conf` | OSC tap of the hub: mapped MIDI → OpenMW on the Mac (UDP) |
 | `scripts/` | device tools Kontrolleur runs over SSH (or locally on a cable), SSP helpers, `er301_push.py` |
 | `kontrolleur/` | the desktop app ([its own README](kontrolleur/README.md)) |
-| `firmware/xiao-midi-bridge/` | firmware of the XIAO USB host-to-host bridges |
-| `systemd/`, `udev/` | service files and udev rules for the Pi |
+| `firmware/xiao-midi-bridge/` | firmware of the XIAO USB host-to-host bridges (modified [usb-midi-host2host](https://github.com/marchingband/usb-midi-host2host)) |
+| `install-pi.sh` | sets up a Pi: packages, udev rules, groups, both services for your user and checkout |
+| `systemd/`, `udev/` | service files and udev rules for the Pi (`install-pi.sh` installs them) |
 | `test/` | tests of the routers, device inputs and passthrough (`python3 test/test_*.py`) plus a few interactive helpers |
 | `backups/` | configuration dumps of the 16n, EC4 and MPC-20 |
 | `src/doremidi_bridge.py`, `DOREMIDI_DEBUG_NOTES.md` | an earlier libusb bridge for the MPC-20, not used any more (see [History](#history)) |
 
 ## The DualSense script
 
-`dualsense_midi.py` reads the DualSense's three input devices (gamepad, touchpad, motion sensors) with evdev and
-writes light bar, player dots and rumble straight to its hidraw device. Everything it sends leaves through one
+`dualsense_midi.py` reads the DualSense's three input devices (gamepad, touchpad, motion sensors) over the USB
+cable with evdev and writes light bar, player dots and rumble straight to its hidraw device. It waits for the
+controller and picks it up again after it is unplugged. Everything it sends leaves through one
 ALSA port, `DualSense_Controller`, which the hub picks up.
 
 **How a control is handled.** A button goes to the button router: tap, hold (≥ 1 s) or a two-button chord runs an
@@ -87,7 +108,7 @@ the grain slice as 14-bit NRPN). 16n, EC4 and pedal messages listed in `MIDI_INP
 through the script's own input ports (`DS 16n In`, `DS EC4 In`, `DS Pedal In`): a CC drives a continuous function
 with its value or fires an action when it reaches 64; a note on fires an action.
 
-**Default layout** (`controls_config.DEFAULTS`; change it in Kontrolleur's DualSense tab):
+**Layout** (as used here; change it in Kontrolleur's DualSense tab):
 
 | Control | Does |
 |---|---|
@@ -97,28 +118,32 @@ with its value or fires an action when it reaches 64; a note on fires an action.
 | L3 · R3 | freeze L2, R2 and the left stick · freeze the right stick |
 | Create · Options · both | sample block − · block + · back to block 1 |
 | Left stick X · d-pad ↔ | slice in the section · section − / + |
-| Touchpad X · Y · click | loop scrub · quantize grid · quantize on / off |
+| Touchpad X | loop scrub |
 | PS | harmonic strum (notes around the d-pad step) |
 | everything else | its own CC |
 
-**Grain slice.** Slice 0–1023 = block × 128 + section × 16 + slice, sent as one 14-bit value (NRPN 3). The five
-dots under the touchpad show the block: a dot walking from left to right, the first and last block light a single
-outer dot. Create / Options past the first or last block do nothing (no rumble), like the section d-pad.
+**Grain slice.** Slice 0–1023 = block × 128 + section × 16 + slice, sent as one 14-bit value (NRPN 3).
 
 **Instruments.** The script knows three instruments with their own freeze and loop; instrument 1 sends on MIDI
 ch 2, 2 on ch 13, 3 on ch 14 (`INSTRUMENT_MIDI_CHANNELS`). No control switches between them at the moment. The
 current channel is written to `/tmp/dualsense_channel` for the hub.
 
-**Light bar.** Dim instrument colour when idle (1 white, 2 turquoise, 3 yellow); red pulse while recording, purple while
-overdubbing, a pulse in the instrument colour while a loop plays, green while quantize is locked to the NerdSEQ
-clock, blue while motion control is on. While quantize is on, the dots show its grid (1–4 dots = 1/4 … 1/32)
-and a block change shows the block for 1.5 s.
+**Feedback on the controller.**
+
+| | Shows |
+|---|---|
+| Light bar | dim white when idle · red pulse while recording · purple pulse while overdubbing · white pulse while a loop plays · blue while motion control is on |
+| Player dots (under the touchpad) | the sample block: a dot walking from left to right, two neighbours in between; the first and last block light a single outer dot |
+| Short rumble | block − (left) / block + (right) · section − / + on the d-pad · freezing (both motors for L3, right for R3) |
+| No rumble | Create / Options or the d-pad past the first or last block: nothing changes, nothing is sent |
+| Rumble while tilting | with motion control on, near the ends of the tilt range |
 
 ## The MIDI hub
 
 `midi_passthrough.py` subscribes to every MIDI input it finds (the DualSense script, 16n, EC4, the pedals, the
-XIAO-TT, a NerdSEQ, an iii grid) and sends each message to every output: **XIAO-TT** (→ i2c2midi), **XIAO-SSP**
-(→ SSP) and a NerdSEQ if one is plugged in. On the way:
+XIAO-TT, a NerdSEQ, an iii grid) and sends each message to every output that is plugged in: **XIAO-TT**
+(→ i2c2midi), **XIAO-SSP** (→ SSP), a **NerdSEQ**. Whatever is missing is skipped; devices can come and go while
+it runs. On the way:
 
 | Rule | Why |
 |---|---|
@@ -195,9 +220,11 @@ listen on is the module's own MIDI channel setting (0 = every channel).
 
 ## Firmware
 
-- **XIAO MIDI bridge** (`firmware/xiao-midi-bridge`, PlatformIO, Seeed XIAO SAMD21): two boards per link, each
-  a USB MIDI device on one host, joined by UART at 250 000 baud. Environments `xiao_tt` (`XIAO-TT`) and
-  `xiao_ssp` (`XIAO-SSP`); the hub routes by these names. Details in its README.
+- **XIAO MIDI bridge** (`firmware/xiao-midi-bridge`, PlatformIO, Seeed XIAO SAMD21): a modified version of
+  [marchingband/usb-midi-host2host](https://github.com/marchingband/usb-midi-host2host) — packet validation and
+  resync, 250 000 baud, own USB names. Two boards per link, each a USB MIDI device on one host, joined by UART
+  (TX↔RX, GND). Environments `xiao_tt` (`XIAO-TT`) and `xiao_ssp` (`XIAO-SSP`); the hub routes by these names.
+  Wiring and flashing in [its README](firmware/xiao-midi-bridge/README.md).
 - **i2c2midi** (MK2, Teensy 4.1) with *ER-301 direct* — needed for the ER-301 routing and the LFO; not in this
   repo.
 - **16n** (16nLC) with per-fader curves and output ranges — needed for those two settings in Kontrolleur; not in
@@ -205,42 +232,41 @@ listen on is the module's own MIDI channel setting (0 = every channel).
 
 ## Setting up the Pi
 
-1. **OS.** Raspberry Pi OS Lite (64-bit; the Pi runs Debian 13 "trixie"). In the imager: hostname `ahab`, user
-   `ahab`, SSH on. The service files use `/home/ahab/dualsense-eurorack-midi` — change `User=` and the paths if
-   yours differ.
-2. **Packages.**
+1. **OS.** Flash Raspberry Pi OS Lite (64-bit) with the Raspberry Pi Imager; set a hostname, a user and SSH there.
+2. **Clone and install.** On the Pi:
    ```bash
-   sudo apt update && sudo apt full-upgrade -y
-   sudo apt install -y git bluez python3-rtmidi python3-evdev python3-usb
-   ```
-3. **The repository.**
-   ```bash
+   sudo apt install -y git
    git clone https://github.com/ahabzutun/dualsense-eurorack-midi.git ~/dualsense-eurorack-midi
+   cd ~/dualsense-eurorack-midi && ./install-pi.sh
    ```
-4. **udev rules** (DualSense LEDs and rumble without root; the MPC-20's MIDI port; the MPC-20 tool):
-   ```bash
-   cd ~/dualsense-eurorack-midi
-   sudo cp udev/70-dualsense.rules udev/99-mpc20-midi.rules udev/99-doremidi.rules /etc/udev/rules.d/
-   sudo udevadm control --reload-rules && sudo udevadm trigger
-   ```
-5. **Services.**
-   ```bash
-   sudo cp systemd/dualsense-midi.service systemd/midi-passthrough.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now dualsense-midi midi-passthrough
-   ```
-6. **Pair the DualSense** (or plug it in by USB): `sudo bluetoothctl`, then `power on`, `agent on`, `scan on`;
-   hold PS + Create until the light bar flashes; `pair`, `trust` and `connect` its address, `scan off`. It
-   reconnects by itself from then on; the script waits for it.
-7. **SSH key for Kontrolleur.** On the computer: `ssh-copy-id ahab@ahab.local`, then set the host in Kontrolleur.
+   `install-pi.sh` installs the packages (`python3-rtmidi`, `python3-evdev`, `python3-usb`, `alsa-utils`), the
+   udev rules, adds you to the `input`, `audio` and `plugdev` groups and installs both services for your user and
+   this checkout — the unit files in `systemd/` name user `ahab`, the script fills in yours. `--dry-run` shows
+   what it would do; `--no-services` stops before the services. Running it again is safe.
+3. **Plug things in.** The DualSense on a USB data cable, the XIAO bridges and the controllers you have (through
+   a powered hub). The services find everything by name whenever it appears.
+4. **Kontrolleur.** On the computer: `ssh-copy-id <user>@<hostname>.local`, then install Kontrolleur
+   ([its README](kontrolleur/README.md)) and set that host in the app.
 
-The XIAO-TT and XIAO-SSP bridges, 16n, EC4 and MPC-20 go into the Pi's USB ports (through a powered hub);
-the hub service finds them by name whenever they appear.
+<details><summary>The same by hand</summary>
+
+```bash
+sudo apt update && sudo apt install -y git alsa-utils python3-rtmidi python3-evdev python3-usb
+git clone https://github.com/ahabzutun/dualsense-eurorack-midi.git ~/dualsense-eurorack-midi
+cd ~/dualsense-eurorack-midi
+sudo cp udev/70-dualsense.rules udev/99-mpc20-midi.rules udev/99-doremidi.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG input,audio,plugdev "$USER"
+# edit User= and the paths in systemd/*.service if you aren't ahab in /home/ahab, then:
+sudo cp systemd/dualsense-midi.service systemd/midi-passthrough.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now dualsense-midi midi-passthrough
+```
+</details>
 
 ## Day to day
 
 ```bash
-# update the Pi
+# update the Pi (here: user ahab on ahab.local)
 ssh ahab@ahab.local 'cd ~/dualsense-eurorack-midi && git pull && sudo systemctl restart dualsense-midi midi-passthrough'
 
 # logs
@@ -273,10 +299,18 @@ from the repository).
 
 ## History
 
-The project started with a NerdSEQ as central sequencer and the Pi as a USB MIDI gadget towards the SSP; both
-were replaced (the Teletype with a monome grid leads now, and XIAO host-to-host bridges replaced the gadget,
-whose MIDI device disappeared from the SSP whenever the Pi rebooted). `pydualsense` was replaced by the small
-hidraw writer in `src/midi/dualsense_hid.py`, the fixed button layout by `config/controls.py`, and the SwiftUI
-mapper app by Kontrolleur. `src/doremidi_bridge.py` and `DOREMIDI_DEBUG_NOTES.md` document an attempt to read the
-MPC-20 through libusb before the kernel route worked; `doremidi-bridge.service` and `doremidi-powercycle.service`
-on the Pi date from that time.
+Earlier versions of the project worked differently; older notes and commits describe these setups:
+
+- **NerdSEQ as the centre.** The project started with a NerdSEQ as central sequencer and its MIDI clock driving
+  a quantized loop recorder. Today the Teletype (with a monome grid) leads, and the NerdSEQ is just one optional
+  target of the hub.
+- **The Pi as a USB MIDI gadget.** The Pi used to appear to the SSP as a USB MIDI device (gadget mode, with a
+  power/data splitter on the Pi's USB-C port). Its MIDI device disappeared from the SSP whenever the Pi
+  rebooted. The Pi is a normal USB host now, and the XIAO host-to-host bridges link it to the SSP and the
+  i2c2midi.
+- **Bluetooth.** The DualSense used to connect over Bluetooth; it is on a USB cable now.
+- **Software.** `pydualsense` was replaced by the small hidraw writer in `src/midi/dualsense_hid.py`, the fixed
+  button layout by `config/controls.py`, and the SwiftUI mapper app by Kontrolleur.
+- **MPC-20 over libusb.** `src/doremidi_bridge.py` and `DOREMIDI_DEBUG_NOTES.md` document an attempt to read the
+  MPC-20 through libusb before the kernel route worked; `doremidi-bridge.service`, `doremidi-powercycle.service`,
+  `udev/99-doremidi-reset.rules` and `scripts/reset-doremidi.sh` date from that time and aren't needed.
