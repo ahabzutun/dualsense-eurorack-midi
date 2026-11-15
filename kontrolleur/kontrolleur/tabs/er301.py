@@ -17,11 +17,38 @@ from ..theme import BOLD, HEAVY, MEDIUM, REGULAR, SEMIBOLD, Theme
 from .dualsense import _op
 
 DEVICES = ["DualSense", "16n", "MPC-20", "EC4", "i2c2midi", "MIDI"]
+EC4_MAX = 8          # EC4 encoders listed per port before "+N more"
 
 
 class Source:
-    def __init__(self, device: str, detail: str, note: Optional[str] = None):
-        self.device, self.detail, self.note = device, detail, note
+    """Where a port's MIDI comes from; `goto` opens that control in its own tab (`where` says which)."""
+
+    def __init__(self, device: str, detail: str, note: Optional[str] = None, goto=None, where: str = ""):
+        self.device, self.detail, self.note, self.goto, self.where = device, detail, note, goto, where
+
+
+def _ec4_name(n: str, fallback: str) -> str:
+    """An EC4 display name, or where it sits when it is blank ('----' is the EC4's empty name)."""
+    n = n.strip()
+    return fallback if not n or set(n) <= {"-"} else n
+
+
+def _open(ctx, mode: str, then):
+    def go():
+        ctx.set_mode(mode)
+        then()
+    return go
+
+
+def _open_ec4(ctx, si: int, gi: int, ei: int, push: bool):
+    def then():
+        ctx.ec4_setup, ctx.ec4_group = si, gi
+        ctx.select("ec4_enc", ei, "Push" if push else "Encoder")
+    return _open(ctx, "ec4", then)
+
+
+def _open_er(ctx, tab: str):
+    return lambda: ctx.inspector.set_tab(tab)
 
 
 def device_color(d: str) -> QColor:
@@ -34,9 +61,12 @@ def describe(ctx, ref: tuple) -> List[Source]:
     notes = ctx.notes
     if ref[0] == "dualsense":
         _, lab, iid, trig = ref
-        return [Source("DualSense", lab + (" (trigger)" if trig else ""), notes.note(NotesStore.ds(iid)))]
+        gid = M.group_of(M.INPUT[iid]).id if iid in M.INPUT else None
+        go = _open(ctx, "dualsense", lambda: ctx.select_ds(gid)) if gid else None
+        return [Source("DualSense", lab + (" (trigger)" if trig else ""), notes.note(NotesStore.ds(iid)), go, "DualSense tab")]
     if ref[0] == "builtin":
-        return [Source("i2c2midi", "trigger LFO" if ref[1] == "LFO" else "pitch from DualSense notes")]
+        return [Source("i2c2midi", "trigger LFO" if ref[1] == "LFO" else "pitch from DualSense notes", None,
+                       _open_er(ctx, "Pitch & LFO"), "Pitch & LFO")]
     _, kind, ch, control = ref
     out: List[Source] = []
     try:
@@ -48,29 +78,36 @@ def describe(ctx, ref: tuple) -> List[Source]:
         if not note:
             for i, f in enumerate(ctx.bank.faders):
                 if f["usb_channel"] == ch and f["usb_cc"] == cc:
-                    out.append(Source("16n", f"fader {i + 1}", notes.note(NotesStore.fader(i))))
+                    out.append(Source("16n", f"fader {i + 1}", notes.note(NotesStore.fader(i)),
+                                      _open(ctx, "faderbank", lambda i=i: ctx.select("fader_sel", i, "Fader")), "16n tab"))
         want = "note" if note else "cc"
-        for inp in ctx.pedals.inputs:
+        for pi_, inp in enumerate(ctx.pedals.inputs):
             for s in inp["slots"]:
                 if s["on"] and s["kind"] == want and s["number"] == cc and hub_channel(s["channel"], ctx.mapping) == ch:
                     out.append(Source("MPC-20", f"{pedal_name(inp['input'])} · message {s['slot'] + 1}",
-                                      notes.note(NotesStore.pedal(inp["input"], s["slot"]))))
+                                      notes.note(NotesStore.pedal(inp["input"], s["slot"])),
+                                      _open(ctx, "pedals", lambda k=pi_: ctx.select("pedal_sel", k, "Pedal")), "Pedals tab"))
         hits = []
         for si, su in enumerate(ctx.ec4.setups):
             for gi, g in enumerate(su["groups"]):
                 for ei, e in enumerate(g["encoders"]):
-                    n = e["name"].strip()
-                    where = f"{su['name'].strip()} · {g['name'].strip()} · {n or f'enc {ei + 1}'}"
+                    where = f"{_ec4_name(su['name'], f'setup {si + 1}')} · {_ec4_name(g['name'], f'group {gi + 1}')} · " \
+                            f"{_ec4_name(e['name'], f'enc {ei + 1}')}"
                     if not note and e["type"] == "cc" and e["channel"] == ch and e["number"] == cc:
-                        hits.append(Source("EC4", where, notes.note(NotesStore.ec4(si, gi, ei))))
+                        hits.append(Source("EC4", where, notes.note(NotesStore.ec4(si, gi, ei)),
+                                           _open_ec4(ctx, si, gi, ei, False), "EC4 tab"))
                     pu = e["push"]
                     if pu["type"] == want and pu["channel"] == ch and pu["number"] == cc:
-                        hits.append(Source("EC4", where + " push", notes.note(NotesStore.ec4_push(si, gi, ei))))
-        if hits:
-            out.append(hits[0] if len(hits) == 1 else Source("EC4", hits[0].detail + f" +{len(hits) - 1} more", hits[0].note))
+                        hits.append(Source("EC4", where + " push", notes.note(NotesStore.ec4_push(si, gi, ei)),
+                                           _open_ec4(ctx, si, gi, ei, True), "EC4 tab"))
+        # every match on its own line, so stale mappings in other setups show up (and can be opened)
+        out += hits[:EC4_MAX]
+        if len(hits) > EC4_MAX:
+            out.append(Source("EC4", f"+{len(hits) - EC4_MAX} more encoders send ch {ch} CC {cc}"))
     if not out:
         what = "note" if kind == "note" else ("NRPN" if kind == "nrpn" else "CC")
-        out.append(Source("MIDI", f"ch {ch} {what} {control}" + (" (trigger)" if kind == "trigger" else "")))
+        out.append(Source("MIDI", f"ch {ch} {what} {control}" + (" (trigger)" if kind == "trigger" else ""), None,
+                          _open_er(ctx, "Routes"), "Routes"))
     return out
 
 
@@ -234,13 +271,53 @@ class _PortRow(QFrame):
         super().mousePressEvent(ev)
 
 
+class _Link(QLabel):
+    """A source line in the port list: opens that control in its tab (the click doesn't select the port)."""
+
+    def __init__(self, text: str, go, where: str):
+        super().__init__()
+        self._text, self._go = text, go
+        self.setWordWrap(True)
+        self.setFont(Theme.font(12, REGULAR, "ui"))
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"Open in the {where}")
+        self._show(False)
+
+    def _show(self, hover: bool):
+        c = W.css(Theme.ink)
+        deco = "underline" if hover else "none"
+        self.setText(f'<span style="color:{c}; text-decoration:{deco}">{_html(self._text)}</span>'
+                     f'<span style="color:{W.css(Theme.dim)}">  ↗</span>')
+
+    def enterEvent(self, ev):
+        self._show(True)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._show(False)
+        super().leaveEvent(ev)
+
+    def mousePressEvent(self, ev):
+        ev.accept()                      # keep the click away from the port row
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton and self.rect().contains(ev.position().toPoint()):
+            self._go()
+        ev.accept()
+
+
+def _html(t: str) -> str:
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 DESC_TITLE = "Steers in the ER-301"
 DESC_PROMPT = "e.g. “grain size of the granular player, chain 2”"
 
 
 def ports_panel(ctx, col: QVBoxLayout):
     col.addWidget(W.title("ER-301 ports"))
-    col.addWidget(W.hint("Set these as the sources of your ER-301 unit inputs. Each entry shows which device the MIDI comes from. "
+    col.addWidget(W.hint("Set these as the sources of your ER-301 unit inputs. Each entry shows which device the MIDI comes from; "
+                         "click a source (↗) to open that control in its tab. "
                          "Click a port to select it and note what it steers in your ER-301 patch. "
                          "“×2” marks a port with several sources: fine when intended (e.g. ✕ and the LFO both firing the grain "
                          "trigger); on a CV port the value sent last wins."))
@@ -279,7 +356,10 @@ def ports_panel(ctx, col: QVBoxLayout):
             r = QHBoxLayout()
             r.setSpacing(6)
             r.addWidget(_badge_label(s.device), 0, Qt.AlignTop)
-            r.addWidget(W.label(s.detail, 12, REGULAR, "ui", Theme.ink, wrap=True), 1)
+            if s.goto is not None:
+                r.addWidget(_Link(s.detail, s.goto, s.where), 1)
+            else:
+                r.addWidget(W.label(s.detail, 12, REGULAR, "ui", Theme.ink, wrap=True), 1)
             v.addLayout(r)
             if s.note:
                 v.addWidget(W.label("✎ " + NotesStore.one_line(s.note), 10.5, MEDIUM, "ui", Theme.note, wrap=True, italic=True))

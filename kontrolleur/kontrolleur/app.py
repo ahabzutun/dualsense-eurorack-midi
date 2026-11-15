@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import QPoint, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
@@ -1050,6 +1050,32 @@ def _reveal(path: Path):
         os.startfile(str(path))   # noqa
 
 
+class _WindowLog(QObject):
+    """KONTROLLEUR_DEBUG_WINDOWS=1: log every window shown besides the main one (popups, tooltips, stray
+    top-level widgets) to windows.log in the data folder, with where in the code it was shown from."""
+
+    def __init__(self, main_window):
+        super().__init__()
+        self.main = main_window
+        self.path = store.data_dir() / "windows.log"
+        self.path.write_text(f"Kontrolleur window log, started {dt.datetime.now():%Y-%m-%d %H:%M:%S}\n")
+
+    def eventFilter(self, o, e):
+        if e.type() in (QEvent.Show, QEvent.Hide) and isinstance(o, QWidget) and o.isWindow() and o is not self.main:
+            import traceback
+            here = [ln.strip().splitlines()[0] for ln in traceback.format_stack(limit=12)[:-1] if "kontrolleur" in ln]
+            par = o.parentWidget()
+            g = o.geometry()
+            line = (f"{dt.datetime.now():%H:%M:%S.%f}"[:-3] + f"  {'SHOW' if e.type() == QEvent.Show else 'hide'}  "
+                    f"{type(o).__name__} '{o.objectName()}' flags={int(o.windowFlags().value) if hasattr(o.windowFlags(), 'value') else int(o.windowFlags()):#x} "
+                    f"{g.width()}x{g.height()}+{g.x()}+{g.y()} parent={type(par).__name__ if par else None} "
+                    f"mode={getattr(self.main, 'mode', '?')}\n")
+            line += "".join(f"      {h}\n" for h in here[-4:])
+            with open(self.path, "a") as fh:
+                fh.write(line)
+        return False
+
+
 def main():
     if sys.platform.startswith("linux") and not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("WAYLAND_DISPLAY"):
         os.environ.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
@@ -1059,5 +1085,8 @@ def main():
     app.setDesktopFileName("kontrolleur")
     theme.init()
     w = Main()
+    if os.environ.get("KONTROLLEUR_DEBUG_WINDOWS"):
+        w._window_log = _WindowLog(w)
+        app.installEventFilter(w._window_log)
     w.show()
     sys.exit(app.exec())
