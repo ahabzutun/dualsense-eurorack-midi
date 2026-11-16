@@ -11,6 +11,7 @@ Raspberry Pi OS) and **macOS**; Python + Qt (PySide6).
 | Pedals | DOREMiDi MPC-20 | `scripts/mpc20_tool.py`, over SSH or on a cable |
 | EC4 | Faderfox EC4 | `scripts/ec4_tool.py`, over SSH or on a cable (transfers are started on the EC4) |
 | ER-301 | i2c2midi → ER-301 | port overview (each source links to its control), MIDI routes, pitch & LFO |
+| Teletype | the scene's scripts: what each line sends through the i2c2midi (USB channel, CC / note) and which SSP input it reaches, ER-301 ports it writes directly, mistakes (TRS channels, `I2M.CH` only in Init, unknown ops); edit scripts; **Live** shows what really arrives from the i2c2midi at the Pi | scenes by USB stick: the Teletype's WRITE TO USB → `↓ From stick` reads `tt00s.txt …`; `↑ To stick` writes `tt##.txt` for READ FROM USB. Live: `scripts/midi_monitor.py` piped over SSH to the Pi |
 
 Also: notes per control (also written into `er301_routes.py` comments), saved configurations
 (`~/Documents/Kontrolleur/*.dsmconfig`), adjustable colours / fonts / text size, zoomable drawings
@@ -47,7 +48,7 @@ To update: `git pull` in the repository and restart the app. `packaging/build-ma
 | | Linux | macOS |
 |---|---|---|
 | Settings (host, routes, appearance) | `~/.config/Kontrolleur/Kontrolleur.conf` | `~/Library/Preferences/com.kontrolleur.Kontrolleur.plist` |
-| Notes, last EC4 dump | `~/.local/share/kontrolleur/` | `~/Library/Application Support/Kontrolleur/` |
+| Notes, last EC4 dump, Teletype scenes (`teletype/`) | `~/.local/share/kontrolleur/` | `~/Library/Application Support/Kontrolleur/` |
 | Configurations | `~/Documents/Kontrolleur/` | `~/Documents/Kontrolleur/` |
 
 Configuration files are the same on both systems.
@@ -58,7 +59,7 @@ Configuration files are the same on both systems.
 
 `KONTROLLEUR_OFFLINE=<folder with export.json, fader16.json, mpc20.json, ec4-last.json>` loads data from
 files instead of the devices; `KONTROLLEUR_SNAPSHOT=out.png` (+ `KONTROLLEUR_MODE`, `_TAB`, `_SIZE`, `_SCALE`,
-`_FONT`, `_PRESET`) renders the window to a PNG and quits. Works with `QT_QPA_PLATFORM=offscreen`.
+`_FONT`, `_PRESET`, `_TT_SCENE`) renders the window to a PNG and quits. Works with `QT_QPA_PLATFORM=offscreen`.
 
 `scripts/` holds the app icon (`make_icon.py` draws it). The SwiftUI version this replaced is in the git
 history (removed after commit f1ca7b6).

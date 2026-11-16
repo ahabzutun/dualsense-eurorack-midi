@@ -187,6 +187,27 @@ def senders(ctx) -> Dict[tuple, List[Tuple[str, str]]]:
                 key_p = (p["channel"], p["type"], p["number"])
                 if p["type"] in ("cc", "note") and key_p not in out:
                     add(key_p, "ec4", f"S{si + 1} G{gi + 1} push {k + 1}")
+    # the Teletype scene in use: what its I2M ops send on the i2c2midi's USB port (comes back in through the XIAO-TT)
+    tt = getattr(ctx, "tt", None)
+    an = tt.analysis(getattr(ctx, "tt_scene", 0)) if tt is not None and tt.loaded else None
+    for s in (an.sends if an is not None else []):
+        if s.usb is None or s.hub_kind is None or (s.num is None and s.hub_kind != "note"):
+            continue
+        add((s.usb, s.hub_kind, s.num if s.num is not None else -1), "teletype", f"{s.where.title}: {s.where.text}")
+    return out
+
+
+def listeners(ctx, ch: int, kind: str, num: Optional[int]) -> List[Tuple[dict, dict]]:
+    """The inputs of the SSP patch in use that a message from the hub reaches (num None = any number)."""
+    out = []
+    for m in midi_modules(ctx.ssp.active):
+        for i in m["inputs"]:
+            if i["ch"] and i["ch"] != ch:
+                continue
+            if kind == "cc" and i["kind"] == "cc" and (num is None or i["num"] == num):
+                out.append((m, i))
+            elif kind == "note" and i["kind"] in ("note", "notes") and (i["num"] < 0 or num is None or i["num"] == num):
+                out.append((m, i))
     return out
 
 
@@ -197,8 +218,8 @@ def matches(snd: Dict[tuple, list], i: dict) -> List[Tuple[str, str]]:
             return snd.get((i["ch"], "cc", i["num"]), [])
         return [s for (ch, k, n), lst in snd.items() if k == "cc" and n == i["num"] for s in lst]
     if i["kind"] in ("note", "notes"):
-        return [s for (ch, k, n), lst in snd.items()
-                if k == "note" and (not i["ch"] or ch == i["ch"]) and (i["num"] < 0 or n == i["num"]) for s in lst]
+        return [s for (ch, k, n), lst in snd.items()          # n = -1: notes that change (a Teletype I2M.N X …)
+                if k == "note" and (not i["ch"] or ch == i["ch"]) and (i["num"] < 0 or n == i["num"] or n == -1) for s in lst]
     return []
 
 

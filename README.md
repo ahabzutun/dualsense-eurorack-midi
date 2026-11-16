@@ -179,10 +179,13 @@ port (Kontrolleur's ER-301 tab lists them all and links to each). `scripts/er301
 ## Kontrolleur
 
 The desktop app in `kontrolleur/` (Python + PySide6, macOS and Linux) with one tab per device: DualSense, 16n,
-Pedals, EC4, Routing and ER-301. It loads the current state from the Pi (and from the devices, over SSH or on a
+Pedals, EC4, Routing, ER-301 and Teletype. It loads the current state from the Pi (and from the devices, over SSH or on a
 cable), lets you change it and uploads it. The **Routing** tab draws the whole rig — controllers, the Pi with the
 DualSense script and the hub (*Scripts* and *Stages* open them up), the i2c2midi, ER-301, Teletype and the SSP's
-loaded patch — and traces a single control through all of it, hop by hop.
+loaded patch — and traces a single control through all of it, hop by hop. The **Teletype** tab reads the
+Teletype's scenes from a USB stick (its WRITE TO USB), shows what each script line sends through the i2c2midi and
+where it lands, flags mistakes like a TRS channel, lets you edit scripts and write them back for READ FROM USB,
+and shows live what actually arrives from the i2c2midi at the Pi.
 
 Install and details: [kontrolleur/README.md](kontrolleur/README.md). In short: `kontrolleur/install-mac.sh` or
 `kontrolleur/install-linux.sh`, then set the SSH host (`ahab@ahab.local`) in the app.
@@ -200,6 +203,7 @@ locally when the device is on a cable to the computer, and `ssp_tool.py` on the 
 | `mpc20_tool.py` | MPC-20 | reads / writes the pedal messages (pyusb, needs `udev/99-doremidi.rules`) |
 | `ec4_tool.py` | EC4 | receives / sends setups as SysEx dumps (transfers are started on the EC4) |
 | `ssp_tool.py` | SSP | scans the presets: MIDI modules, MIDI learn mappings, device names, the loaded patch |
+| `midi_monitor.py` | Pi | streams what arrives on one MIDI input (default `XIAO-TT`) as JSON lines, alongside the hub (Teletype tab → Live) |
 | `rtmidi_compat.py` | — | the bit of python-rtmidi the tools need, on top of alsa-midi (for Pythons without python-rtmidi) |
 | `deploy_controls_to_pi.sh` | Pi | the one-off rollout of the button router (kept for reference; updates now go through git) |
 

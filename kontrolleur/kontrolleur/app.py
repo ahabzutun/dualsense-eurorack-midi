@@ -11,19 +11,20 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QPlainTextEdit,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QStackedWidget, QToolButton, QVBoxLayout,
                                QWidget)
 
-from . import clients, ssp, store, theme
+from . import clients, ssp, store, teletype, theme
 from . import widgets as W
 from .devices import EC4Board, Faderbank, PedalBoard
 from .model import Mapping
 from .stage import Stage
 from .theme import BOLD, HEAVY, SEMIBOLD, REGULAR, Theme
 
-MODES = [("dualsense", "DualSense"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("pi", "Routing"), ("er301", "ER-301")]
+MODES = [("dualsense", "DualSense"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("pi", "Routing"), ("er301", "ER-301"),
+         ("teletype", "Teletype")]
 ROUTED = ("faderbank", "pedals", "ec4")
 ROUTE_KEY = {"faderbank": "fader16OnPi", "pedals": "pedalsOnPi", "ec4": "ec4OnPi"}
 ICON = Path(__file__).resolve().parent / "icon.png"
@@ -58,6 +59,17 @@ class Main(QMainWindow):
         self.pi_add = {}               # Pi tab: the “Patch a controller” form
         self.ssp = ssp.SSPState()      # Pi tab: the Percussa SSP's patch
         self.ssp.pick = str(self.s.value("sspPreset", "") or "")
+        self.tt = teletype.TeletypeState()          # Teletype tab: scenes read from a USB stick
+        self.tt_mon = teletype.Monitor(self._tt_live)
+        self._tt_sig = None
+        self.tt_dirty = {}                          # scene → edited here, not written to a stick yet
+        self.tt_script = "1"
+        try:
+            self.tt_scene = int(os.environ.get("KONTROLLEUR_TT_SCENE") or self.s.value("ttScene", -1))
+        except (TypeError, ValueError):
+            self.tt_scene = -1
+        if self.tt_scene not in self.tt.scenes:
+            self.tt_scene = next((n for n in sorted(self.tt.scenes) if not self.tt.scenes[n].empty), 0)
         self.mode = os.environ.get("KONTROLLEUR_MODE") or self.s.value("deviceMode", "dualsense")
         if self.mode not in dict(MODES):
             self.mode = "dualsense"
@@ -111,6 +123,7 @@ class Main(QMainWindow):
     # ── pages ──
     def _build_pages(self):
         from .tabs import dualsense, ec4, er301, faderbank, pedals, pi
+        from .tabs import teletype as tt_tab
         self.tabs = {}
         specs = {
             "dualsense": (dualsense.ControllerDrawing, ["Control", "Combos", "Overview"], dualsense.build_panel),
@@ -119,6 +132,7 @@ class Main(QMainWindow):
             "pedals": (pedals.PedalDrawing, ["Pedal", "Device"], pedals.build_panel),
             "ec4": (ec4.EC4Drawing, ["Encoder", "Push", "Names"], ec4.build_panel),
             "er301": (er301.ER301Drawing, ["Ports", "Routes", "Pitch & LFO"], er301.build_panel),
+            "teletype": (tt_tab.TeletypeDrawing, ["Scene", "Script", "Live"], tt_tab.build_panel),
         }
         for mode, (Drawing, tabs, build) in specs.items():
             page = QWidget()
@@ -238,6 +252,11 @@ class Main(QMainWindow):
         self.up_btn.setText("↑  Send" if ec4 else "↑  Upload")
         self.load_btn.setToolTip("Receive the setups from the EC4 (Ctrl+R)" if ec4 else "Load from the device (Ctrl+R)")
         self.up_btn.setToolTip("Send the setups to the EC4 (Ctrl+S)" if ec4 else "Upload to the device (Ctrl+S)")
+        if self.mode == "teletype":
+            self.load_btn.setText("↓  From stick")
+            self.up_btn.setText("↑  To stick")
+            self.load_btn.setToolTip("Read the scenes the Teletype wrote to a USB stick (Ctrl+R)")
+            self.up_btn.setToolTip("Write the scene in use to the stick as tt##.txt, for READ FROM USB (Ctrl+S)")
         self.route_seg.setVisible(self.mode in ROUTED)
         if self.mode in ROUTED:
             self.route_seg.set_current(self.on_ssh(self.mode))
@@ -736,6 +755,8 @@ class Main(QMainWindow):
             self.load_pedals(then=lambda: self.load_routing(quiet=True))
         elif self.mode == "ec4":
             self.receive_ec4()
+        elif self.mode == "teletype":
+            self.tt_import()
         else:
             self.load_routing()
 
@@ -748,8 +769,133 @@ class Main(QMainWindow):
             self.upload_pedals()
         elif self.mode == "ec4":
             self.send_ec4()
+        elif self.mode == "teletype":
+            self.tt_write()
         else:
             self.upload_routing()
+
+    # ── Teletype ──
+    def tt_import(self, pick: bool = False):
+        folder = None
+        if not pick:
+            found = teletype.stick_candidates()
+            if len(found) == 1:
+                folder = found[0]
+            elif found:
+                self.set_status("info", "More than one stick with Teletype scenes: pick the folder.")
+        if folder is None:
+            start = str(teletype.stick_candidates()[0] if teletype.stick_candidates() else Path.home())
+            d = QFileDialog.getExistingDirectory(self, "Folder with the Teletype's scenes (tt00s.txt …)", start)
+            if not d:
+                if not pick:
+                    self.set_status("info", "No stick with Teletype scenes found. On the Teletype: stick in, WRITE TO USB; "
+                                            "then put the stick into this computer.")
+                return
+            folder = Path(d)
+        try:
+            n = self.tt.import_folder(folder)
+        except (OSError, ValueError) as e:
+            return self.set_status("error", str(e))
+        self.tt_dirty = {}
+        if self.tt_scene not in self.tt.scenes or self.tt.scenes[self.tt_scene].empty:
+            self.tt_scene = next((k for k in sorted(self.tt.scenes) if not self.tt.scenes[k].empty), 0)
+        self.set_status("ok", f"Read {n} Teletype scenes from {folder}.")
+        self.refresh_all()
+
+    def tt_write(self):
+        sc = self.tt.scene(self.tt_scene)
+        if sc is None:
+            return self.set_status("error", "Read the scenes from the stick first.")
+        folder = Path(self.tt.imported_from) if self.tt.imported_from else None
+        if folder is None or not folder.is_dir():
+            found = teletype.stick_candidates()
+            folder = found[0] if found else None
+        if folder is None or not folder.is_dir():
+            d = QFileDialog.getExistingDirectory(self, "Where to write the scene (the Teletype's stick)", str(Path.home()))
+            if not d:
+                return
+            folder = Path(d)
+        try:
+            path = self.tt.write_for_teletype(self.tt_scene, folder)
+        except OSError as e:
+            return self.set_status("error", f"Couldn't write to {folder}: {e}")
+        self.tt_dirty.pop(self.tt_scene, None)
+        self.set_status("ok", f"Wrote {path}. On the Teletype: stick in, READ FROM USB → scene {self.tt_scene:02d}.")
+        self.refresh_all()
+
+    def set_tt_scene(self, n: int):
+        self.tt_scene = int(n)
+        self.s.setValue("ttScene", self.tt_scene)
+        self.refresh_all()
+
+    def tt_set_script(self, script: str, lines):
+        sc = self.tt.scene(self.tt_scene)
+        new = [t.strip().upper() for t in lines if t.strip()][:teletype.MAX_LINES]
+        if sc is not None and sc.scripts.get(script, []) == new:
+            return
+        self.tt.set_script(self.tt_scene, script, new)
+        self.tt_dirty[self.tt_scene] = True
+        self.data_gen = getattr(self, "data_gen", 0) + 1
+        self.stage.update()
+        self._tt_rebuild_soon()
+
+    def tt_set_text(self, lines):
+        sc = self.tt.scene(self.tt_scene)
+        if sc is None or lines == sc.text:
+            return
+        self.tt.set_text(self.tt_scene, lines)
+        self.tt_dirty[self.tt_scene] = True
+        self.stage.update()
+
+    def _tt_rebuild_soon(self):
+        """Rebuild the panel's line cards after typing, without taking the focus from the editor."""
+        insp = self.tabs["teletype"][2]
+        focus = QApplication.focusWidget()
+        if focus is not None and isinstance(focus, QPlainTextEdit) and insp.isAncestorOf(focus):
+            return          # the editor keeps its text; the drawing shows the result already
+        insp.rebuild()
+
+    def tt_listen(self, on: bool):
+        if on:
+            if self.offline:
+                return self.set_status("info", "Offline: nothing to listen to.")
+            self.tt_mon.start(self.host.host, self.host.identity)
+        else:
+            self.tt_mon.stop()
+        self.inspector.rebuild()
+
+    def _tt_live(self):
+        """The monitor got something: repaint (throttled by the monitor), rebuild the panel only when its state changed."""
+        if self.mode in ("teletype", "pi"):
+            self.stage.update()
+        mon = self.tt_mon
+        sig = (mon.running, mon.connected, mon.port, mon.error, len(mon.seen) > 0)
+        if sig != self._tt_sig:
+            self._tt_sig = sig
+            if self.mode == "teletype":
+                self.inspector.rebuild()
+
+    def tt_guess(self):
+        """The scene whose USB sends explain most of what arrived live, if that's clear."""
+        seen = self.tt_mon.seen
+        if not seen or not self.tt.loaded:
+            return None
+        best, best_n = None, 0
+        for n, sc in self.tt.scenes.items():
+            an = self.tt.analysis(n)
+            if an is None or sc.empty:
+                continue
+            usb = [s for s in an.sends if s.usb is not None]
+            hit = sum(1 for v in seen.values()
+                      if any(s.usb == v.ch and (s.hub_kind == v.kind or s.kind == v.kind) and (s.num is None or s.num == v.num)
+                             for s in usb))
+            if hit > best_n:
+                best, best_n = n, hit
+        return best
+
+    def closeEvent(self, ev):
+        self.tt_mon.stop()
+        super().closeEvent(ev)
 
     def refresh_all(self):
         self.data_gen = getattr(self, "data_gen", 0) + 1

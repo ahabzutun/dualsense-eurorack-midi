@@ -253,6 +253,8 @@ def ssp_patches(ctx) -> List[Patch]:
         codes[jack] = m["code"] if jack[1] != "_more" else "SSP"
         for i in m["inputs"]:
             for dev, lab in S.matches(snd, i):
+                if dev == "teletype":       # comes back in from the i2c2midi, not from a controller on the left
+                    continue
                 lst = groups.setdefault((dev, jack), [])
                 if lab not in lst:
                     lst.append(lab)
@@ -266,6 +268,30 @@ def ssp_patches(ctx) -> List[Patch]:
         else:
             out += [Patch(dev, lab, "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack,
                           extra={"reach": reach[(dev, jack, lab)], "labels": [lab]}) for lab in labs]
+    return out
+
+
+def tt_summary(ctx) -> dict:
+    """The Teletype scene in use, for the Routing drawing: name, USB sends, SC ports, live traffic."""
+    import time as _t
+    out = {"scene": None, "what": "", "usb": 0, "ports": 0, "live": False}
+    tt = getattr(ctx, "tt", None)
+    mon = getattr(ctx, "tt_mon", None)
+    if mon is not None and mon.running and any(_t.monotonic() - v.last < 5 for v in mon.seen.values()):
+        out["live"] = True
+    if tt is None or not tt.loaded:
+        return out
+    n = getattr(ctx, "tt_scene", 0)
+    sc, an = tt.scene(n), tt.analysis(n)
+    if sc is None or an is None:
+        return out
+    out["scene"] = f"scene {n:02d} · {sc.name or '—'}"
+    out["usb"] = len({(s.usb, s.kind, s.num) for s in an.sends if s.usb is not None})
+    out["ports"] = len({(u.kind, u.port) for u in an.ports})
+    bits = [f"{out['usb']} via USB"] if out["usb"] else []
+    if out["ports"]:
+        bits.append(f"{out['ports']} SC port{'s' if out['ports'] != 1 else ''}")
+    out["what"] = " · ".join(bits) or "no I2M / SC ops"
     return out
 
 
@@ -1412,10 +1438,19 @@ class PiDrawing(Drawing):
         p.strokePath(path, D.pen(Theme.c("body", 0.45), 1.2, [4, 3]))
         t = D.Text("TELETYPE", Theme.font(11, HEAVY, "mono"), Theme.ink, tracking=1.2, max_w=tt.width() - 50, min_scale=0.7)
         t.paint(p, tt.left() + 14, tt.top() + 9)
+        info = tt_summary(self.ctx)
         if not self.folded("tt"):
-            D.Text("I2C leader", Theme.font(9, SEMIBOLD, "mono"), Theme.dim).paint(p, tt.left() + 14, tt.top() + 13 + t.h)
-            D.Text("shown only", Theme.font(9, SEMIBOLD, "mono"), _op(Theme.dim, 0.7)).paint(p, tt.left() + 14, tt.top() + 27 + t.h)
-        self.hits.add(QRectF(tt), None, "The Teletype leads the I2C bus (shown only, nothing to set here)")
+            f9 = Theme.font(9, SEMIBOLD, "mono")
+            if info["scene"] is not None:
+                D.Text(info["scene"], f9, module_color("lfo"), max_w=tt.width() - 24, min_scale=0.7).paint(
+                    p, tt.left() + 14, tt.top() + 13 + t.h)
+                D.Text(info["what"], f9, _op(Theme.dim, 0.9), max_w=tt.width() - 24, min_scale=0.7).paint(
+                    p, tt.left() + 14, tt.top() + 27 + t.h)
+            else:
+                D.Text("I2C leader", f9, Theme.dim).paint(p, tt.left() + 14, tt.top() + 13 + t.h)
+                D.Text("scenes: Teletype tab", f9, _op(Theme.dim, 0.7)).paint(p, tt.left() + 14, tt.top() + 27 + t.h)
+        self.hits.add(QRectF(tt.left(), tt.top(), tt.width() - 36, tt.height()), lambda: self.ctx.set_mode("teletype"),
+                      "The Teletype's scene: what it sends (Teletype tab)")
 
     # ── the trace and the highlighting of a path ──
     def _via_hub(self, pt, mode: str) -> bool:
@@ -1561,13 +1596,17 @@ class PiDrawing(Drawing):
         path.moveTo(a)
         dx = max(50.0, abs(a.x() - end.x()) * 0.45)
         path.cubicTo(QPointF(a.x() - dx, a.y()), QPointF(end.x() + dx, end.y()), end + QPointF(5, 0))
-        dim = _op(col, 0.45 if S["trace"] is None else 0.2)
-        p.strokePath(path, D.pen(dim, 1.3, [5, 3]))
+        tt = tt_summary(self.ctx)
+        busy = tt["usb"] > 0 or tt["live"]
+        dim = _op(col, (0.9 if busy else 0.45) if S["trace"] is None else 0.2)
+        p.strokePath(path, D.pen(dim, 2.0 if busy else 1.3, None if busy else [5, 3]))
         _arrow(p, end + QPointF(3, 0), True, dim)
         S["back_label"] = path.pointAtPercent(0.5)
+        S["back_text"] = "← Teletype" + (" ● live" if tt["live"] else (f" · {tt['usb']} send{'s' if tt['usb'] != 1 else ''}"
+                                                                         if tt["usb"] else ""))
         # I2C: i2c2midi → ER-301 and Teletype
         bus = S["i2c_bus"]
-        for end, on in ((S["er_i2c"], self._on(S, "bus")), (S["tt_i2c"], False)):
+        for end, on in ((S["er_i2c"], self._on(S, "bus")), (S["tt_i2c"], tt_summary(self.ctx)["ports"] > 0)):
             al, wf = self._style(S, on, False, 0.6)
             p.strokePath(_vcurve(bus, end), D.pen(_op(col, al), 2.4 * min(wf, 1.25)))
 
@@ -1691,11 +1730,15 @@ class PiDrawing(Drawing):
         # the label of the way back from the i2c2midi (on top, so no box hides it)
         if "back_label" in S:
             mid = S["back_label"]
-            lab = D.Text("← Teletype", Theme.font(8, SEMIBOLD, "mono"), _op(Theme.dim, 0.95))
+            text = S.get("back_text", "← Teletype")
+            lab = D.Text(text, Theme.font(8, SEMIBOLD, "mono"), _op(Theme.dim, 0.95) if text == "← Teletype" else module_color("lfo"))
             pill = QPainterPath()
-            pill.addRoundedRect(QRectF(mid.x() - lab.w / 2 - 4, mid.y() + 2, lab.w + 8, lab.h + 2), 4, 4)
+            r = QRectF(mid.x() - lab.w / 2 - 4, mid.y() + 2, lab.w + 8, lab.h + 2)
+            pill.addRoundedRect(r, 4, 4)
             p.fillPath(pill, _op(Theme.bg, 0.9))
             lab.paint(p, mid.x() - lab.w / 2, mid.y() + 3)
+            self.hits.add(r, lambda: self.ctx.set_mode("teletype"),
+                          "What the Teletype sends over the i2c2midi's USB port (Teletype tab)")
         # rings on the hub jacks the traced message passes
         if S["trace"] is not None and mode != "fold":
             tc = patch_color(S["trace"])
@@ -2178,7 +2221,8 @@ def ssp_panel(ctx, col: QVBoxLayout):
             card.add(W.label("channels " + (", ".join(map(str, chs)) if len(chs) < 16 else "all"), 11, REGULAR, "ui", Theme.dim))
         for i in m["inputs"]:
             who = S.matches(snd, i)
-            src = ", ".join(f"{'DualSense' if d == 'dualsense' else M.PI_DEVICE_TITLE[d]} {lab}" for d, lab in who[:3])
+            src = ", ".join(f"{'DualSense' if d == 'dualsense' else ('Teletype' if d == 'teletype' else M.PI_DEVICE_TITLE[d])} {lab}"
+                            for d, lab in who[:3])
             if len(who) > 3:
                 src += f" +{len(who) - 3}"
             card.add(W.hbox(W.label(S.input_text(i), 11, BOLD, "mono", sc if who else Theme.dim),
