@@ -43,10 +43,24 @@ class Item:
         return QRectF(cx - w / 2, cy - h / 2, w, h)
 
 
+_LAYOUT: dict = {}           # Text layouts by (string, font, width …): drawings rebuild the same labels every frame
+
+
 class Text(Item):
     def __init__(self, s: str, font: QFont, color: QColor, tracking: float = 0.0, max_w: Optional[float] = None,
                  lines: int = 1, align=Qt.AlignLeft, min_scale: float = 1.0):
         self.s, self.color, self.lines, self.align = s, color, lines, align
+        key = (s, font.key(), tracking, None if max_w is None else round(max_w, 1), lines, min_scale)
+        hit = _LAYOUT.get(key)
+        if hit is not None:
+            self.font, self.max_w, self.line_h, self.text_lines, self.w, self.h = hit
+            return
+        self._layout(s, font, tracking, max_w, lines, min_scale)
+        if len(_LAYOUT) > 6000:
+            _LAYOUT.clear()
+        _LAYOUT[key] = (self.font, self.max_w, self.line_h, self.text_lines, self.w, self.h)
+
+    def _layout(self, s, font, tracking, max_w, lines, min_scale):
         self.font = tracked(font, tracking)
         m = fm(self.font)
         natural = m.horizontalAdvance(s)
@@ -175,11 +189,16 @@ class Custom(Item):
 
 # ── shapes ──────────────────────────────────────────────────────────────────────────────────────
 
+# Set by the stage while a box is being dragged: dashed lines are drawn solid and glows are left out
+# (both are slow to rasterise and nobody looks at them mid-drag). Everything is exact again on release.
+DRAFT = False
+
+
 def pen(color: QColor, width: float = 1.0, dash: Optional[List[float]] = None, cap=Qt.RoundCap) -> QPen:
     q = QPen(color, width)
     q.setCapStyle(cap)
     q.setJoinStyle(Qt.RoundJoin)
-    if dash:
+    if dash and not DRAFT:
         q.setDashPattern([d / max(width, 0.01) for d in dash])
     return q
 
@@ -208,7 +227,7 @@ def circle(p: QPainter, c: QPointF, d: float, fill=None, stroke=None, width: flo
 
 def glow(p: QPainter, path: QPainterPath, color: QColor, radius: float = 10.0):
     """Soft halo around a shape (SwiftUI .shadow with a colour)."""
-    if color.alpha() == 0:
+    if color.alpha() == 0 or DRAFT:
         return
     steps = 6
     for k in range(steps, 0, -1):

@@ -9,8 +9,10 @@ import math
 import os
 from typing import Optional, Tuple
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QCursor, QPainter, QPixmap, QTransform
+import time
+
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPixmap, QTransform
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QToolTip, QWidget, QFrame
 
 from . import draw
@@ -64,6 +66,13 @@ class Stage(QWidget):
         self._xf = QTransform()
         self._stage_size = drawing.base
         self._bd, self._bd_key = None, None     # cached backdrop (see _backdrop)
+        # box drags: at most one step per frame (see _drag_to); mouse events can come at 1000 Hz
+        self._drag_d: Optional[QPointF] = None
+        self._drag_t = 0.0
+        self._drag_timer = QTimer(self)
+        self._drag_timer.setSingleShot(True)
+        self._drag_timer.timeout.connect(self._drag_flush)
+        self._draft_img: Optional[QImage] = None
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_AcceptTouchEvents, True)
         self.setMinimumSize(320, 240)
@@ -104,17 +113,35 @@ class Stage(QWidget):
         xf.translate(-sw / 2, -sh / 2)
         self._xf = xf
         p.drawPixmap(0, 0, self._backdrop(xf, sw, sh))
-        p.setRenderHint(QPainter.Antialiasing, True)
-        p.setRenderHint(QPainter.TextAntialiasing, True)
-        p.setTransform(xf)
+        # while a box is dragged on a HiDPI screen: draw at 1× into an image and scale it up (a quarter of
+        # the pixels to rasterise), with dashes and glows left out; the next normal paint is exact again
+        draft = self._dragging and self._handle is not None
+        dpr = self.devicePixelRatioF()
+        target, img = p, None
+        if draft and dpr > 1.01:
+            img = self._draft_img
+            if img is None or img.width() != self.width() or img.height() != self.height():
+                img = self._draft_img = QImage(max(1, self.width()), max(1, self.height()), QImage.Format_ARGB32_Premultiplied)
+            img.fill(0)
+            target = QPainter(img)
+        target.setRenderHint(QPainter.Antialiasing, True)
+        target.setRenderHint(QPainter.TextAntialiasing, True)
+        target.setTransform(xf)
         if self.drawing.clip:
-            p.setClipRect(QRectF(0, 0, sw, sh))
+            target.setClipRect(QRectF(0, 0, sw, sh))
         self.drawing.hits.clear()
-        if item is not None:
-            iw, ih = item.size()
-            self.drawing.paint_item(p, item, (sw - iw) / 2, (sh - ih) / 2, sw, sh)
-        else:
-            self.drawing.paint(p, sw, sh)
+        draw.DRAFT = draft
+        try:
+            if item is not None:
+                iw, ih = item.size()
+                self.drawing.paint_item(target, item, (sw - iw) / 2, (sh - ih) / 2, sw, sh)
+            else:
+                self.drawing.paint(target, sw, sh)
+        finally:
+            draw.DRAFT = False
+        if img is not None:
+            target.end()
+            p.drawImage(QRectF(0, 0, self.width(), self.height()), img)    # unsmoothed: a 1× screen's look, 3× faster
         p.end()
         self._zoom_label.setText(f"{round(self.zoom * 100)}%")
         self._out.setEnabled(self.zoom > 1.001)
@@ -122,21 +149,45 @@ class Stage(QWidget):
         self._sync_actions()
 
     def _backdrop(self, xf: QTransform, sw: float, sh: float) -> QPixmap:
-        """Background + blueprint grid, rendered once per size/zoom/pan and reused while boxes move
-        or the pointer hovers (antialiased grid lines were a third of every frame)."""
+        """Background + blueprint grid. The grid of the whole stage is rendered once per zoom level and size and
+        only shifted when panning or dragging; at high zoom (a huge image) it is drawn for the view instead."""
         dpr = self.devicePixelRatioF()
-        key = (self.width(), self.height(), dpr, xf.m11(), xf.dx(), xf.dy(), sw, sh, bool(self.drawing.clip),
-               Theme.bg.rgba(), Theme.c("body").rgba())
+        s = xf.m11()
+        big = sw * s * sh * s > 4 * max(1, self.width() * self.height())
+        gkey = (round(s, 6), sw, sh, dpr, bool(self.drawing.clip), Theme.bg.rgba(), Theme.c("body").rgba(),
+                (round(xf.dx(), 2), round(xf.dy(), 2)) if big else None)
+        if getattr(self, "_grid_key", None) != gkey:
+            if big:          # the view only, at its current position
+                gw, gh, gx, gy = self.width(), self.height(), 0.0, 0.0
+            else:            # the whole stage (plus a pixel), placed by the translation at paint time
+                gw, gh = int(math.ceil(sw * s)) + 2, int(math.ceil(sh * s)) + 2
+                gx, gy = None, None
+            img = QPixmap(max(1, round(gw * dpr)), max(1, round(gh * dpr)))
+            img.setDevicePixelRatio(dpr)
+            img.fill(Qt.transparent)
+            q = QPainter(img)
+            q.setRenderHint(QPainter.Antialiasing, True)
+            if big:
+                q.setTransform(xf)
+            else:
+                q.scale(s, s)
+            if self.drawing.clip or not big:
+                q.setClipRect(QRectF(0, 0, sw, sh))
+            draw.grid(q, sw, sh)
+            q.end()
+            self._grid_img, self._grid_key = img, gkey
+        key = (self.width(), self.height(), dpr, gkey, round(xf.dx(), 2), round(xf.dy(), 2))
         if self._bd_key != key:
             pm = QPixmap(max(1, round(self.width() * dpr)), max(1, round(self.height() * dpr)))
             pm.setDevicePixelRatio(dpr)
             q = QPainter(pm)
             q.fillRect(QRectF(0, 0, self.width(), self.height()), Theme.bg)
-            q.setRenderHint(QPainter.Antialiasing, True)
-            q.setTransform(xf)
-            if self.drawing.clip:
-                q.setClipRect(QRectF(0, 0, sw, sh))
-            draw.grid(q, sw, sh)
+            if big:
+                q.drawPixmap(0, 0, self._grid_img)
+            else:
+                if self.drawing.clip:
+                    q.setClipRect(xf.mapRect(QRectF(0, 0, sw, sh)))
+                q.drawPixmap(QPointF(xf.dx(), xf.dy()), self._grid_img)
             q.end()
             self._bd, self._bd_key = pm, key
         return self._bd
@@ -162,7 +213,7 @@ class Stage(QWidget):
                 self.setCursor(Qt.ClosedHandCursor)
             if self._dragging:
                 if self._handle is not None:            # move a box of the drawing
-                    self._handle(QPointF(d.x() / self._press_scale, d.y() / self._press_scale))
+                    self._drag_to(QPointF(d.x() / self._press_scale, d.y() / self._press_scale))
                 else:
                     self.offset = self._clamp(self._press_offset + d, self.zoom)
                     self.update()
@@ -179,6 +230,7 @@ class Stage(QWidget):
         if ev.button() != Qt.LeftButton or self._press is None:
             return
         was_drag = self._dragging
+        self._drag_flush()                      # the last position, before the drag ends
         handle, self._handle = self._handle, None
         self._press, self._dragging = None, False
         self.setCursor(Qt.ArrowCursor)
@@ -188,6 +240,25 @@ class Stage(QWidget):
             cb, _ = self.drawing.hits.at(self.to_drawing(ev.position()))
             if cb:
                 cb()
+
+    DRAG_FRAME = 1 / 50          # each frame also has to be composited by the system: 50 a second look smooth
+
+    def _drag_to(self, d: QPointF):
+        """Move the dragged box, at most 60 times a second: the rest of the mouse events only update
+        where it goes next."""
+        self._drag_d = d
+        wait = self.DRAG_FRAME - (time.monotonic() - self._drag_t)
+        if wait <= 0:
+            self._drag_flush()
+        elif not self._drag_timer.isActive():
+            self._drag_timer.start(max(1, int(wait * 1000)))
+
+    def _drag_flush(self):
+        self._drag_timer.stop()
+        d, self._drag_d = self._drag_d, None
+        if d is not None and self._handle is not None:
+            self._drag_t = time.monotonic()
+            self._handle(d)
 
     def wheelEvent(self, ev):
         mods = ev.modifiers()

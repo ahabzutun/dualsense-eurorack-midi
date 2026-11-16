@@ -596,8 +596,12 @@ STAGE_FLOWS = [
 
 
 def _opaque(p, path, tint: QColor, alpha: float):
-    p.fillPath(path, Theme.bg)
-    p.fillPath(path, _op(tint, alpha))
+    """The background with a tint over it, mixed here and filled once (half the work of two fills)."""
+    bg = Theme.bg
+    a = max(0.0, min(1.0, tint.alphaF() * alpha))
+    c = QColor.fromRgbF(bg.redF() + (tint.redF() - bg.redF()) * a, bg.greenF() + (tint.greenF() - bg.greenF()) * a,
+                        bg.blueF() + (tint.blueF() - bg.blueF()) * a, 1.0)
+    p.fillPath(path, c)
 
 
 def _curve(a: QPointF, b: QPointF, bend: float = 0.45) -> QPainterPath:
@@ -691,7 +695,10 @@ class PiDrawing(Drawing):
         self._S = None
         self._cache = None
         self._scene_memo = None
-        self._frozen = None            # (base, shift) while a group is dragged
+        self._frozen = None
+        self._drag_g = None            # the group being dragged
+        self._layers = {}              # while dragging: the other boxes, drawn once (see _layer)
+        self.layers_on = True            # (base, shift) while a group is dragged
 
     # ── the view: positions, folds, scripts ──
     def _load(self) -> dict:
@@ -773,6 +780,8 @@ class PiDrawing(Drawing):
         def move(d):
             if d is None:
                 self._frozen = None
+                self._drag_g = None
+                self._layers = {}
                 self.clip = True
                 self._save()
                 self.update()
@@ -780,6 +789,8 @@ class PiDrawing(Drawing):
             if self._frozen is None:
                 S = self._S or self._scene()
                 self._frozen = (S["size"], S["shift"])
+                self._drag_g = g
+                self._layers = {}
                 self.clip = False
             self.view["off"][g] = [round(start[0] + d.x(), 1), round(start[1] + d.y(), 1)]
             self.update()
@@ -1102,11 +1113,53 @@ class PiDrawing(Drawing):
         self._S = S
         self._environments(p, S)
         self._back_cables(p, S)
-        self._sources(p, S)
-        self._pi(p, S)
-        self._right(p, S)
+        self._layer(p, "sources", ("src",), lambda q: self._sources(q, S))
+        self._layer(p, "pi", ("pi",), lambda q: self._pi(q, S))
+        self._layer(p, "right", ("i2c", "er", "tt", "ssp"), lambda q: self._right(q, S))
         self._front_cables(p, S)
         self._chrome(p, S)
+
+    LAYER_PAD = 30.0          # around a group's box: jacks, labels and glows that stick out
+
+    def _layer(self, p: QPainter, key: str, groups, draw):
+        """While a box is dragged, the boxes of the other groups don't change: draw them once into an image
+        (just the area they cover) and put that on screen every frame instead. Cables are still drawn live,
+        under and over it."""
+        if self._drag_g is None or self._drag_g in groups or not self.layers_on or self._S is None:
+            draw(p)
+            return
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QImage
+        dev = p.device()
+        dpr = dev.devicePixelRatioF()
+        xf = p.transform()
+        hit = self._layers.get(key)
+        if hit is None or hit[1] != xf or hit[2] != (dev.width(), dev.height(), dpr):
+            area = QRectF()
+            for g in groups:
+                area = area.united(self._S["g"][g])
+            area = area.adjusted(-self.LAYER_PAD, -self.LAYER_PAD, self.LAYER_PAD, self.LAYER_PAD)
+            r = xf.mapRect(area).toAlignedRect().intersected(QRect(0, 0, dev.width(), dev.height()))
+            if r.isEmpty():
+                self._layers[key] = (None, xf, (dev.width(), dev.height(), dpr), r)
+                return
+            img = QImage(max(1, round(r.width() * dpr)), max(1, round(r.height() * dpr)), QImage.Format_ARGB32_Premultiplied)
+            img.setDevicePixelRatio(dpr)
+            img.fill(0)
+            q = QPainter(img)
+            q.setRenderHints(p.renderHints())
+            q.translate(-r.x(), -r.y())
+            q.setTransform(xf, True)
+            draw(q)
+            q.end()
+            hit = self._layers[key] = (img, xf, (dev.width(), dev.height(), dpr), r)
+        if hit[0] is None:
+            return
+        p.save()
+        p.resetTransform()
+        p.setClipping(False)
+        p.drawImage(hit[3].topLeft(), hit[0])
+        p.restore()
 
     # ── the boxes around things (dashed) ──
     def _env(self, p, r: QRectF, title: str, sub: str, col: QColor, key: Optional[str] = None,
