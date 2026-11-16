@@ -6,10 +6,11 @@ from __future__ import annotations
 
 import json
 import os
+import datetime as dt
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QPainter, QPainterPath, QPainterPathStroker
 from PySide6.QtWidgets import QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from .. import draw as D
@@ -216,9 +217,13 @@ def er_routes(ctx):
         srcs = []
         for ref in use.refs:
             if ref[0] == "dualsense" and ref[2] in ER_PI_FUNCS:
-                srcs.append(ER.Source("Pi", "grain slice (Slice-Selekteur)"))
+                src = ER.Source("Pi", "grain slice (Slice-Selekteur)")
+                src.ref = ref
+                srcs.append(src)
                 continue
-            srcs += ER.describe(ctx, ref)
+            for src in ER.describe(ctx, ref):
+                src.ref = ref               # which of the port's routes this control comes in on
+                srcs.append(src)
         out.append((use, srcs))
     return out
 
@@ -230,7 +235,7 @@ def er_patches(ctx, routes=None) -> List[Patch]:
         for src in srcs:
             dev = ER_DEVICE.get(src.device)
             if dev and src.goto is not None:
-                route = next((r for r in use.refs if (r[0] == "dualsense") == (dev == "dualsense")), use.refs[0])
+                route = getattr(src, "ref", None) or use.refs[0]
                 out.append(Patch(dev, src.detail, "er:" + use.id, ("er", use.id), jack=("er", use.id),
                                  extra={"use": use, "route": route}))
     return out
@@ -269,6 +274,163 @@ def ssp_patches(ctx) -> List[Patch]:
             out += [Patch(dev, lab, "ssp:" + codes[jack], ("ssp", jack[1]), jack=jack,
                           extra={"reach": reach[(dev, jack, lab)], "labels": [lab]}) for lab in labs]
     return out
+
+
+SRC_DEVICE = {"dualsense": "DualSense", "16n": "16n", "pedal": "MPC-20", "ec4": "EC4"}
+
+
+def patch_sources(ctx, pt: "Patch", others: bool = False) -> list:
+    """The controls a row stands for, each able to open itself in its tab (like ER-301 › Ports): '16n · fader 3',
+    every EC4 encoder that sends that CC (stale ones in other setups too) …"""
+    from . import er301 as ER
+    want = SRC_DEVICE.get(pt.device)
+    if pt.ref[0] in ("input", "chord"):
+        def go():
+            ctx.set_mode("dualsense")
+            if pt.ref[0] == "input":
+                ctx.select_ds(M.group_of(M.INPUT[pt.ref[1]]).id)
+            else:
+                ctx.tabs["dualsense"][2].set_tab("Combos")
+        return [ER.Source("DualSense", pt.label, None, go, "DualSense tab")]
+    refs = []
+    if pt.ref[0] == "midi":
+        _, d_, c, k, n = pt.ref
+        refs.append(("external", "note" if k == "note" else "cc", ctx.mapping.hub_ch(d_, c), str(n)))
+    elif pt.ref[0] == "er" and pt.extra.get("route"):
+        refs.append(pt.extra["route"])
+    elif pt.ref[0] == "ssp":
+        labels = set(pt.extra.get("labels") or [pt.label])
+        for (ch, kind, num), lst in S.senders(ctx).items():
+            if num is not None and num >= 0 and any(d == pt.device and lab in labels for d, lab in lst):
+                if pt.device == "dualsense":
+                    refs += [("dualsense", lab, iid, False) for d, lab in lst if d == "dualsense" and lab in labels
+                             for iid in [next((i.id for i in M.ALL_INPUTS if M.input_title(i) == lab), None)] if iid]
+                else:
+                    refs.append(("external", kind, ch, str(num)))
+    out, seen = [], set()
+    for r in refs:
+        for src in ER.describe(ctx, r):
+            if ((src.device != want) if others else (src.device == want)) and src.device != "MIDI" \
+                    and (src.device, src.detail) not in seen:
+                seen.add((src.device, src.detail))
+                out.append(src)
+    return out
+
+
+def _source_links(ctx, pt: "Patch") -> Optional[QWidget]:
+    """The row's controls as links (↗ opens the control in its tab), or None when there's nothing to open."""
+    from . import er301 as ER
+    srcs = [x for x in patch_sources(ctx, pt) if x.goto is not None]
+    if not srcs:
+        return None
+    box = QWidget()
+    v = QVBoxLayout(box)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(2)
+    for x in srcs[:6]:
+        v.addWidget(ER._Link(f"{x.device} · {x.detail}", x.goto, x.where))
+    if len(srcs) > 6:
+        v.addWidget(W.hint(f"+{len(srcs) - 6} more"))
+    return box
+
+
+def _is_trigger(ref) -> bool:
+    return (ref[0] == "dualsense" and ref[3]) or (ref[0] == "external" and ref[1] in ("trigger", "note")) \
+        or ref == ("builtin", "LFO")
+
+
+def checks(ctx) -> List[Tuple[str, str, Optional[object]]]:
+    """Things in the whole setup that are probably not meant like that: (level 'warn' | 'info', text, open it)."""
+    from . import er301 as ER
+    m = ctx.mapping
+    out: List[Tuple[str, str, Optional[object]]] = []
+    st = (getattr(ctx, "i2c2midi", None) or {}).get("state")
+    if st and st != "confirmed":
+        out.append(("warn", i2c2midi_state(ctx)[1], None))
+
+    def go_port(pid):
+        def go():
+            ctx.set_mode("er301")
+            ctx.select("er_port", pid, "Ports")
+        return go
+
+    known = {"16n": ctx.bank.loaded or getattr(ctx, "bank_cached", None) is not None,
+             "pedal": ctx.pedals.loaded or getattr(ctx, "pedals_cached", None) is not None,
+             "ec4": ctx.ec4.loaded}             # only what was read can be said to send nothing
+    for use, srcs in er_routes(ctx):
+        name = f"SC.{use.kind} {use.port}"
+        values = [r for r in use.refs if not _is_trigger(r)]
+        if len(use.refs) > 1 and values:
+            who = ", ".join(use.users[:3]) + ("…" if len(use.users) > 3 else "")
+            out.append(("warn", f"{name} gets values from {len(use.refs)} routes ({who}): the one sent last wins.",
+                        go_port(use.id)))
+        for r in use.refs:
+            if r[0] == "external" and all(known.values()):
+                found = [x for x in ER.describe(ctx, r) if x.device not in ("MIDI",)]
+                if not found:
+                    what = {"nrpn": "NRPN", "note": "note", "trigger": "CC"}.get(r[1], "CC")
+                    out.append(("info", f"{name}: no controller here sends ch {r[2]} {what} {r[3]} (an old route? "
+                                        "Teletype and NerdSEQ aren't checked).", go_port(use.id)))
+    for x in m.midi_inputs:
+        if not known.get(x.device, True):
+            continue
+        found = [s_ for s_ in ER.describe(ctx, ("external", "note" if x.kind == "note" else "cc",
+                                                 m.hub_ch(x.device, x.channel), str(x.number)))
+                 if s_.device == SRC_DEVICE.get(x.device)]
+        if not found:
+            out.append(("info", f"{M.PI_DEVICE_TITLE.get(x.device, x.device)} ch {x.channel} {x.kind.upper() if x.kind == 'cc' else x.kind} "
+                                 f"{x.number} → {func_title(x.function)}: no {M.PI_DEVICE_TITLE.get(x.device, x.device)} "
+                                 "control sends that.", lambda d=x.device: ctx.select("pi_sel", "src_" + d)))
+    for dev, attr, label in ((ctx.bank, "bank_cached", "16n"), (ctx.pedals, "pedals_cached", "MPC-20")):
+        when = getattr(ctx, attr, None)
+        if not dev.loaded and when is not None:
+            out.append(("info", f"The {label} settings shown were read {when.strftime('%-d %b %H:%M')}: open its tab to "
+                                "read it again.", None))
+        elif not dev.loaded and when is None and not getattr(ctx, "offline", None):
+            out.append(("info", f"The {label} hasn't been read on this computer yet: its controls are missing here "
+                                "until you open its tab.", None))
+    if getattr(ctx.ec4, "received_at", None) is not None:
+        age = (dt.datetime.now() - ctx.ec4.received_at).days
+        if age >= 14:
+            out.append(("info", f"The EC4 setups shown were received {age} days ago: receive them again if you changed "
+                                "the EC4 since.", None))
+    return out
+
+
+def checks_card(ctx) -> Optional[QWidget]:
+    from . import er301 as ER
+    found = checks(ctx)
+    if not found:
+        return None
+    warn = any(k == "warn" for k, _t, _g in found)
+    card = W.Card(f"Checks ({len(found)})", Theme.trig if warn else Theme.dim)
+    for kind, text, go in found[:12]:
+        mark = "⚠ " if kind == "warn" else "ⓘ "
+        if go is not None:
+            card.add(ER._Link(mark + text, go, "tab"))
+        else:
+            card.add(W.label(mark + text, 12, REGULAR, "ui", Theme.ink, wrap=True))
+    if len(found) > 12:
+        card.add(W.hint(f"+{len(found) - 12} more"))
+    return card
+
+
+def i2c2midi_state(ctx) -> Tuple[str, str]:
+    """(short, long) words for what the i2c2midi said about the routing (the hub's status on the Pi)."""
+    st = getattr(ctx, "i2c2midi", None) or {}
+    state = st.get("state")
+    if state == "confirmed":
+        return "✓ confirmed by the i2c2midi", "The i2c2midi confirmed this routing (it keeps it across power cycles)."
+    if state == "no answer":
+        return "⚠ i2c2midi not answering", ("The i2c2midi didn't answer (rack off, or the XIAO link is down). The Pi "
+                                            "keeps sending the routing until it does.")
+    if state in ("rejected", "mismatch", "invalid"):
+        return f"✕ i2c2midi: {state}", f"The i2c2midi has a problem with the routing: {st.get('message') or state}."
+    if state == "outdated":
+        return "↻ being sent again", "The i2c2midi had another routing (power cycle?): the Pi is sending it again."
+    if state == "waiting":
+        return "… waiting for the i2c2midi", "The routing was just sent; the i2c2midi hasn't answered yet."
+    return "kept in the i2c2midi", "Sent by the hub from er301_routes.py and kept in the i2c2midi."
 
 
 def tt_ssp_jacks(ctx) -> Dict[tuple, List[str]]:
@@ -483,8 +645,8 @@ def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
             conv = {"nrpn": "14-bit 0–16383 → 0–10 V", "trigger": "≥ 64 = gate high", "note": "note held = gate high"}.get(route[1], conv)
         elif route and route[0] == "dualsense":
             conv = "gate: pressed = high" if route[3] else ("14-bit 0–16383 → 0–10 V" if k == "nrpn" else conv)
-        hops.append(("i2c2midi ER-301 routes", f"ch {ch} {_kind_text(k)} {n} → {port} ({conv}). The routing table is "
-                                               "sent by the hub from config/er301_routes.py and kept in the i2c2midi."))
+        hops.append(("i2c2midi ER-301 routes", f"ch {ch} {_kind_text(k)} {n} → {port} ({conv}). "
+                                               + i2c2midi_state(ctx)[1]))
         hops.append(("I2C → ER-301", f"{port} is set over the i2c2midi's own I2C bus (Wire1), straight away."))
     elif mod == "ssp":
         hops.append(("→ XIAO-SSP", "unchanged → the SSP sees it from its MIDI device XIAO-SSP."))
@@ -1480,7 +1642,7 @@ class PiDrawing(Drawing):
             n = S["ports"]
             ext = sum(1 for pt in S["pts"] if pt.jack and pt.jack[0] == "er")
             path = self._card(p, S["er_card"], "ER-301 ROUTES", f"MIDI → SC.CV / SC.TR · {n} port{'s' if n != 1 else ''}",
-                              Theme.cv, n > 0, False, f"{ext} from the controllers · kept in the i2c2midi")
+                              Theme.cv, n > 0, False, f"{ext} from the controllers · {i2c2midi_state(self.ctx)[0]}")
             _jack(p, S["er_card_in"], Theme.cv, ext > 0)
             self.hits.add(path, lambda: self.ctx.set_mode("er301"), "The ER-301 routing (ER-301 tab)")
         if "ssp_r" in S:
@@ -1698,11 +1860,17 @@ class PiDrawing(Drawing):
     def _front_cables(self, p, S):
         pi, used = S["pi"], S["used"]
         mode = pi["mode"]
+        stroker = QPainterPathStroker()
+        stroker.setWidth(7.0)
         for a, b, col, hot, kind, pt in self._cable_ends(S):
             on = S["trace"] is not None and pt.key == S["trace"].key
             al, wf = self._style(S, on, hot, 0.38)
             path = self._lane_path(S, a, pt.device, b) if kind == "lane" else _curve(a, b)
             p.strokePath(path, D.pen(_op(col, al), 1.5 * wf))
+            if self._drag_g is None:            # (not while a box is dragged: nobody clicks then)
+                dev = DEV_TITLE.get(pt.device, pt.device)
+                self.hits.add(stroker.createStroke(path), lambda k=pt.key: self.ctx.select("pi_sel", "trace:" + k),
+                              f"{dev} · {pt.label} → {token(pt.func)}\nClick to follow it; its controls open from the panel.")
         if mode != "fold":
             ao = pi["A_out"]
             dim = _op(Theme.function, 0.55 if S["trace"] is None else 0.25)
@@ -1994,7 +2162,8 @@ def _patch_row(ctx, pt: Patch, show_func: bool) -> QWidget:
     text = f"{dev} · {pt.label}"
     if pt.ref[0] == "midi" and not pt.label.startswith("ch "):
         text += f"  ({raw_label(pt.ref[2], pt.ref[3], pt.ref[4])})"
-    lb = W.label(text, 12, REGULAR, "ui", Theme.ink, wrap=True)
+    links = _source_links(ctx, pt) if pt.device != "dualsense" or pt.ref[0] in ("er", "ssp") else None
+    lb = links if links is not None else W.label(text, 12, REGULAR, "ui", Theme.ink, wrap=True)
     parts = [lb]
     if show_func:
         parts.append(W.label(token(pt.func), 10, BOLD, "mono", patch_color(pt)))
@@ -2200,6 +2369,9 @@ PI_HUB_TEXT = [
 
 def pi_panel(ctx, col: QVBoxLayout):
     col.addWidget(W.title("Raspberry Pi"))
+    card = checks_card(ctx)
+    if card is not None:
+        col.addWidget(card)
     col.addWidget(W.hint("Two services run on the Pi. Kontrolleur writes their settings over SSH; both re-read "
                          "them while running, so nothing needs a restart."))
     tab = getattr(ctx, "tabs", {}).get("pi")
@@ -2248,6 +2420,40 @@ def trace_panel(ctx, key: str, col: QVBoxLayout):
     dev = DEV_TITLE.get(pt.device, pt.device)
     col.addWidget(W.hint(f"{dev} · {pt.label} → {token(pt.func)}. Lit up in the drawing; the rest steps back. "
                          "Click the row again or another one to follow something else."))
+    links = _source_links(ctx, pt)
+    if links is not None:
+        card = W.Card("Comes from", c)
+        card.add(links)
+        n_src = len([x for x in patch_sources(ctx, pt) if x.goto is not None])
+        if n_src > 1:
+            card.add(W.hint(f"{n_src} controls send this. On a CV port the value sent last wins: check for old "
+                            "mappings you don't use any more."))
+        col.addWidget(card)
+    also = [x for x in patch_sources(ctx, pt, others=True) if x.goto is not None] if pt.ref[0] in ("er", "midi") else []
+    if also:
+        from . import er301 as ER
+        card = W.Card("Also sent by", Theme.trig)
+        card.add(W.hint("Other controls send the same channel and number, so they drive this too. Intended, or an "
+                        "old mapping?"))
+        for x in also[:6]:
+            card.add(ER._Link(f"{x.device} · {x.detail}", x.goto, x.where))
+        col.addWidget(card)
+    if pt.ref[0] == "er":
+        from . import er301 as ER
+
+        def go_er(pid=pt.ref[1]):
+            ctx.set_mode("er301")
+            ctx.select("er_port", pid, "Ports")
+        card = W.Card("Goes to", c)
+        card.add(ER._Link(f"ER-301 {pt.ref[1].replace('CV', 'SC.CV ').replace('TR', 'SC.TR ')}", go_er, "ER-301 tab"))
+        col.addWidget(card)
+    elif pt.ref[0] == "ssp":
+        from . import er301 as ER
+        card = W.Card("Goes to", c)
+        for m_, i_ in (pt.extra.get("reach") or [])[:6]:
+            card.add(ER._Link(f"SSP {S.module_title(m_)} · {S.target_text(m_, i_)}",
+                              lambda: ctx.select("pi_sel", "mod_ssp"), "SSP panel"))
+        col.addWidget(card)
     card = W.Card("Hop by hop", c)
     for n, (where, text) in enumerate(trace_hops(ctx, pt), 1):
         head = W.label(f"{n}  {where.upper()}", 10, HEAVY, "mono", c)

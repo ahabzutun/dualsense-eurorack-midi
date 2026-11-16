@@ -314,6 +314,7 @@ class Mapping:
         self.nrpn_names: Dict[str, int] = {}
         self.long_press = 1.0
         self.controls_on_pi = True     # False: the SSH host has no controls support yet (routing only)
+        self.pi_features: List[str] = []   # what the Pi's er301_routes_tool understands (export "features")
         self.load_defaults()
 
     def load_defaults(self):
@@ -527,6 +528,9 @@ class Mapping:
                 return i
         return None
 
+    def _octave_input(self) -> Optional[InputDef]:
+        return self.input_with(OCTAVE)
+
     def first_free_port(self) -> int:
         used = {u.port for u in self.port_map()}
         for p in range(1, 100):
@@ -629,72 +633,11 @@ class Mapping:
         if e.get("long_press") is not None:
             self.long_press = float(e["long_press"])
         self.channel = e.get("channel") or 2
+        self.pi_features = list(e.get("features") or [])
         self.roles, self.ports, self.externals = {}, {}, []
         self.lfo_rate_src = self.lfo_reset_src = None
 
-        def resolve(c, kind):
-            if isinstance(c, int):
-                return c
-            return (self.nrpn_names if kind == "nrpn" else self.cc_names).get(c)
-
-        def text(c):
-            return str(c)
-
-        def claim(entry, kind, r) -> bool:
-            if entry["channel"] != self.channel:
-                return False
-            num = resolve(entry["control"], kind)
-            if num is None:
-                return False
-            for i in ALL_INPUTS:
-                if i.kind == kind and self.number(i) == num and self.role(i) == OFF and r in i.roles:
-                    self.roles[i.id] = r
-                    if role_uses_port(r):
-                        self.ports[i.id] = entry["port"]
-                    return True
-            return False
-
-        for x in e.get("cv") or []:
-            if not claim(x, "cc", CV):
-                self.externals.append(ExternalRoute(EXT_CV, x["channel"], text(x["control"]), x["port"]))
-        for x in e.get("nrpn_cv") or []:
-            if not claim(x, "nrpn", CV):
-                self.externals.append(ExternalRoute(EXT_NRPN, x["channel"], text(x["control"]), x["port"]))
-        for x in e.get("triggers") or []:
-            if not claim(x, "cc", TRIGGER):
-                self.externals.append(ExternalRoute(EXT_TRIGGER, x["channel"], text(x["control"]), x["port"]))
-        for x in e.get("note_triggers") or []:
-            self.externals.append(ExternalRoute(EXT_NOTE, x["channel"], text(x["control"]), x["port"]))
-        p = e.get("pitch")
-        if p:
-            self.pitch_enabled = True
-            self.pitch_port = p["port"]
-            self.zero_note = p.get("zero_note") if p.get("zero_note") is not None else 60
-            self.semis_per_step = p.get("semitones_per_step") if p.get("semitones_per_step") is not None else 12
-            if p.get("octave_control") is not None:
-                claim({"channel": self.channel, "control": p["octave_control"], "port": 0}, "cc", OCTAVE)
-        else:
-            self.pitch_enabled = False
-        lf = e.get("lfo")
-        if lf:
-            self.lfo_port = lf["port"]
-            self.lfo_min_hz = float(lf["min_hz"]) if lf.get("min_hz") is not None else 0.25
-            self.lfo_max_hz = float(lf["max_hz"]) if lf.get("max_hz") is not None else 40.0
-            self.lfo_pulse_ms = lf.get("pulse_ms") if lf.get("pulse_ms") is not None else 5
-            lch = lf.get("channel") or self.channel
-            for k, role, src_key, attr in (("rate_control", LFO_RATE, "source", "lfo_rate_src"),
-                                           ("reset_control", LFO_RESET, "reset_source", "lfo_reset_src")):
-                c = lf.get(k)
-                if c is None:
-                    continue
-                if lf.get(src_key) is None and lch == self.channel and \
-                        claim({"channel": self.channel, "control": c, "port": 0}, "cc", role):
-                    continue
-                num = resolve(c, "cc")
-                if num is not None:
-                    setattr(self, attr, _src_parse(lf.get(src_key), lch, num))
-        self.triggers_as_cv = e.get("triggers_as_cv", True) if e.get("triggers_as_cv") is not None else True
-
+        # button / axis functions first: a route only belongs to a DualSense control that sends MIDI
         c = e.get("controls")
         if c:
             self.controls_on_pi = True
@@ -721,6 +664,72 @@ class Mapping:
             self.midi_inputs = []
             self.funcs, self.chords = default_funcs(), default_chords()
             self.axes = dict(DEFAULT_AXES)
+
+
+        def resolve(c, kind):
+            if isinstance(c, int):
+                return c
+            return (self.nrpn_names if kind == "nrpn" else self.cc_names).get(c)
+
+        def text(c):
+            return str(c)
+
+        def claim(entry, kind, r) -> bool:
+            if entry["channel"] != self.channel:
+                return False
+            num = resolve(entry["control"], kind)
+            if num is None:
+                return False
+            for i in ALL_INPUTS:
+                if i.kind == kind and self.number(i) == num and self.role(i) == OFF and r in i.roles and self.sends_midi(i):
+                    self.roles[i.id] = r
+                    if role_uses_port(r):
+                        self.ports[i.id] = entry["port"]
+                    return True
+            return False
+
+        # pitch (octave control) and LFO first: one control each, so a CV / trigger route on the same CC
+        # stays a separate route instead of taking the control away from them
+        p = e.get("pitch")
+        if p:                          # a dict with enabled=False: off, settings kept
+            self.pitch_enabled = bool(p.get("enabled", True))
+            self.pitch_port = p["port"]
+            self.zero_note = p.get("zero_note") if p.get("zero_note") is not None else 60
+            self.semis_per_step = p.get("semitones_per_step") if p.get("semitones_per_step") is not None else 12
+            if p.get("octave_control") is not None:
+                claim({"channel": self.channel, "control": p["octave_control"], "port": 0}, "cc", OCTAVE)
+        else:
+            self.pitch_enabled = False
+        lf = e.get("lfo")
+        if lf:
+            self.lfo_port = lf["port"]
+            self.lfo_min_hz = float(lf["min_hz"]) if lf.get("min_hz") is not None else 0.25
+            self.lfo_max_hz = float(lf["max_hz"]) if lf.get("max_hz") is not None else 40.0
+            self.lfo_pulse_ms = lf.get("pulse_ms") if lf.get("pulse_ms") is not None else 5
+            lch = lf.get("channel") or self.channel
+            for k, role, src_key, attr in (("rate_control", LFO_RATE, "source", "lfo_rate_src"),
+                                           ("reset_control", LFO_RESET, "reset_source", "lfo_reset_src")):
+                c = lf.get(k)
+                if c is None:          # (an LFO that is off keeps its reset control and settings)
+                    continue
+                if lf.get(src_key) is None and lch == self.channel and \
+                        claim({"channel": self.channel, "control": c, "port": 0}, "cc", role):
+                    continue
+                num = resolve(c, "cc")
+                if num is not None:
+                    setattr(self, attr, _src_parse(lf.get(src_key), lch, num))
+        for x in e.get("cv") or []:
+            if not claim(x, "cc", CV):
+                self.externals.append(ExternalRoute(EXT_CV, x["channel"], text(x["control"]), x["port"]))
+        for x in e.get("nrpn_cv") or []:
+            if not claim(x, "nrpn", CV):
+                self.externals.append(ExternalRoute(EXT_NRPN, x["channel"], text(x["control"]), x["port"]))
+        for x in e.get("triggers") or []:
+            if not claim(x, "cc", TRIGGER):
+                self.externals.append(ExternalRoute(EXT_TRIGGER, x["channel"], text(x["control"]), x["port"]))
+        for x in e.get("note_triggers") or []:
+            self.externals.append(ExternalRoute(EXT_NOTE, x["channel"], text(x["control"]), x["port"]))
+        self.triggers_as_cv = e.get("triggers_as_cv", True) if e.get("triggers_as_cv") is not None else True
 
     # ── write er301_routes.py ──
     def _ctl(self, i: InputDef) -> str:
@@ -803,20 +812,23 @@ class Mapping:
         section("# Note held → trigger port. These notes do not change the pitch.", "NOTE_TRIGGERS", rows)
 
         s += "# Notes on CHANNEL → V/Oct. The octave control adds steps of semitones_per_step.\n"
-        if self.pitch_enabled:
-            oc = self.input_with(OCTAVE)
+        keep_off = "off_kept" in self.pi_features     # the Pi reads enabled=False: off settings survive a reload
+        if self.pitch_enabled or keep_off:
+            oc = self._octave_input()
             ocs = self._ctl(oc) if oc else "None"
-            s += f"PITCH = dict(port={self.pitch_port}, zero_note={self.zero_note}, octave_control={ocs}, semitones_per_step={self.semis_per_step})\n\n"
+            off = "" if self.pitch_enabled else ", enabled=False"
+            s += f"PITCH = dict(port={self.pitch_port}, zero_note={self.zero_note}, octave_control={ocs}, semitones_per_step={self.semis_per_step}{off})\n\n"
         else:
             s += "PITCH = None\n\n"
 
         s += "# Trigger LFO: rate control 0 = stopped, 1–127 = min_hz … max_hz (exponential).\n"
         rate = self.input_with(LFO_RATE)
-        if rate or self.lfo_rate_src:
+        if rate or self.lfo_rate_src or keep_off:
             reset = self.input_with(LFO_RESET)
             rs = str(self.lfo_reset_src[2]) if self.lfo_reset_src else (self._ctl(reset) if reset else "None")
-            rc = str(self.lfo_rate_src[2]) if self.lfo_rate_src else self._ctl(rate)
-            s += f"LFO = dict(port={self.lfo_port}, rate_control={rc}, reset_control={rs},\n"
+            rc = str(self.lfo_rate_src[2]) if self.lfo_rate_src else (self._ctl(rate) if rate else "None")
+            on = bool(rate or self.lfo_rate_src)
+            s += f"LFO = dict(port={self.lfo_port}, rate_control={rc}, reset_control={rs},{'' if on else ' enabled=False,'}\n"
             if self.lfo_rate_src or self.lfo_reset_src:
                 extra = [f"channel={self.lfo_channel}"]
                 if self.lfo_rate_src:

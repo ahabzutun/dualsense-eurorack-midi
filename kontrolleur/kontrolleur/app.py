@@ -35,6 +35,12 @@ class Status:
         self.kind, self.text, self.time = kind, text, dt.datetime.now()
 
 
+def _counts(st: dict) -> str:
+    """Route counts from an i2c2midi status (its reply, else what was sent)."""
+    c = st.get("reply") or st.get("expected") or {}
+    return f"{c.get('cv', 0)} CV, {c.get('nrpn', 0)} NRPN, {c.get('triggers', 0)} trigger, {c.get('note_triggers', 0)} note trigger"
+
+
 class Main(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -48,6 +54,11 @@ class Main(QMainWindow):
         self.busy = False
         self.status = Status("info", "Loading …")
         self.synced = self.synced_bank = self.synced_pedals = self.synced_ec4 = None
+        self.pi_sha: dict = {}          # fingerprints of er301_routes.py / controls.py as loaded (export "sha")
+        self.i2c2midi: Optional[dict] = None    # the i2c2midi's last answer to the routing (export "i2c2midi")
+        self._loading: set = set()      # device loads running (never two at once for the same device)
+        self._want_full: set = set()    # …and asked for by their tab while a background read ran
+        self.bank_cached = self.pedals_cached = None    # when the shown 16n / MPC-20 settings were read
         # selections
         self.ds_selected = os.environ.get("KONTROLLEUR_SELECT", "cross")
         self.fader_sel = 0
@@ -305,7 +316,11 @@ class Main(QMainWindow):
         self.st_time.setText(self.status.time.strftime("%H:%M"))
 
     def set_busy(self, b: bool):
-        self.busy = b
+        """Jobs can start the next one when they finish (device upload → routing, Upload anyway …): count them,
+        so the buttons stay off until the last one is done."""
+        self._busy_n = max(0, getattr(self, "_busy_n", 0) + (1 if b else -1))
+        self.busy = self._busy_n > 0
+        b = self.busy
         self._update_bar()
         if not b:
             self.set_status(self.status.kind, self.status.text)
@@ -359,7 +374,32 @@ class Main(QMainWindow):
             self.load_pedals()
 
     # ── startup ──
+    def _load_device_caches(self):
+        """The last 16n / MPC-20 settings read on this computer, so Routing and ER-301 show the right sources
+        right away. Marked as not loaded: uploading needs a fresh read."""
+        if self.offline:
+            return
+        for name, dev, attr in (("16n", self.bank, "bank_cached"), ("mpc20", self.pedals, "pedals_cached")):
+            if dev.loaded:
+                continue
+            c = store.load_device_cache(name)
+            if c is None:
+                continue
+            try:
+                dev.apply(c[0])
+            except Exception:
+                continue
+            dev.loaded = False
+            setattr(self, attr, c[1])
+
+    def _refresh_devices_quietly(self):
+        """In the overview tabs: read the 16n and the MPC-20 in the background (no status unless it works)."""
+        if self.offline:
+            return
+        self.load_16n(quiet=True, then=lambda: self.load_pedals(quiet=True))
+
     def _startup(self):
+        self._load_device_caches()
         if self.mode == "faderbank":
             self.load_16n(then=lambda: self.load_routing(quiet=True))
         elif self.mode == "pedals":
@@ -371,7 +411,7 @@ class Main(QMainWindow):
             if self.mode == "pi":
                 self.load_ec4_cache(quiet=True)
                 self.load_ssp()
-            self.load_routing()
+            self.load_routing(then=self._refresh_devices_quietly if self.mode in ("pi", "er301") else None)
         snap = os.environ.get("KONTROLLEUR_SNAPSHOT")
         if snap:
             QTimer.singleShot(int(float(os.environ.get("KONTROLLEUR_WAIT", "2")) * 1000), lambda: self._snapshot(snap))
@@ -416,11 +456,11 @@ class Main(QMainWindow):
             self.set_busy(True)
 
         def finish(r, e):
-            if busy:
-                self.busy = False
-            done(r, e)
-            if busy:
-                self.set_busy(False)
+            try:
+                done(r, e)              # may start the next job (busy again before this one counts down)
+            finally:
+                if busy:
+                    self.set_busy(False)
 
         clients.background(fn, finish)
 
@@ -430,6 +470,7 @@ class Main(QMainWindow):
     # ── DualSense routing (always on the SSH host) ──
     def load_routing(self, quiet: bool = False, then: Optional[Callable] = None):
         before = self.status
+        start = self.current_sources()          # to notice edits made while this loads
 
         def fn():
             if self.offline:
@@ -444,10 +485,21 @@ class Main(QMainWindow):
                     self.set_status("warn", before.text + " The SSH host isn't reachable, so routes to the ER-301 can't be loaded or uploaded right now.")
                 else:
                     self.set_status("error", f"Could not load from {self.host.host}: {err}")
+            elif self.synced is not None and self.current_sources() != start:
+                # changed here while loading (a slow network): keep the edits, and the old fingerprints, so an
+                # upload still notices if the Pi changed meanwhile
+                self.set_status("warn", "You changed the DualSense routing while it was loading: kept your changes. "
+                                        "Press Load to replace them with what's on the Pi.")
             else:
+                edited_first = self.synced is None and self.current_sources() != start
                 self.mapping.apply(e)
+                self.pi_sha = dict(e.get("sha") or {})
+                self.i2c2midi = e.get("i2c2midi")
                 self.synced = self.current_sources()
-                if quiet:
+                self._sync_shared_ec4()
+                if edited_first:
+                    self.set_status("warn", f"Loaded from {self.host.host}: what you changed before it arrived was replaced.")
+                elif quiet:
                     self.set_status(before.kind, before.text)
                 elif e.get("controls_error"):
                     self.set_status("warn", f"Loaded, but controls.py on the SSH host has a problem (defaults shown): {e['controls_error']}")
@@ -486,44 +538,87 @@ class Main(QMainWindow):
                         ext(e["channel"], e["number"], store.NotesStore.ec4(si, gi, ei))
         return r
 
-    def upload_routing(self, prefix: str = "", then: Optional[Callable] = None):
+    def upload_routing(self, prefix: str = "", then: Optional[Callable] = None, force: bool = False):
+        """er301_routes.py + controls.py to the Pi. Checked before (nobody changed them there since they were
+        loaded) and after (read back, and the i2c2midi's own answer)."""
         p = self.mapping.problems()
         if p:
             self.set_status("error", (prefix + " " if prefix else "") + p[0])
+            return
+        if self.synced is None and not self.offline:
+            self.set_status("error", (prefix + " " if prefix else "") + "Load the routing from the Pi first (↓ Load): "
+                                     "without it, the upload would replace what's there with defaults.")
             return
         source = self.mapping.python_source(self.route_notes())
         controls = self.mapping.controls_source()
         sent_all = self.current_sources()
         controls_on = self.mapping.controls_on_pi
         host = self.host
+        feats = self.mapping.pi_features
+        expect = {} if force or "expect" not in feats else dict(self.pi_sha)
 
         def fn():
             if self.offline:
-                return {"ok": True, "hub": "offline"}, {"ok": True, "hub": "offline"}
-            r = host.install(source)
+                return {"ok": True, "hub": "offline"}, {"ok": True, "hub": "offline"}, None, None
+            if expect:                          # both files unchanged on the Pi? (before writing either)
+                now = host.export().get("sha") or {}
+                for k, what in (("routes", "the ER-301 routing"), ("controls", "the button functions")):
+                    if expect.get(k) and now.get(k) and now[k] != expect[k] and (k == "routes" or controls_on):
+                        return {"ok": False, "conflict": what}, None, None, None
+            r = host.install(source, expect.get("routes"))
             if not r.get("ok"):
-                return r, None
-            c = host.install_controls(controls) if controls_on else None
-            return r, c
+                return r, None, None, None
+            c = host.install_controls(controls, expect.get("controls")) if controls_on else None
+            back = host.export()               # read back what the Pi has now
+            m = Mapping()
+            m.apply(back)
+            got = m.python_source() + "\n#----\n" + m.controls_source()
+            return r, c, back, got
 
         def done(res, err):
             pre = prefix + " " if prefix else ""
             if err is not None:
                 self.set_status("error", pre + f"Upload to {host.host} failed: {err}")
                 return
-            r, c = res
+            r, c, back, got = res
+            if r.get("conflict"):
+                return self._upload_conflict(r["conflict"] if isinstance(r["conflict"], str) else "the ER-301 routing",
+                                             prefix, then)
             if not r.get("ok"):
-                self.set_status("error", pre + f"The SSH host rejected the routing: {r.get('error') or 'unknown error'}")
+                self.set_status("error", pre + f"The Pi rejected the routing: {r.get('error') or 'unknown error'}")
                 return
+            if back is not None:
+                self.pi_sha = dict(back.get("sha") or {})
+                self.i2c2midi = r.get("i2c2midi") or back.get("i2c2midi")
             parts, kind = [], "ok"
-            if r.get("hub") is not None:
-                parts.append("Routing sent to the i2c2midi.")
+            st = r.get("i2c2midi")
+            if st:                              # the i2c2midi's own answer (hub with confirmation)
+                state = st.get("state")
+                if state == "confirmed":
+                    parts.append(f"The i2c2midi confirmed the routing ({_counts(st)}).")
+                elif state == "no answer":
+                    parts.append("Saved on the Pi, but the i2c2midi didn't answer (rack off?): the Pi keeps sending it "
+                                 "until it does.")
+                    kind = "warn"
+                elif state == "rejected":
+                    parts.append(f"The i2c2midi REJECTED the routing: {st.get('message') or ''}.")
+                    kind = "error"
+                elif state == "mismatch":
+                    parts.append(f"The i2c2midi took the routing but reports something else: {st.get('message') or ''}.")
+                    kind = "error"
+                else:
+                    parts.append(f"Routing saved; the i2c2midi: {state}.")
+                    kind = "warn"
+            elif r.get("hub") is not None:
+                parts.append("Routing sent to the i2c2midi (this Pi's hub doesn't confirm yet: restart it after updating).")
             else:
                 parts.append("Routing saved, but the hub did not confirm (is the XIAO-TT connected?).")
                 kind = "warn"
             if controls_on:
-                if not c.get("ok"):
-                    self.set_status("error", pre + " ".join(parts) + f" Button functions rejected: {c.get('error') or 'unknown error'}")
+                if c is not None and c.get("conflict"):
+                    return self._upload_conflict("the button functions", prefix, then)
+                if c is None or not c.get("ok"):
+                    self.set_status("error", pre + " ".join(parts) + f" Button functions rejected: {(c or {}).get('error') or 'unknown error'}")
                     return
                 line = c.get("hub")
                 if line and "NOT applied" in line:
@@ -537,21 +632,51 @@ class Main(QMainWindow):
             else:
                 parts.append("Button functions not uploaded (not installed on the SSH host yet).")
                 kind = "warn" if kind == "ok" else kind
+            if got is not None and got != sent_all:
+                parts.append("⚠ Reading it back from the Pi gave something else than was sent: press Load and check.")
+                kind = "error"
             self.synced = sent_all
             self.set_status(kind, pre + " ".join(parts))
             self._update_dirty()
+            self.refresh_all()
             if then:
                 then()
 
         self.run(fn, done)
 
+    def _upload_conflict(self, what: str, prefix: str, then: Optional[Callable]):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Changed on the Pi")
+        box.setText(f"{what[0].upper() + what[1:]} on the Pi changed since you loaded it.")
+        box.setInformativeText("Someone changed it there: by hand, or Kontrolleur on another computer. Nothing was "
+                               "uploaded.\n\nLoad shows what's on the Pi now (your changes here are replaced). "
+                               "Upload anyway replaces it with yours.")
+        load = box.addButton("Load", QMessageBox.AcceptRole)
+        force = box.addButton("Upload anyway", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() is load:
+            self.synced = None                  # a fresh load, not "kept your changes"
+            self.load_routing()
+        elif box.clickedButton() is force:
+            self.upload_routing(prefix, then, force=True)
+        else:
+            self.set_status("warn", f"Not uploaded: {what} on the Pi changed since it was loaded.")
+
     def routing_dirty(self) -> bool:
         return self.synced is not None and self.synced != self.current_sources()
 
     # ── 16n ──
-    def load_16n(self, then: Optional[Callable] = None):
+    def load_16n(self, then: Optional[Callable] = None, quiet: bool = False):
         on = self.on_ssh("faderbank")
         via = self.route("faderbank")
+        if "16n" in self._loading:          # already reading it (in the background): that read counts
+            if not quiet:
+                self._want_full.add("16n")
+            return then() if then else None
+        self._loading.add("16n")
+        start = self.bank.json
 
         def fn():
             if self.offline:
@@ -559,12 +684,32 @@ class Main(QMainWindow):
             return self.host.tool(on, "fader16_tool.py", "export")
 
         def done(d, err):
-            if err is not None:
-                self.set_status("error", f"Could not read the 16n via {via}: {err}")
-            elif not d.get("ok"):
-                self.set_status("error", f"16n via {via}: {d.get('error') or 'no answer'}")
+            self._loading.discard("16n")
+            nonlocal quiet
+            if "16n" in self._want_full:     # the tab asked for it meanwhile: a full load after all
+                self._want_full.discard("16n")
+                quiet = False
+            if err is not None or not d.get("ok"):
+                if not quiet:
+                    self.set_status("error", f"Could not read the 16n via {via}: {err}" if err is not None else
+                                    f"16n via {via}: {d.get('error') or 'no answer'}")
+            elif quiet and (self.bank.loaded or self.bank.json != start):
+                pass                            # loaded or being edited meanwhile: leave it alone
+            elif self.bank.json != start:
+                self.set_status("warn", "You changed the 16n while it was loading: kept your changes. Press Load to "
+                                        "replace them with what's on the 16n.")
             else:
                 self.bank.apply(d)
+                if quiet:                       # in the background: shown in Routing / ER-301, not "loaded"
+                    self.bank.loaded = False
+                    self.bank_cached = dt.datetime.now()
+                    store.save_device_cache("16n", d)
+                    self.refresh_all()
+                    if then:
+                        then()
+                    return
+                self.bank_cached = None
+                store.save_device_cache("16n", d)
                 self.synced_bank = self.bank.json
                 fw = f"{self.bank.device}, {self.bank.firmware_text}" + ("" if self.bank.curves_supported else " (no curves)")
                 note = "" if self.bank.ranges_supported else " Its firmware has no fader ranges yet (flash the 16n fork)."
@@ -573,7 +718,7 @@ class Main(QMainWindow):
             if then:
                 then()
 
-        self.run(fn, done)
+        self.run(fn, done, busy=not quiet)
 
     def upload_16n(self):
         p = self.bank.problems()
@@ -595,6 +740,10 @@ class Main(QMainWindow):
                 why = r.get("error") or ("read-back differs: " + ", ".join(r.get("mismatch") or []))
                 return self.set_status("error", f"16n not written correctly: {why}")
             self.synced_bank = js
+            store.save_device_cache("16n", dict(json.loads(js), ok=True, device=self.bank.device, firmware=self.bank.firmware,
+                                                curves_supported=self.bank.curves_supported,
+                                                ranges_supported=self.bank.ranges_supported,
+                                                hires_supported=self.bank.hires_supported, port=self.bank.port))
             text = "16n written and verified."
             if r.get("skipped"):
                 text += f" Not supported by its firmware: {', '.join(r['skipped'])}."
@@ -611,8 +760,14 @@ class Main(QMainWindow):
             self._update_dirty()
 
     # ── MPC-20 ──
-    def load_pedals(self, then: Optional[Callable] = None):
+    def load_pedals(self, then: Optional[Callable] = None, quiet: bool = False):
         on, via = self.on_ssh("pedals"), self.route("pedals")
+        if "mpc20" in self._loading:          # already reading it (in the background): that read counts
+            if not quiet:
+                self._want_full.add("mpc20")
+            return then() if then else None
+        self._loading.add("mpc20")
+        start = self.pedals.json
 
         def fn():
             if self.offline:
@@ -620,12 +775,32 @@ class Main(QMainWindow):
             return self.host.tool(on, "mpc20_tool.py", "export")
 
         def done(d, err):
-            if err is not None:
-                self.set_status("error", f"Could not read the MPC-20 via {via}: {err}")
-            elif not d.get("ok"):
-                self.set_status("error", f"MPC-20 via {via}: {d.get('error') or 'no answer'}")
+            self._loading.discard("mpc20")
+            nonlocal quiet
+            if "mpc20" in self._want_full:     # the tab asked for it meanwhile: a full load after all
+                self._want_full.discard("mpc20")
+                quiet = False
+            if err is not None or not d.get("ok"):
+                if not quiet:
+                    self.set_status("error", f"Could not read the MPC-20 via {via}: {err}" if err is not None else
+                                    f"MPC-20 via {via}: {d.get('error') or 'no answer'}")
+            elif quiet and (self.pedals.loaded or self.pedals.json != start):
+                pass
+            elif self.pedals.json != start:
+                self.set_status("warn", "You changed the pedals while they were loading: kept your changes. Press Load "
+                                        "to replace them with what's on the MPC-20.")
             else:
                 self.pedals.apply(d)
+                if quiet:
+                    self.pedals.loaded = False
+                    self.pedals_cached = dt.datetime.now()
+                    store.save_device_cache("mpc20", d)
+                    self.refresh_all()
+                    if then:
+                        then()
+                    return
+                self.pedals_cached = None
+                store.save_device_cache("mpc20", d)
                 self.synced_pedals = self.pedals.json
                 used = sum(1 for i in self.pedals.inputs[:4] if i["type_id"] != 0)
                 self.set_status("ok", f"Loaded the {self.pedals.device} (firmware {self.pedals.firmware}) via {via}: {used} of 4 jacks in use.")
@@ -633,7 +808,7 @@ class Main(QMainWindow):
             if then:
                 then()
 
-        self.run(fn, done)
+        self.run(fn, done, busy=not quiet)
 
     def upload_pedals(self):
         p = self.pedals.problems()
@@ -657,6 +832,8 @@ class Main(QMainWindow):
             if r.get("inputs"):
                 self.pedals.apply_inputs(r["inputs"])
             self.synced_pedals = self.pedals.json
+            store.save_device_cache("mpc20", {"ok": True, "inputs": self.pedals.inputs, "device": self.pedals.device,
+                                              "firmware": self.pedals.firmware, "port": self.pedals.port})
             n = r.get("written") or 0
             text = f"MPC-20 written and verified ({n} message{'' if n == 1 else 's'} changed)."
             if r.get("skipped"):
@@ -686,6 +863,49 @@ class Main(QMainWindow):
             self.set_status("info", "Press “Receive”, then on the EC4: Func → Setup → Send → “Send all setups” (hold the knob).")
         self.refresh_all()
 
+    def _share_ec4(self):
+        """Keep the EC4 setups on the Pi too, so the other computer shows the same ones (in the background)."""
+        if self.offline or "shared" not in self.mapping.pi_features or not self.ec4.loaded:
+            return
+        data = {"ok": True, "version": self.ec4.version, "mem": self.ec4.mem, "setups": self.ec4.setups,
+                "received_at": (self.ec4.received_at or dt.datetime.now()).timestamp()}
+        host = self.host
+        self.run(lambda: host.shared_put("ec4", data), lambda r, e: None, busy=False)
+
+    def _sync_shared_ec4(self):
+        """The EC4 setups kept on the Pi, when they are newer than the ones on this computer."""
+        if self.offline or "shared" not in self.mapping.pi_features:
+            return
+        host = self.host
+
+        def done(r, err):
+            if err is not None or not (r or {}).get("ok") or not r.get("data"):
+                if err is None and (r or {}).get("ok") and not r.get("data"):
+                    self._share_ec4()           # nothing there yet: put ours
+                return
+            d = r["data"]
+            when = dt.datetime.fromtimestamp(float(d.get("received_at") or r.get("time") or 0))
+            mine = self.ec4.received_at
+            if mine is not None and mine >= when - dt.timedelta(seconds=1):
+                if mine > when + dt.timedelta(seconds=1):
+                    self._share_ec4()           # ours is newer: update the Pi's copy
+                return
+            if self.ec4.loaded and self.synced_ec4 is not None and self.synced_ec4 != self.ec4.fingerprint:
+                return                          # being edited here: leave it alone
+            try:
+                self.ec4.apply(d)
+            except Exception:
+                return
+            self.ec4.received_at = when
+            store.save_ec4_cache(self.ec4)
+            self.synced_ec4 = self.ec4.fingerprint
+            self.refresh_all()
+            if self.mode in ("ec4", "pi", "er301"):
+                self.set_status("info", f"Showing the EC4 setups received {when.strftime('%-d %b at %H:%M')} on another "
+                                        "computer (kept on the Pi).")
+
+        self.run(lambda: host.shared_get("ec4"), done, busy=False)
+
     def receive_ec4(self):
         on, via = self.on_ssh("ec4"), self.route("ec4")
         self.set_status("info", f"Waiting for the EC4 (via {via}): on the device press Func → Setup → Send → “Send all setups” and hold the knob …")
@@ -704,6 +924,7 @@ class Main(QMainWindow):
             self.ec4.received_at = dt.datetime.now()
             store.save_ec4_cache(self.ec4)
             self.synced_ec4 = self.ec4.fingerprint
+            self._share_ec4()
             used = sum(1 for s in self.ec4.setups if not s["name"].startswith("SE") and not s["name"].startswith("--"))
             self.set_status("ok", f"Received all 16 setups from the EC4 via {via} ({used} named). Kept on this computer as a backup.")
             self.refresh_all()
@@ -741,6 +962,8 @@ class Main(QMainWindow):
                 return self.set_status("error", f"EC4 not written: {r.get('error') or 'unknown error'}")
             store.save_ec4_cache(self.ec4)
             self.synced_ec4 = self.ec4.fingerprint
+            self.ec4.received_at = dt.datetime.now()
+            self._share_ec4()
             self._then_routes(f"Sent all setups to the EC4 ({r.get('changed_bytes') or 0} bytes changed). Check its display for “done”.")
 
         self.run(fn, done)

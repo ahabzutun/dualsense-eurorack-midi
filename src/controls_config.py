@@ -8,7 +8,11 @@ import importlib.util
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONTROLS_PATH = os.path.join(HERE, "config", "controls.py")
+try:                         # the live file is in ~/.config/dualsense-eurorack-midi (see live_config.py)
+    import live_config
+    CONTROLS_PATH = live_config.path("controls.py")
+except Exception:            # noqa: BLE001
+    CONTROLS_PATH = os.path.join(HERE, "config", "controls.py")
 
 # Button name -> CC_MAP key used when the button is set to 'midi' (and its fallback CC number)
 BUTTON_CC = {
@@ -150,7 +154,8 @@ def load(path=CONTROLS_PATH):
     try:
         spec = importlib.util.spec_from_file_location("controls_live", path)
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        with open(path, encoding="utf-8") as f:      # from its text: never a stale copy from __pycache__
+            exec(compile(f.read(), path, "exec"), mod.__dict__)
     except Exception as e:
         raise ControlsError(f"{os.path.basename(path)}: {type(e).__name__}: {e}")
 

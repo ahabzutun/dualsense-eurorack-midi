@@ -11,7 +11,11 @@ import os
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROUTES_PATH = os.path.join(HERE, "config", "er301_routes.py")
+try:                         # the live file is in ~/.config/dualsense-eurorack-midi (see live_config.py)
+    import live_config
+    ROUTES_PATH = live_config.path("er301_routes.py")
+except Exception:            # noqa: BLE001 — never fail to start over this
+    ROUTES_PATH = os.path.join(HERE, "config", "er301_routes.py")
 MAPPINGS_PATH = os.path.join(HERE, "config", "mappings.py")
 
 HDR = [0xF0, 0x7D, 0x45, 0x33]
@@ -25,9 +29,12 @@ class ConfigError(Exception):
 
 
 def _load(path, name):
+    """Run a config file as a module. From its text, not through the import system: that would reuse a
+    compiled copy in __pycache__ when a new file has the same size and modification second as the old one."""
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    with open(path, encoding="utf-8") as f:
+        exec(compile(f.read(), path, "exec"), mod.__dict__)
     return mod
 
 
@@ -98,7 +105,10 @@ def build(routes_path=ROUTES_PATH, mappings_path=MAPPINGS_PATH):
     for c, n, p in notes:
         records.append([0x13, c, n, p])
 
+    # PITCH / LFO: None, or a dict; a dict with enabled=False is off but keeps its settings (Kontrolleur)
     pitch = getattr(cfg, "PITCH", None)
+    if pitch and not pitch.get("enabled", True):
+        pitch = None
     if pitch:
         port = pitch.get("port")
         _check(isinstance(port, int) and 1 <= port <= 100, f"PITCH port {port!r} must be 1–100")
@@ -114,6 +124,8 @@ def build(routes_path=ROUTES_PATH, mappings_path=MAPPINGS_PATH):
         records.append([0x20, 0, 0, 0, 0, 0])
 
     lfo = getattr(cfg, "LFO", None)
+    if lfo and not lfo.get("enabled", True):
+        lfo = None
     if lfo:
         port = lfo.get("port")
         _check(isinstance(port, int) and 1 <= port <= 100, f"LFO port {port!r} must be 1–100")
@@ -153,6 +165,18 @@ def send(midiout, msgs, gap=0.003):
     for m in msgs:
         midiout.send_message(m)
         time.sleep(gap)
+
+
+RECORD_KIND = {0x10: "cv", 0x11: "nrpn", 0x12: "triggers", 0x13: "note_triggers"}
+
+
+def counts(msgs) -> dict:
+    """Route counts in a built routing, as the i2c2midi reports them back."""
+    out = {k: 0 for k in RECORD_KIND.values()}
+    for m in msgs:
+        if len(m) > 5 and list(m[:4]) == HDR and m[4] in RECORD_KIND:
+            out[RECORD_KIND[m[4]]] += 1
+    return out
 
 
 def parse_reply(msg):

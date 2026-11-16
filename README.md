@@ -78,9 +78,10 @@ out while they run. Their settings files are re-read while running, so a change 
 | `src/dualsense_midi.py` | the DualSense script (main loop, evdev reading, MIDI out) |
 | `src/midi/` | `button_router.py` (tap / hold / chords → actions), `axis_router.py` (axes → functions or own CC), `device_inputs.py` (16n / EC4 / pedals → the same functions), `controller.py` (MIDI, grain slice, LEDs), `dualsense_hid.py` (light bar, dots, rumble over hidraw), `harmonic_strummer.py` |
 | `src/state/` | `channel_manager.py` (instruments 1–3, freeze), `loop.py` (loop recorder), `freeze.py`, `clock_source.py` (tempo for the loop recorder: a NerdSEQ's MIDI clock if one is plugged in, else 120 BPM) |
-| `src/controls_config.py` | reads and checks `config/controls.py` |
-| `src/config/controls.py` | what each DualSense button / axis does, and which 16n / pedal / EC4 messages run Pi functions — written by Kontrolleur |
-| `src/config/er301_routes.py` | which MIDI goes to which ER-301 port, pitch and LFO settings — written by Kontrolleur |
+| `src/controls_config.py` | reads and checks `controls.py` |
+| `~/.config/dualsense-eurorack-midi/controls.py` (on the Pi) | what each DualSense button / axis does, and which 16n / pedal / EC4 messages run Pi functions — written by Kontrolleur |
+| `~/.config/dualsense-eurorack-midi/er301_routes.py` (on the Pi) | which MIDI goes to which ER-301 port, pitch and LFO settings — written by Kontrolleur |
+| `src/config/controls.py`, `src/config/er301_routes.py` | the defaults of a fresh install; moved to `~/.config/…` the first time (`src/live_config.py`), so `git pull` never touches your mappings |
 | `src/config/mappings.py` | CC / NRPN numbers of the DualSense controls, instrument channels, timing constants |
 | `src/midi_passthrough.py` | the MIDI hub |
 | `src/er301_config.py` | turns `er301_routes.py` into the SysEx the i2c2midi stores |
@@ -150,7 +151,7 @@ it runs. On the way:
 | Nothing goes back to where it came from (XIAO-TT input ↛ XIAO-TT, NerdSEQ ↛ NerdSEQ) | no loops through the i2c2midi's MIDI-in store |
 | Pedal messages on ch 1 move to the DualSense's channel (`/tmp/dualsense_channel`) | the pedals play the current instrument |
 | CC / pressure / pitch bend to the XIAO-TT are thinned to the latest value per controller every 10 ms; ch 2 and notes go straight through | keeps the XIAO serial link and the i2c2midi clear; ch 2 is the timing-critical DualSense instrument |
-| `er301_routes.py` is sent to the i2c2midi as SysEx whenever the XIAO-TT connects or the file changes | the i2c2midi keeps the routing (EEPROM) |
+| `er301_routes.py` is sent to the i2c2midi as SysEx whenever the XIAO-TT connects or the file changes; the hub waits for the i2c2midi's answer (accepted + route counts), sends it again until one comes (rack off), and checks every minute that it's still the one sent | the i2c2midi keeps the routing (EEPROM); its last answer is in `~/.config/dualsense-eurorack-midi/i2c2midi_status.json` and shown in Kontrolleur |
 | 16n → SSP: values can be scaled down (`SSP_CC_MAX`) | at 127 (now) nothing changes |
 | iii grid → NerdSEQ: no ch 1, no notes | a separate grid bridge handles those |
 | Every message also goes to `osc_out.py` → OpenMW (`osc_map.conf`, hot-reloaded) | adds no MIDI port |
@@ -161,7 +162,7 @@ XIAO-TT and reaches the SSP and the NerdSEQ.
 ## ER-301 routing through the i2c2midi
 
 The ER-301 isn't driven by Teletype scripts for this: the i2c2midi runs a firmware with *ER-301 direct*, which
-turns incoming USB MIDI into SC.CV / SC.TR values on its own I2C bus. `src/config/er301_routes.py` says what goes
+turns incoming USB MIDI into SC.CV / SC.TR values on its own I2C bus. `er301_routes.py` says what goes
 where:
 
 | List | Meaning |
@@ -197,7 +198,7 @@ locally when the device is on a cable to the computer, and `ssp_tool.py` on the 
 
 | Script | Device | Does |
 |---|---|---|
-| `er301_routes_tool.py` | Pi | exports / writes `controls.py` and `er301_routes.py`, checks them |
+| `er301_routes_tool.py` | Pi | exports / writes `controls.py` and `er301_routes.py`, checks them; refuses to overwrite a file that changed since it was loaded (`--expect`); keeps the last EC4 dump for every computer (`shared-get` / `shared-put`) |
 | `er301_push.py` | i2c2midi | sends the ER-301 routing as SysEx, shows the i2c2midi's answer |
 | `fader16_tool.py` | 16n | reads / writes channels, CCs, 14-bit mode, curves and output ranges (SysEx) |
 | `mpc20_tool.py` | MPC-20 | reads / writes the pedal messages (pyusb, needs `udev/99-doremidi.rules`) |

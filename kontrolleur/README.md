@@ -13,6 +13,14 @@ Raspberry Pi OS) and **macOS**; Python + Qt (PySide6).
 | ER-301 | i2c2midi → ER-301 | port overview (each source links to its control), MIDI routes, pitch & LFO |
 | Teletype | the scene's scripts: what each line sends through the i2c2midi (USB channel, CC / note) and which SSP input it reaches, ER-301 ports it writes directly, mistakes (TRS channels, `I2M.CH` only in Init, unknown ops); edit scripts; **Live** shows what really arrives from the i2c2midi at the Pi | scenes by USB stick: the Teletype's WRITE TO USB → `↓ From stick` reads `tt00s.txt …`; `↑ To stick` writes `tt##.txt` for READ FROM USB. Live: `scripts/midi_monitor.py` piped over SSH to the Pi |
 
+**Keeping things in sync.** Upload only after a Load in the same session; it refuses when the files on the Pi changed
+since (another computer, or by hand) and asks whether to load them or upload anyway. After writing it reads
+everything back and reports what the i2c2midi answered (confirmed / not answering: rack off / rejected). An edit made
+while a load is still running is kept. The last 16n and MPC-20 settings are kept on this computer and refreshed in the
+background, the last EC4 setups on the Pi too, so the Routing and ER-301 tabs show the right sources from the start.
+Routing › Raspberry Pi lists **Checks**: ports several routes write to, routes nothing sends, patched messages no
+control sends, old device data. Every connection in Routing links to its control (↗), and a cable can be clicked.
+
 Also: notes per control (also written into `er301_routes.py` comments), saved configurations
 (`~/Documents/Kontrolleur/*.dsmconfig`), adjustable colours / fonts / text size, zoomable drawings
 (pinch, scroll wheel, Ctrl +/−/0, drag).

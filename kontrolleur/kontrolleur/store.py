@@ -98,7 +98,8 @@ def ec4_cache_path() -> Path:
 
 
 def save_ec4_cache(board):
-    d = {"ok": True, "version": board.version, "mem": board.mem, "setups": board.setups}
+    d = {"ok": True, "version": board.version, "mem": board.mem, "setups": board.setups,
+         "received_at": board.received_at.timestamp() if board.received_at else None}
     try:
         _write_atomic(ec4_cache_path(), json.dumps(d))
     except Exception:
@@ -108,11 +109,35 @@ def save_ec4_cache(board):
 def load_ec4_cache(board) -> bool:
     p = ec4_cache_path()
     try:
-        board.apply(json.loads(p.read_text(encoding="utf-8")))
-        board.received_at = dt.datetime.fromtimestamp(p.stat().st_mtime)
+        d = json.loads(p.read_text(encoding="utf-8"))
+        board.apply(d)
+        board.received_at = dt.datetime.fromtimestamp(d.get("received_at") or p.stat().st_mtime)
     except Exception:
         return False
     return board.loaded
+
+
+# ── last 16n / MPC-20 settings read from the devices: the Routing and ER-301 tabs show the right sources
+#    before those tabs were opened (uploading still needs a fresh load) ──
+
+def device_cache_path(name: str) -> Path:
+    return data_dir() / f"{name}-last.json"
+
+
+def save_device_cache(name: str, data: dict):
+    try:
+        _write_atomic(device_cache_path(name), json.dumps(data))
+    except Exception:
+        pass
+
+
+def load_device_cache(name: str) -> Optional[tuple]:
+    """(data, when) or None."""
+    p = device_cache_path(name)
+    try:
+        return json.loads(p.read_text(encoding="utf-8")), dt.datetime.fromtimestamp(p.stat().st_mtime)
+    except Exception:
+        return None
 
 
 # ── configurations (.dsmconfig — the same JSON as the Mac app) ──────────────────────────────────

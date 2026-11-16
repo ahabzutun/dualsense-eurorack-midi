@@ -83,6 +83,16 @@ class MIDIHub:
         # whenever the XIAO-TT output (re)connects or the file changes.
         self._er301_mtime = None
         self._er301_push_pending = False
+        # …and confirmed: the i2c2midi answers every routing with accepted / rejected and its route counts
+        # (SysEx on the XIAO-TT input). Without an answer (rack off) it is sent again until one comes;
+        # once confirmed, a query every ER301_CHECK_EVERY s notices a rack that was off in between.
+        # The state goes to live_config.STATUS for the routes tool / Kontrolleur.
+        self.ER301_ANSWER_WITHIN = 3.0
+        self.ER301_RETRY = (5, 10, 20, 40, 60)       # seconds between tries while nothing answers
+        self.ER301_CHECK_EVERY = 60.0
+        self._er301 = {"state": "unknown", "expected": None, "summary": "", "sent_at": 0.0, "kind": None,
+                       "tries": 0, "next": 0.0, "file_mtime": None, "reply": None, "checked": 0.0}
+        self._er301_reply = None                       # (time, dict) — set by the XIAO-TT callback
         # ─────────────────────────────────────────────────────────────────────
 
         # Create scanners ONCE and reuse them (never re-create these)
@@ -243,6 +253,8 @@ class MIDIHub:
 
                     try:
                         midiin.open_port(port_num)
+                        if "XIAO" in port_name and "XIAO-SSP" not in port_name:
+                            midiin.ignore_types(sysex=False, timing=True, active_sense=True)   # i2c2midi answers
                         midiin.set_callback(self.make_callback(port_name))
                         self.inputs[port_name] = midiin
                         print(f"✅ Input connected: {port_name}")
@@ -364,7 +376,13 @@ class MIDIHub:
 
         def callback(message, data):
             try:
-                midi_message, deltatime = message            
+                midi_message, deltatime = message
+                if midi_message and midi_message[0] == 0xF0:      # SysEx (only the XIAO-TT lets it through)
+                    if is_teletype_source and er301_config is not None:
+                        r = er301_config.parse_reply(midi_message)
+                        if r is not None:
+                            self._er301_reply = (time.time(), r)
+                    return                                         # never forwarded (as before)            
                 if osc_out is not None:        # fire OpenMW OSC for every message
                     try:
                         osc_out.handle(midi_message)
@@ -464,38 +482,108 @@ class MIDIHub:
         except Exception:
             pass  # file not written yet, keep current cache
 
+    def _er301_status(self, state, message=""):
+        st = self._er301
+        changed = state != st["state"]
+        st["state"] = state
+        try:
+            import live_config
+            live_config.write_json(live_config.STATUS, {
+                "state": state, "message": message, "file_mtime": st["file_mtime"], "expected": st["expected"],
+                "summary": st["summary"], "reply": st["reply"], "sent_at": st["sent_at"], "time": time.time()})
+        except Exception:
+            pass
+        return changed
+
+    def _er301_send(self, msgs) -> bool:
+        for msg in msgs:
+            with self.lock:
+                out = self.outputs.get('Teletype')
+                if out is None:
+                    return False
+                try:
+                    out.send_message(msg)
+                except Exception as e:
+                    print(f"⚠️  ER-301 routing send failed: {e}")
+                    return False
+            time.sleep(0.003)
+        return True
+
     def _er301_tick(self):
-        """Send the ER-301 routing to the i2c2midi on connect or when er301_routes.py changes."""
+        """Send the ER-301 routing to the i2c2midi on connect or when er301_routes.py changes, and make sure
+        it arrived (see ER301_* above)."""
         if er301_config is None:
             return
+        st, now = self._er301, time.time()
         m = er301_config.mtime()
         if m != self._er301_mtime:
             if self._er301_mtime is not None:
                 print("📝 er301_routes.py changed")
             self._er301_mtime = m
             self._er301_push_pending = True
-        if not self._er301_push_pending or 'Teletype' not in self.outputs:
+            st["tries"] = 0
+        connected = 'Teletype' in self.outputs
+
+        # an answer to what was sent last?
+        rep = self._er301_reply
+        if st["state"] == "waiting" and rep is not None and rep[0] >= st["sent_at"]:
+            t, r = rep
+            self._er301_reply = None
+            st["reply"] = r
+            got = {k: r[k] for k in ("cv", "nrpn", "triggers", "note_triggers")}
+            if st["kind"] == "push" and r["kind"] == "commit":
+                if r["status"] != 0:
+                    self._er301_status("rejected", r["status_text"])
+                    print(f"❌ i2c2midi rejected the ER-301 routing: {r['status_text']}")
+                elif got != st["expected"]:
+                    self._er301_status("mismatch", f"i2c2midi has {got}, sent {st['expected']}")
+                    print(f"⚠️  i2c2midi took the routing but reports {got}, sent {st['expected']}")
+                else:
+                    if self._er301_status("confirmed"):
+                        print(f"✅ i2c2midi confirmed the ER-301 routing ({r['source']}): {st['summary']}")
+                st["tries"], st["checked"] = 0, now
+            elif st["kind"] == "query" and r["kind"] == "query":
+                st["checked"] = now
+                if got != st["expected"] or r["source"] == er301_config.SOURCE[0]:
+                    print(f"🔁 i2c2midi has another routing ({r['source']}, {got}): sending it again")
+                    self._er301_status("outdated", f"i2c2midi had {r['source']}, {got}")
+                    self._er301_push_pending = True
+                else:
+                    self._er301_status("confirmed")
+        elif st["state"] == "waiting" and now - st["sent_at"] > self.ER301_ANSWER_WITHIN:
+            st["tries"] += 1
+            st["next"] = now + self.ER301_RETRY[min(st["tries"] - 1, len(self.ER301_RETRY) - 1)]
+            if self._er301_status("no answer", "rack off, or the XIAO link to the i2c2midi is down"):
+                print("⚠️  No answer from the i2c2midi (rack off?): the ER-301 routing will be sent again")
+
+        if not connected:
+            return
+        due = self._er301_push_pending or (st["state"] == "no answer" and now >= st["next"])
+        if not due and st["state"] == "confirmed" and now - st["checked"] > self.ER301_CHECK_EVERY:
+            st["checked"] = now                        # health check: is it still the one we sent?
+            st["kind"], st["sent_at"] = "query", now
+            if self._er301_send([er301_config.query_message()]):
+                self._er301_status("waiting")
+            return
+        if not due or st["state"] == "waiting":
             return
         self._er301_push_pending = False
         try:
             msgs, summary = er301_config.build()
         except er301_config.ConfigError as e:
+            st["file_mtime"] = m
+            self._er301_status("invalid", str(e))
             print(f"⚠️  ER-301 routing NOT sent, er301_routes.py: {e}")
             return
-        for msg in msgs:
-            with self.lock:
-                out = self.outputs.get('Teletype')
-                if out is None:
-                    self._er301_push_pending = True
-                    return
-                try:
-                    out.send_message(msg)
-                except Exception as e:
-                    print(f"⚠️  ER-301 routing send failed: {e}")
-                    self._er301_push_pending = True
-                    return
-            time.sleep(0.003)
-        print(f"🎛️  ER-301 routing sent to i2c2midi: {summary}")
+        st.update(expected=er301_config.counts(msgs), summary=summary, kind="push", file_mtime=m,
+                  sent_at=time.time(), reply=None)
+        self._er301_reply = None
+        if not self._er301_send(msgs):
+            self._er301_push_pending = True
+            return
+        self._er301_status("waiting")
+        if st["tries"] == 0:
+            print(f"🎛️  ER-301 routing sent to i2c2midi: {summary}")
 
     def monitor_loop(self):
         """Periodically rescan for device changes"""

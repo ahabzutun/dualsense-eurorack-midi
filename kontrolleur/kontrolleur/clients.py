@@ -39,6 +39,10 @@ def run_ssh(host: str, identity: str, remote: str, stdin: Optional[str] = None, 
         raise ToolError(f"{host} did not answer within {timeout} s.")
     if p.returncode == 255:
         raise ToolError(p.stderr.strip() or f"ssh to {host} failed.")
+    if p.returncode != 0 and not any(l.startswith("{") for l in p.stdout.splitlines()):
+        # the script crashed before answering: show why (the last line of the traceback), not "no answer"
+        why = (p.stderr.strip().splitlines() or [f"exit code {p.returncode}"])[-1]
+        raise ToolError(f"{remote.split()[1].rsplit('/', 1)[-1] if len(remote.split()) > 1 else remote} on {host}: {why}")
     return p.stdout if p.stdout else p.stderr
 
 
@@ -93,11 +97,22 @@ class Host:
     def export(self) -> dict:
         return last_json(self.remote("er301_routes_tool.py", "export"), "the SSH host")
 
-    def install(self, source: str) -> dict:
-        return last_json(self.remote("er301_routes_tool.py", "install", source), "the SSH host")
+    def install(self, source: str, expect: Optional[str] = None) -> dict:
+        """expect: the fingerprint of the file as it was loaded; the Pi refuses if it changed since."""
+        args = "install" + (f" --expect {expect}" if expect else "")
+        return last_json(self.remote("er301_routes_tool.py", args, source, timeout=60), "the SSH host")
 
-    def install_controls(self, source: str) -> dict:
-        return last_json(self.remote("er301_routes_tool.py", "install-controls", source), "the SSH host")
+    # device dumps kept on the Pi for every computer (the EC4 can only be read when someone presses Send on it)
+    def shared_get(self, name: str) -> dict:
+        return last_json(self.remote("er301_routes_tool.py", f"shared-get {name}", timeout=60), "the SSH host")
+
+    def shared_put(self, name: str, data: dict) -> dict:
+        return last_json(self.remote("er301_routes_tool.py", f"shared-put {name}", json.dumps(data), timeout=60),
+                         "the SSH host")
+
+    def install_controls(self, source: str, expect: Optional[str] = None) -> dict:
+        args = "install-controls" + (f" --expect {expect}" if expect else "")
+        return last_json(self.remote("er301_routes_tool.py", args, source, timeout=60), "the SSH host")
 
 
 # ── background jobs: run in a thread, answer on the GUI thread ──────────────────────────────────
