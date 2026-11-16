@@ -74,6 +74,7 @@ class Command:
     tokens: List[str]
     root: Optional[Node]
     error: str = ""
+    ignored: Optional[Node] = None       # one value left over: the Teletype accepts the line and drops it
 
     def text(self, n: Optional[Node]) -> str:
         return " ".join(self.tokens[n.start:n.end]) if n is not None else ""
@@ -126,12 +127,22 @@ def _reduce(toks: List[str], first_is_cmd: bool) -> Tuple[List[Node], List[str]]
     return stack, errors
 
 
+def _returns(n: Node) -> bool:
+    return n.value is not None or bool(OPS.get(n.tok, (0, 1, 0))[1])
+
+
 def parse_command(text: str, first_is_cmd: bool = True) -> Command:
+    """Like the Teletype's validate(): a command may leave one value over (it is dropped), not two."""
     toks = text.upper().split()
     stack, errors = _reduce(toks, first_is_cmd)
-    if len(stack) > 1:
+    root = stack[-1] if stack else None
+    left = stack[:-1] + ([root] if root is not None and _returns(root) else [])
+    ignored = None
+    if len(left) > 1:
         errors.append("too many values")
-    return Command(toks, stack[-1] if stack else None, "; ".join(errors))
+    elif len(left) == 1 and root is not None and not _returns(root):
+        ignored = left[0]
+    return Command(toks, root, "; ".join(errors), ignored)
 
 
 def parse_line(text: str) -> Line:
@@ -345,8 +356,44 @@ def _lit(n: Optional[Node]) -> Optional[int]:
     return n.value if n is not None else None
 
 
+VARIABLES = ("A", "B", "C", "D", "X", "Y", "Z", "T")      # the scene-wide ones (J, K, I are per script / loop)
+
+
+def variable_values(scene: "Scene") -> Dict[str, Optional[List[Tuple[int, "Where"]]]]:
+    """For each variable: the numbers the scene sets it to, or None when it is also set from an expression
+    (or changed by an op like X ADD X 1, DRUNK …), so its value can't be told from the text."""
+    out: Dict[str, Optional[List[Tuple[int, Where]]]] = {}
+    for s in SCRIPTS:
+        for li, ln in enumerate(scene.lines(s)):
+            for cmd in ln.cmds:
+                r = cmd.root
+                if r is None or r.tok not in VARIABLES or not r.is_set:
+                    continue
+                v = r.args[0].value if r.args else None
+                if v is None or out.get(r.tok, []) is None:
+                    out[r.tok] = None
+                else:
+                    out.setdefault(r.tok, []).append((v, Where(s, li, ln.text)))
+    return out
+
+
 def analyse(scene: Scene) -> Analysis:
     sends, ports, listens, chsets, errors = [], [], [], [], []
+    var = variable_values(scene)
+
+    def val(n: Optional[Node]) -> Tuple[List[Optional[int]], str]:
+        """The value(s) an argument can have: a number, or a variable the scene only sets to numbers."""
+        if n is None:
+            return [None], ""
+        if n.value is not None:
+            return [n.value], ""
+        known = var.get(n.tok) if n.tok in VARIABLES and not n.args else None
+        if known:
+            vals = sorted({v for v, _ in known})
+            where = ", ".join(sorted({w.title.replace(" line ", " ").replace("Script ", "") for _, w in known}))
+            return vals, f"{n.tok} = {' or '.join(map(str, vals))} (set in {where})"
+        return [None], ""
+
     pending = []                      # sends without # wait for the I2M.CH values of the whole scene
     for s in SCRIPTS:
         for li, ln in enumerate(scene.lines(s)):
@@ -361,7 +408,9 @@ def analyse(scene: Scene) -> Analysis:
                     t = node.tok
                     if t in ("I2M.CH", "I2M.#", "I2M.Q.CH", "I2M.Q.#") and node.is_set and node is cmd.root:
                         a = node.args[0]
-                        chsets.append(ChannelSet(w, _lit(a), cmd.text(a), query=".Q." in t))
+                        vs, how = val(a)
+                        for v in vs:
+                            chsets.append(ChannelSet(w, v, how or cmd.text(a), query=".Q." in t))
                     elif t in I2M_QUERY and node.args:
                         a = node.args[0]
                         listens.append(Listen(w, t, I2M_QUERY[t], _lit(a), cmd.text(a)))
@@ -369,44 +418,47 @@ def analyse(scene: Scene) -> Analysis:
                         listens.append(Listen(w, t, I2M_QUERY[t], None, ""))
                     elif t in SC_OPS and node.args:
                         a = node.args[0]
-                        ports.append(PortUse(w, t, SC_OPS[t], _lit(a), cmd.text(a)))
+                        for v in val(a)[0]:
+                            ports.append(PortUse(w, t, SC_OPS[t], v, cmd.text(a)))
                     elif t in I2M_REALTIME:
                         pending.append((w, t, I2M_REALTIME[t], None, None, "", guarded))
                     elif t in I2M_SEND and node is cmd.root:
                         kind, names = I2M_SEND[t]
                         args = list(node.args)
+                        chs = [(None, None)]
                         if t.endswith("#"):
                             if not args:
                                 continue
                             cha = args.pop(0)
-                            ch, ch_text = _lit(cha), cmd.text(cha)
-                        else:
-                            ch, ch_text = None, None
+                            vs, how = val(cha)
+                            chs = [(v, how or cmd.text(cha)) for v in vs]
                         names = names.split()
                         num_node = None
                         if kind in ("note", "note off", "cc", "nrpn") and args:
                             num_node = args[0]
                         elif kind == "chord" and len(args) > 1:
                             num_node = None            # a chord plays several notes
-                        val = " ".join(cmd.text(a) for a in args[1:]) if kind not in ("program", "pitch bend", "aftertouch") \
+                        vtext = " ".join(cmd.text(a) for a in args[1:]) if kind not in ("program", "pitch bend", "aftertouch") \
                             else " ".join(cmd.text(a) for a in args)
-                        num = _lit(num_node)
-                        num_text = cmd.text(num_node) if num_node is not None else ""
+                        nvs, nhow = val(num_node)
+                        num_text = (nhow or cmd.text(num_node)) if num_node is not None else ""
                         if kind == "nrpn" and len(args) >= 2 and args[0].value is not None and args[1].value is not None:
-                            num = args[0].value * 128 + args[1].value
+                            nvs = [args[0].value * 128 + args[1].value]
                             num_text = f"{args[0].value}/{args[1].value}"
-                            val = " ".join(cmd.text(a) for a in args[2:])
-                        pending.append((w, t, kind, ch, ch_text, (num, num_text, val), guarded))
+                            vtext = " ".join(cmd.text(a) for a in args[2:])
+                        for ch, ch_text in chs:
+                            for num in nvs:
+                                pending.append((w, t, kind, ch, ch_text, (num, num_text, vtext), guarded))
     # channels for the ops without #: every value set with I2M.CH in the scene, or 1 (the i2c2midi's default)
     set_chs = [c for c in chsets if not c.query]
     for w, t, kind, ch, ch_text, nv, guarded in pending:
-        num, num_text, val = nv if nv else (None, "", "")
+        num, num_text, vtext = nv if nv else (None, "", "")
         if ch_text is not None:
-            sends.append(Send(w, t, kind, ch, ch_text, num, num_text, val, guarded))
+            sends.append(Send(w, t, kind, ch, ch_text, num, num_text, vtext, guarded))
             continue
         if not set_chs:
             sends.append(Send(w, t, kind, 1, "1 (I2M.CH not set in this scene: the last value set, 1 after power-up)",
-                              num, num_text, val, guarded))
+                              num, num_text, vtext, guarded))
             continue
         seen = set()
         for c in set_chs:
@@ -415,8 +467,28 @@ def analyse(scene: Scene) -> Analysis:
                 continue
             seen.add(key)
             src = f"I2M.CH {c.text} in {c.where.title}"
-            sends.append(Send(w, t, kind, c.ch, src, num, num_text, val, guarded))
+            sends.append(Send(w, t, kind, c.ch, src, num, num_text, vtext, guarded))
     return Analysis(sends, ports, listens, chsets, errors)
+
+
+def ignored_note(cmd: Command) -> Optional[str]:
+    """What the Teletype makes of a command with one value too many (it runs it and drops the last value)."""
+    r, extra = cmd.root, cmd.ignored
+    if r is None or extra is None:
+        return None
+    names = []
+    if r.tok in I2M_SEND:
+        names = (["ch"] if r.tok.endswith("#") else []) + I2M_SEND[r.tok][1].split()
+    parts = [f"{names[k] if k < len(names) else 'arg ' + str(k + 1)} = {cmd.text(a)}" for k, a in enumerate(r.args)]
+    msg = f"{r.tok} takes {len(r.args)} value{'s' if len(r.args) != 1 else ''}: " + ", ".join(parts) + \
+          f"; the {cmd.text(extra)} at the end is dropped."
+    for k, a in enumerate(r.args):           # RND 80 120 meant as a range?
+        if a.tok in ("RND", "RAND") and a.args and k + 1 < len(r.args):
+            nxt = r.args[k + 1]
+            msg += f" For a random value between {cmd.text(a.args[0])} and {cmd.text(nxt)} write RRND {cmd.text(a.args[0])} " \
+                   f"{cmd.text(nxt)}."
+            break
+    return msg
 
 
 def warnings(scene: Scene, an: Analysis) -> List[Tuple[Optional[Where], str]]:
@@ -424,6 +496,12 @@ def warnings(scene: Scene, an: Analysis) -> List[Tuple[Optional[Where], str]]:
     out: List[Tuple[Optional[Where], str]] = []
     for w, e in an.errors:
         out.append((w, e))
+    for s in SCRIPTS:
+        for li, ln in enumerate(scene.lines(s)):
+            for cmd in ln.cmds:
+                note = ignored_note(cmd)
+                if note:
+                    out.append((Where(s, li, ln.text), note))
     for s in an.sends:
         if s.trs:
             out.append((s.where, f"{s.op} on ch {s.ch} goes to the i2c2midi's TRS jack, not over USB: nothing reaches "

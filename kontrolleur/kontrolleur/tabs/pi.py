@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
@@ -271,7 +271,29 @@ def ssp_patches(ctx) -> List[Patch]:
     return out
 
 
-def tt_summary(ctx) -> dict:
+def tt_ssp_jacks(ctx) -> Dict[tuple, List[str]]:
+    """The SSP module jacks the Teletype scene in use reaches (over the i2c2midi's USB port and the hub)
+    → 'PMIX · 6 In 1 Aux 1' … for the tooltip."""
+    mods = S.midi_modules(ctx.ssp.active)
+    if not mods or not getattr(ctx, "tt", None) or not ctx.tt.loaded:
+        return {}
+    snd = {k: [x for x in v if x[0] == "teletype"] for k, v in S.senders(ctx).items()}
+    snd = {k: v for k, v in snd.items() if v}
+    if not snd:
+        return {}
+    keys = [S.module_key(m) for m in mods]
+    shown = set(keys[:SSP_MAX_JACKS - 1] if len(keys) > SSP_MAX_JACKS else keys)
+    out: Dict[tuple, List[str]] = {}
+    for m in mods:
+        k = S.module_key(m)
+        jack = ("ssp", k if k in shown else "_more")
+        for i in m["inputs"]:
+            for _dev, lab in S.matches(snd, i):
+                out.setdefault(jack, []).append(f"{S.module_title(m)} {S.target_text(m, i)} ← {lab}")
+    return out
+
+
+def tt_summary(ctx, S_=None) -> dict:
     """The Teletype scene in use, for the Routing drawing: name, USB sends, SC ports, live traffic."""
     import time as _t
     out = {"scene": None, "what": "", "usb": 0, "ports": 0, "live": False}
@@ -291,6 +313,9 @@ def tt_summary(ctx) -> dict:
     bits = [f"{out['usb']} via USB"] if out["usb"] else []
     if out["ports"]:
         bits.append(f"{out['ports']} SC port{'s' if out['ports'] != 1 else ''}")
+    if S_ is not None and S_.get("tt_jacks"):
+        n_ = len(S_["tt_jacks"])
+        bits.append(f"→ {n_} SSP module{'s' if n_ != 1 else ''}")
     out["what"] = " · ".join(bits) or "no I2M / SC ops"
     return out
 
@@ -812,7 +837,7 @@ class PiDrawing(Drawing):
         mods = {m[0]: m for m in modules(ctx)}
         mo = {k: module_output(ctx, k, pts) for k in ("slice", "loop", "extras", "lfo")}
         self._cache = {"gen": gen, "t": now, "routes": routes, "pts": pts, "mods": mods, "mo": mo,
-                       "er_rows": self._er_rows(routes), "ports": len(routes)}
+                       "er_rows": self._er_rows(routes), "ports": len(routes), "tt_jacks": tt_ssp_jacks(ctx)}
         return self._cache
 
     @property
@@ -896,6 +921,7 @@ class PiDrawing(Drawing):
         S["er_rows"] = er_rows
         S["mo"] = data["mo"]
         S["ports"] = data["ports"]
+        S["tt_jacks"] = data["tt_jacks"]
         size["i2c"] = (R_W, ENV_HEAD + 8) if self.folded("i2c") else (R_W, ENV_HEAD + mod_h("lfo") + 12 + CARD_H + 18)
         size["er"] = (ER_W, 40.0) if self.folded("er") else (ER_W, 40 + rh * len(er_rows) + 10)
         size["tt"] = (TT_W, 40.0) if self.folded("tt") else (TT_W, 78.0)
@@ -1229,7 +1255,8 @@ class PiDrawing(Drawing):
         key, title, sub, colname, ports = mod
         sel = self.sel == "mod_" + key
         col = Theme.c(colname)
-        on_any = any((key, pk) in used for pk, _ in ports)
+        ttj = S.get("tt_jacks", {}) if key == "ssp" else {}
+        on_any = any((key, pk) in used or (key, pk) in ttj for pk, _ in ports)
         rj = S["rj"]
         path = QPainterPath()
         path.addRoundedRect(r, 10, 10)
@@ -1249,12 +1276,17 @@ class PiDrawing(Drawing):
             p, r.left() + 16, r.top() + 11 + t.h)
         T = S["trace"]
         for pk, plabel in ports:
-            on = (key, pk) in used
+            tt_only = (key, pk) in ttj and (key, pk) not in used
+            on = (key, pk) in used or tt_only
             jc = S["jacks"][(key, pk)]
-            _jack(p, jc, col, on)
+            _jack(p, jc, module_color("lfo") if tt_only else col, on)
+            if (key, pk) in ttj:
+                self.hits.add(QRectF(jc.x() - 9, jc.y() - 9, 18, 18), lambda: self.ctx.set_mode("teletype"),
+                              "From the Teletype:\n" + "\n".join(ttj[(key, pk)][:6]))
             if T is not None and T.jack == (key, pk):
                 D.circle(p, jc, 22, None, patch_color(T), 2)
-            lt = D.Text(plabel, Theme.font(10, HEAVY, "mono"), col if on else Theme.dim, max_w=r.width() - 40, min_scale=0.7)
+            lt = D.Text(plabel, Theme.font(10, HEAVY, "mono"), (module_color("lfo") if tt_only else col) if on else Theme.dim,
+                        max_w=r.width() - 40, min_scale=0.7)
             lt.paint(p, r.left() + 18, jc.y() - lt.h / 2)
         out = S["outs"].get(key)
         if out:
@@ -1438,7 +1470,7 @@ class PiDrawing(Drawing):
         p.strokePath(path, D.pen(Theme.c("body", 0.45), 1.2, [4, 3]))
         t = D.Text("TELETYPE", Theme.font(11, HEAVY, "mono"), Theme.ink, tracking=1.2, max_w=tt.width() - 50, min_scale=0.7)
         t.paint(p, tt.left() + 14, tt.top() + 9)
-        info = tt_summary(self.ctx)
+        info = tt_summary(self.ctx, S)
         if not self.folded("tt"):
             f9 = Theme.font(9, SEMIBOLD, "mono")
             if info["scene"] is not None:
@@ -1596,7 +1628,7 @@ class PiDrawing(Drawing):
         path.moveTo(a)
         dx = max(50.0, abs(a.x() - end.x()) * 0.45)
         path.cubicTo(QPointF(a.x() - dx, a.y()), QPointF(end.x() + dx, end.y()), end + QPointF(5, 0))
-        tt = tt_summary(self.ctx)
+        tt = tt_summary(self.ctx, S)
         busy = tt["usb"] > 0 or tt["live"]
         dim = _op(col, (0.9 if busy else 0.45) if S["trace"] is None else 0.2)
         p.strokePath(path, D.pen(dim, 2.0 if busy else 1.3, None if busy else [5, 3]))
@@ -1721,6 +1753,17 @@ class PiDrawing(Drawing):
                         path.cubicTo(QPointF(a.x() + 6, a.y()), QPointF(end.x() - 14, end.y()), end)
                         al, wf = self._style(S, self._on(S, "jack", (mk, pk)), hot, 0.55)
                         p.strokePath(path, D.pen(_op(col, al), 1.4 * wf))
+                if mod == "ssp":                  # what the Teletype sends reaches these (back in through the hub)
+                    tcol = module_color("lfo")
+                    for jk in S.get("tt_jacks", {}):
+                        end = S["jacks"].get(jk)
+                        if end is None:
+                            continue
+                        path = QPainterPath()
+                        path.moveTo(a)
+                        path.cubicTo(QPointF(a.x() + 10, a.y()), QPointF(end.x() - 18, end.y()), end)
+                        al, wf = self._style(S, False, False, 0.7)
+                        p.strokePath(path, D.pen(_op(tcol, al), 1.4 * wf, [4, 3]))
             _jack(p, a, col, True, 13)
         col = module_color("lfo")
         for c in (S["i2c_bus"], S["er_i2c"], S["tt_i2c"]):
