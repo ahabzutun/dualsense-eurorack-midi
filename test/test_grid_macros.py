@@ -295,6 +295,34 @@ snapshot_io.apply(ctl, cm, {"block": 99, "freeze": {"left": False}}, MidiOut())
 check(ctl.sample_block == ctl.max_blocks and not cm.get_current_freeze_state().left_stick_frozen,
       "dualsense: out-of-range block clamped, unfreeze works")
 
+# the slice can be driven from anything the DualSense script listens to (here: pedals via MIDI_INPUTS);
+# the snapshot holds the script's slice state, so it doesn't matter which control moved it
+from midi.axis_router import AxisRouter  # noqa: E402
+from midi.button_router import ButtonRouter  # noqa: E402
+from midi.device_inputs import Dispatcher  # noqa: E402
+
+with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+    f.write("MIDI_INPUTS = [('pedal', 2, 'cc', 105, 'section_up'), ('pedal', 2, 'cc', 106, 'block_up'),\n"
+            "               ('pedal', 2, 'cc', 107, 'slice_fine')]\n")
+    pedal_cfg = f.name
+cm_p = ChannelManager()
+ctl_p = MIDIController(cm_p)
+mo_p = MidiOut()
+rt_p = ButtonRouter(ctl_p, cm_p, None, mo_p, path=pedal_cfg)
+disp = Dispatcher(rt_p, AxisRouter(ctl_p, cm_p, mo_p, rt_p))
+for cc in (105, 105, 106):
+    disp.handle("pedal", [0xB1, cc, 127])
+    disp.handle("pedal", [0xB1, cc, 0])
+disp.handle("pedal", [0xB1, 107, 127])            # an expression pedal as fine slice
+saved = snapshot_io.capture(ctl_p, cm_p)
+check((saved["block"], saved["section"], saved["fine"]) == (1, 2, 15),
+      "pedals: slice moved by pedals is in the snapshot")
+disp.handle("pedal", [0xB1, 106, 127])
+disp.handle("pedal", [0xB1, 107, 0])
+snapshot_io.apply(ctl_p, cm_p, saved, mo_p)
+check(ctl_p.compute_grain_slice() == saved["slice"], "pedals: loading restores it, whoever moves it next")
+os.unlink(pedal_cfg)
+
 srv = snapshot_io.SnapshotServer(port=0)
 port = srv.sock.getsockname()[1]
 client = DualSenseClient(port=port, timeout=0.05)
