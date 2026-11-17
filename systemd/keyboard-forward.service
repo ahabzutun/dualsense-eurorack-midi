@@ -1,0 +1,18 @@
+[Unit]
+Description=USB keyboard on the Pi types into Teletype (USB gadget keyboard)
+After=teletype-gadget.service
+Wants=teletype-gadget.service
+
+[Service]
+Type=simple
+User=ahab
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/ahab/dualsense-eurorack-midi
+ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/keyboard_forward.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

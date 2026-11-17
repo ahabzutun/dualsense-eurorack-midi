@@ -35,6 +35,7 @@ configures all of it from one place and shows where every signal goes.
 6. [Kontrolleur](#kontrolleur)
 7. [Device tools](#device-tools)
 8. [Percussa SSP](#percussa-ssp)
+9. [Grid macros](#grid-macros)
 9. [Firmware](#firmware)
 10. [Setting up the Pi](#setting-up-the-pi)
 11. [Day to day](#day-to-day)
@@ -67,6 +68,8 @@ No power/data splitter is needed: that was for the old USB-gadget setup (see [Hi
 | i2c2midi (Teletype expander) | i2c2midi firmware with *ER-301 direct* (not in this repo): MIDI → SC.CV / SC.TR straight over its own I2C bus, plus a trigger LFO | — |
 | Percussa SSP | `scripts/ssp_mdns.py` (`ssp.local`) and `scripts/ssp_synthor_log.py` (which patch is loaded) | the SSP's init scripts |
 | Mac / Linux | `kontrolleur/` — the configuration app | you |
+| Raspberry Pi (optional) | `src/grid_macros.py` — the grid between Pi and Teletype: left half macros, right half to Teletype ([Grid macros](#grid-macros)) | `grid-macros.service` |
+| Raspberry Pi (optional) | `src/keyboard_forward.py` — a USB keyboard on the Pi types into Teletype | `keyboard-forward.service` |
 
 Both Pi services restart themselves when they fail (`Restart=always`) and handle devices being plugged in and
 out while they run. Their settings files are re-read while running, so a change from Kontrolleur needs no restart.
@@ -85,13 +88,16 @@ out while they run. Their settings files are re-read while running, so a change 
 | `src/config/mappings.py` | CC / NRPN numbers of the DualSense controls, instrument channels, timing constants |
 | `src/midi_passthrough.py` | the MIDI hub |
 | `src/er301_config.py` | turns `er301_routes.py` into the SysEx the i2c2midi stores |
+| `src/macros/`, `src/grid_macros.py`, `src/grid_macros_sim.py` | grid macros: engine, grid proxy, the service and a simulator for the computer ([docs](docs/grid-macros.md)) |
+| `src/state/snapshot_io.py` | the DualSense script's state for the grid macros (local socket) |
+| `src/keyboard_forward.py`, `scripts/teletype_gadget.sh` | the Pi's USB-C as Teletype's grid + keyboard |
 | `src/osc_out.py`, `src/osc_map.conf` | OSC tap of the hub: mapped MIDI → OpenMW on the Mac (UDP) |
 | `scripts/` | device tools Kontrolleur runs over SSH (or locally on a cable), SSP helpers, `er301_push.py` |
 | `kontrolleur/` | the desktop app ([its own README](kontrolleur/README.md)) |
 | `firmware/xiao-midi-bridge/` | firmware of the XIAO USB host-to-host bridges (modified [usb-midi-host2host](https://github.com/marchingband/usb-midi-host2host)) |
 | `install-pi.sh` | sets up a Pi: packages, udev rules, groups, both services for your user and checkout |
 | `systemd/`, `udev/` | service files and udev rules for the Pi (`install-pi.sh` installs them) |
-| `test/` | tests of the routers, device inputs and passthrough (`python3 test/test_*.py`) plus a few interactive helpers |
+| `test/` | tests of the routers, device inputs, grid macros and passthrough (`python3 test/test_*.py`) plus a few interactive helpers |
 | `backups/` | configuration dumps of the 16n, EC4 and MPC-20 |
 | `src/doremidi_bridge.py`, `DOREMIDI_DEBUG_NOTES.md` | an earlier libusb bridge for the MPC-20, not used any more (see [History](#history)) |
 
@@ -223,6 +229,18 @@ controller reaches it. Two helpers run on the SSP itself:
 Good to know: TheTechnobear's modules (PMIX, MMX4 …) match a MIDI mapping by CC number only; the channel they
 listen on is the module's own MIDI channel setting (0 = every channel).
 
+## Grid macros
+
+*New, not yet tried on the hardware.* The monome grid goes into the Pi instead of into Teletype. The left 8×8
+becomes a snapshot controller for the rig: 8 banks × 7 slots, each with save (hold), load and a slew fader
+that sets how slowly a load glides there. A snapshot holds the DualSense script's slice and freeze state and
+the last values of the 16n and EC4. A load glides them back, the 16n faders pick up and the EC4 follows.
+The right 8×8 goes on to Teletype unchanged. The Pi's USB-C port appears to Teletype as the grid and as a
+keyboard, so a keyboard on the Pi types into Teletype without swapping cables.
+
+`./install-pi.sh --grid-macros` sets it up (one reboot); `python3 src/grid_macros_sim.py` tries the macro
+half on a computer. Everything else: [docs/grid-macros.md](docs/grid-macros.md).
+
 ## Firmware
 
 - **XIAO MIDI bridge** (`firmware/xiao-midi-bridge`, PlatformIO, Seeed XIAO SAMD21): a modified version of
@@ -284,6 +302,7 @@ aseqdump -p XIAO-TT        # watch what arrives from the i2c2midi
 
 # tests (on the Pi or any computer with the packages)
 python3 test/test_button_router.py && python3 test/test_axis_router.py && python3 test/test_device_inputs.py
+python3 test/test_grid_macros.py
 ```
 
 Kontrolleur: `git pull` in the repository and restart the app (the macOS app and the Linux launcher run the code

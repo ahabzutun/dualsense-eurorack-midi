@@ -1,0 +1,13 @@
+[Unit]
+Description=Pi USB-C as Teletype's grid + keyboard (USB gadget)
+After=sys-kernel-config.mount
+Before=grid-macros.service keyboard-forward.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/ahab/dualsense-eurorack-midi/scripts/teletype_gadget.sh both
+ExecStop=/home/ahab/dualsense-eurorack-midi/scripts/teletype_gadget.sh off
+
+[Install]
+WantedBy=multi-user.target

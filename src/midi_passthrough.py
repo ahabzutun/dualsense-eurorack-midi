@@ -21,6 +21,12 @@ try:
 except Exception as _e:
     osc_out = None
     print(f"osc_out tap not loaded: {_e}")
+try:
+    from macros.hub_pickup import HubPickup, MACRO_PORT_NAME   # grid macros: 16n pickup after a load
+except Exception as _e:
+    HubPickup = None
+    MACRO_PORT_NAME = "Grid_Macros"
+    print(f"grid macro pickup not loaded: {_e}")
 import time
 import threading
 try:
@@ -38,6 +44,7 @@ class MIDIHub:
         self._out_port_names = {}   # output key -> ALSA port name currently open
         self.running = True
         self.lock = threading.Lock()
+        self.pickup = HubPickup() if HubPickup is not None else None
 
         # ── Diagnostic mode ──────────────────────────────────────────────────
         # Set to True to print raw 16n values WITHOUT forwarding.
@@ -221,7 +228,8 @@ class MIDIHub:
 
         for i, port_name in enumerate(available):
             should_skip = any(skip in port_name for skip in self.skip_devices)
-            if "RtMidi output" in port_name and "DualSense_Controller" not in port_name:
+            if ("RtMidi output" in port_name and "DualSense_Controller" not in port_name
+                    and MACRO_PORT_NAME not in port_name):
                 should_skip = True
             if not should_skip:
                 found_inputs[port_name] = i
@@ -373,6 +381,7 @@ class MIDIHub:
         is_grid_source    = "iii grid" in port_name
         is_pedal_source   = "CH345" in port_name or "DOREMiDi" in port_name
         is_teletype_source = "XIAO" in port_name and "XIAO-SSP" not in port_name
+        is_macro_source = MACRO_PORT_NAME in port_name
 
         def callback(message, data):
             try:
@@ -383,6 +392,11 @@ class MIDIHub:
                         if r is not None:
                             self._er301_reply = (time.time(), r)
                     return                                         # never forwarded (as before)            
+                if self.pickup is not None:    # grid macros: faders pick up a loaded value first
+                    if is_macro_source:
+                        self.pickup.note_macro(midi_message)
+                    elif not self.pickup.allow(port_name, midi_message):
+                        return
                 if osc_out is not None:        # fire OpenMW OSC for every message
                     try:
                         osc_out.handle(midi_message)

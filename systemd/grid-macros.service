@@ -1,0 +1,18 @@
+[Unit]
+Description=Grid macros (left half of the monome grid) + grid proxy to Teletype
+After=sound.target teletype-gadget.service midi-passthrough.service
+Wants=teletype-gadget.service
+
+[Service]
+Type=simple
+User=ahab
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/home/ahab/dualsense-eurorack-midi
+ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/grid_macros.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

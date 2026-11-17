@@ -12,16 +12,19 @@
 #   --dry-run       show what would be done, change nothing
 #   --no-services   packages, udev rules and groups only (start the scripts by hand)
 #   --no-apt        skip apt (packages already installed)
+#   --grid-macros   also: the Pi's USB-C as Teletype's grid + keyboard (USB gadget), the grid macros and
+#                   the keyboard forwarder (docs/grid-macros.md); needs a reboot the first time
 
 set -euo pipefail
 
-DRY=0; SERVICES=1; APT=1
+DRY=0; SERVICES=1; APT=1; GRID=0
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY=1 ;;
         --no-services) SERVICES=0 ;;
         --no-apt) APT=0 ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --grid-macros) GRID=1 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $a (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -80,7 +83,9 @@ run sudo udevadm trigger
 
 step "Groups"
 # input: read the DualSense (evdev) · audio: ALSA MIDI · plugdev: USB devices
-for g in input audio plugdev; do
+GROUPS_WANTED="input audio plugdev"
+[ "$GRID" -eq 1 ] && GROUPS_WANTED="$GROUPS_WANTED dialout"   # dialout: grid + gadget serial ports
+for g in $GROUPS_WANTED; do
     if id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx "$g"; then
         echo "  $USER_NAME is in $g"
     else
@@ -103,6 +108,36 @@ if [ "$SERVICES" -eq 1 ]; then
     run sudo systemctl restart dualsense-midi.service midi-passthrough.service
 fi
 
+if [ "$GRID" -eq 1 ]; then
+    step "Grid macros (USB gadget towards Teletype)"
+    # the USB-C port becomes a USB device; the USB-A ports are another controller and stay hosts
+    CFG=/boot/firmware/config.txt
+    [ -f "$CFG" ] || CFG=/boot/config.txt
+    if grep -q '^dtoverlay=dwc2' "$CFG" 2>/dev/null; then
+        echo "  $CFG already has $(grep '^dtoverlay=dwc2' "$CFG")"
+    else
+        if [ "$DRY" -eq 1 ]; then
+            echo "  + append to $CFG: [all] dtoverlay=dwc2,dr_mode=peripheral"
+        else
+            printf '\n[all]\ndtoverlay=dwc2,dr_mode=peripheral\n' | sudo tee -a "$CFG" >/dev/null
+        fi
+        NEED_REBOOT=1
+    fi
+    printf 'dwc2\nlibcomposite\n' | put /etc/modules-load.d/teletype-gadget.conf
+    if [ "$SERVICES" -eq 1 ]; then
+        for unit in teletype-gadget.service grid-macros.service keyboard-forward.service; do
+            sed -e "s|^User=.*|User=$USER_NAME|" \
+                -e "s|/home/ahab/dualsense-eurorack-midi|$REPO|g" \
+                "$REPO/systemd/$unit" | put "/etc/systemd/system/$unit"
+        done
+        run sudo systemctl daemon-reload
+        run sudo systemctl enable teletype-gadget.service grid-macros.service keyboard-forward.service
+        if [ "${NEED_REBOOT:-0}" -eq 0 ]; then
+            run sudo systemctl restart teletype-gadget.service grid-macros.service keyboard-forward.service
+        fi
+    fi
+fi
+
 step "Done"
 cat <<EOF
 Next:
@@ -112,6 +147,9 @@ Next:
     then set that host in Kontrolleur.
   - Logs:  journalctl -u dualsense-midi -f   ·   journalctl -u midi-passthrough -f
 EOF
+if [ "${NEED_REBOOT:-0}" -eq 1 ]; then
+    echo "  - Grid macros: reboot once so the USB-C port can become Teletype's grid + keyboard."
+fi
 if [ "${ADDED_GROUP:-0}" -eq 1 ]; then
     echo "  - You were added to a group: log out and in again (or reboot) before running the scripts by hand."
 fi

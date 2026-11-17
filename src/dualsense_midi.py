@@ -16,6 +16,11 @@ from state.clock_source import ClockSource
 from midi.controller import MIDIController
 from midi.axis_router import AxisRouter
 try:
+    from state import snapshot_io      # grid macros: capture / restore this script's state
+except Exception as _snap_err:
+    print(f"⚠️  Snapshot socket not available ({_snap_err})")
+    snapshot_io = None
+try:
     from midi.device_inputs import DeviceInputs
 except Exception as _inputs_err:      # 16n / EC4 / pedal -> Pi functions are optional
     print(f"⚠️  MIDI inputs not available ({_inputs_err})")
@@ -315,6 +320,7 @@ def main():
             pass
 
         axes = AxisRouter(controller_obj, channel_manager, midiout, router)
+        _snapshots = snapshot_io.server() if snapshot_io is not None else None
         if _inputs is not None:
             _inputs.bind(router, axes)
             _inputs.start()
@@ -370,6 +376,8 @@ def main():
             while True:
                 r, w, x = select.select(devices_dict.keys(), [], [], 0.01)
                 router.poll()
+                if _snapshots is not None:
+                    _snapshots.poll(controller_obj, channel_manager, midiout)
                 if _inputs is not None:
                     _inputs.poll()
 
