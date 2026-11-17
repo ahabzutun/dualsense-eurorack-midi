@@ -189,6 +189,7 @@ main{display:grid;grid-template-columns:auto 1fr;gap:22px;padding:22px}
 .mono{font:11px/1.5 ui-monospace,Menlo,monospace;color:var(--dim);white-space:pre}
 .big{font-size:20px;font-variant-numeric:tabular-nums;color:var(--fn)}
 .note{color:var(--dim);font-size:11px;margin-top:8px}
+.steps{margin:0;padding-left:18px;color:var(--dim);max-width:640px}.steps li{margin:3px 0}.steps b{color:var(--ink)}
 </style></head><body>
 <header><h1>Grid macros</h1><span>simulator · the real engine with stand-ins for the rig</span><span id="file" style="margin-left:auto"></span></header>
 <main>
@@ -201,18 +202,30 @@ main{display:grid;grid-template-columns:auto 1fr;gap:22px;padding:22px}
   Right half: click to change what "Teletype" shows (kept with each snapshot, not restored yet).</div>
   <div class="slots" id="slots"></div>
  </div>
+ <div class="card" style="margin-top:16px"><h2>Try this</h2>
+  <ol class="steps">
+   <li><b>Save:</b> press and <b>hold</b> the top key of slot 1 until it flashes (½ s). A short click only blinks it off — that's the "hold to save" hint.</li>
+   <li>Move a few 16n faders, an EC4 encoder and the DualSense block slider somewhere else.</li>
+   <li><b>Slew:</b> click the third key from the top in slot 1 (the fader fills up to there = 2 s).</li>
+   <li><b>Load:</b> click the bottom key of slot 1. The 16n numbers turn <span style="color:var(--special)">green</span> while they glide back,
+   the EC4 encoders follow, the slice jumps at the end — then the faders you moved show <span style="color:var(--trig)">orange</span>
+   until you drag them past their value (pickup).</li>
+   <li>Banks: the column marked "bank". Clear a slot: shift-click its load key.</li>
+  </ol></div>
 </section>
 <section class="rig">
  <div class="card"><h2>16n · ch 16 · CC 80–87</h2><div class="faders" id="faders"></div>
   <div class="note">Number = the parameter's value. <span style="color:var(--trig)">Orange</span>: waiting for pickup — move the fader past the value.
   <span style="color:var(--special)">Green</span>: gliding.</div></div>
- <div class="card"><h2>EC4 · ch 1 · CC 1–4 (gets values sent back)</h2><div class="knobs" id="knobs"></div></div>
+ <div class="card"><h2>EC4 · ch 1 · CC 1–4</h2><div class="knobs" id="knobs"></div>
+  <div class="note">Endless encoders: no pickup needed — after a load the Pi sends the values back and the encoders move with the glide.</div></div>
  <div class="card"><h2>DualSense script</h2>
   <div class="row"><label>block <input type="range" min="0" max="7" id="block"></label>
   <label>section <input type="range" min="0" max="7" id="section"></label>
   <label>fine <input type="range" min="0" max="15" id="fine"></label></div>
   <div class="row" style="margin-top:8px"><label><input type="checkbox" id="left"> freeze L2/R2/left stick</label>
-  <label><input type="checkbox" id="right"> freeze right stick</label><span>slice <span class="big" id="slice"></span></span></div></div>
+  <label><input type="checkbox" id="right"> freeze right stick</label><span>slice <span class="big" id="slice"></span></span></div>
+  <div class="note">Slice and freeze don't glide: they jump at the end of a load (setting <code>jump_at</code>).</div></div>
  <div class="card"><h2>Out through Grid_Macros · log</h2><div class="mono" id="out"></div><div class="mono" id="log" style="margin-top:8px;color:var(--ink)"></div></div>
 </section></main>
 <script>

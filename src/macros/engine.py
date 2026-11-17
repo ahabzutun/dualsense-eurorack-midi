@@ -55,6 +55,7 @@ class MacroEngine:
         self.save_held = {}                           # slot -> time pressed (current bank)
         self.save_done = set()                        # slots saved during the current hold
         self.flash = {}                               # (bank, slot) -> until
+        self.tap_hint = {}                            # (bank, slot) -> until: save tapped too briefly
         self._last_leds = None
 
     # ---- input -----------------------------------------------------------------------------------
@@ -73,7 +74,11 @@ class MacroEngine:
             if down:
                 self.save_held[slot] = now
             else:
-                self.save_held.pop(slot, None)
+                t = self.save_held.pop(slot, None)
+                if t is not None and slot not in self.save_done:
+                    self.tap_hint[(self.bank, slot)] = now + SAVED_FLASH
+                    self.log(f"✋ macro {self.bank + 1}.{slot + 1}: hold save "
+                             f"{self.store.settings.get('hold_to_save', 0.5)} s to save")
                 self.save_done.discard(slot)
             return
         if not down:
@@ -150,9 +155,10 @@ class MacroEngine:
                 self.save_done.add(slot)
         if self.loading and (now >= self.loading[2] or not self.glide.active):
             self.loading = None
-        for k, until in list(self.flash.items()):
-            if now >= until:
-                del self.flash[k]
+        for d in (self.flash, self.tap_hint):
+            for k, until in list(d.items()):
+                if now >= until:
+                    del d[k]
         leds = self.leds(now)
         if leds != self._last_leds:
             self._last_leds = leds
@@ -176,6 +182,8 @@ class MacroEngine:
             # save key
             if (bank, slot) in self.flash:
                 level = 15
+            elif (bank, slot) in self.tap_hint:            # too short: blink off
+                level = 0
             elif slot in self.save_held and slot not in self.save_done:
                 level = 4 + int(11 * min(1.0, (now - self.save_held[slot]) / hold))
             else:
