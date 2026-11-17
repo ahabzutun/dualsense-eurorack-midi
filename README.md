@@ -90,7 +90,7 @@ out while they run. Their settings files are re-read while running, so a change 
 | `src/er301_config.py` | turns `er301_routes.py` into the SysEx the i2c2midi stores |
 | `src/macros/`, `src/grid_macros.py`, `src/grid_macros_sim.py` | grid macros: engine, grid proxy, the service and a simulator for the computer ([docs](docs/grid-macros.md)) |
 | `src/state/snapshot_io.py` | the DualSense script's state for the grid macros (local socket) |
-| `src/keyboard_forward.py`, `scripts/teletype_gadget.sh` | the Pi's USB-C as Teletype's grid + keyboard |
+| `src/keyboard_forward.py`, `scripts/teletype_gadget.sh`, `scripts/build_teletype_hid.sh` | the Pi's USB-C as Teletype's grid + keyboard (with a patched gadget keyboard module) |
 | `scripts/grid_macros_tool.py` | Kontrolleur's Macros tab ⇄ `grid_macros.json` and the running service (export / install / audition) |
 | `src/osc_out.py`, `src/osc_map.conf` | OSC tap of the hub: mapped MIDI → OpenMW on the Mac (UDP) |
 | `scripts/` | device tools Kontrolleur runs over SSH (or locally on a cable), SSP helpers, `er301_push.py` |

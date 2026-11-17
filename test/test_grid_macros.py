@@ -367,6 +367,22 @@ check(last == bytes([0, 0] + [0x01] * 6), "keyboard: more than 6 keys = roll-ove
 check(ks.release_all() == bytes(8), "keyboard: release all when a keyboard goes away")
 check(ks.event(59, 1)[2] == 0x3A and ks.event(103, 1)[3] == 0x52, "keyboard: F1 and arrow up")
 
+# the writer waits for Teletype to collect the previous report instead of dropping this one
+import contextlib, io, tempfile, threading  # noqa: E402
+from keyboard_forward import HidWriter  # noqa: E402
+_fifo = os.path.join(tempfile.mkdtemp(), "hidg")
+os.mkfifo(_fifo)
+_rd = os.open(_fifo, os.O_RDONLY | os.O_NONBLOCK)
+hw = HidWriter(_fifo, timeout=0.2)
+with contextlib.redirect_stdout(io.StringIO()):
+    while hw.write(bytes(4096)):
+        pass                                  # fill the pipe: Teletype "not collecting"
+check(hw.dropped == 1, "keyboard: gives up after the timeout when nothing is collected")
+threading.Timer(0.05, lambda: os.read(_rd, 1 << 20)).start()   # Teletype collects a moment later
+check(hw.write(bytes(8)) and hw.waited == 1, "keyboard: waits for the previous report instead of dropping")
+os.close(_rd)
+check(HidWriter("/nonexistent/hidg0").write(bytes(8)) is False, "keyboard: no gadget = quiet no-op")
+
 # ---- the hub (midi_passthrough.py) with a stand-in rtmidi ---------------------------------------
 import types  # noqa: E402
 

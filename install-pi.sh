@@ -124,14 +124,20 @@ if [ "$GRID" -eq 1 ]; then
         NEED_REBOOT=1
     fi
     printf 'dwc2\nlibcomposite\n' | put /etc/modules-load.d/teletype-gadget.conf
+    # the keyboard needs a patched gadget keyboard module (scripts/build_teletype_hid.sh explains why)
+    if ! dpkg -s "linux-headers-$(uname -r)" >/dev/null 2>&1; then
+        run sudo apt-get install -y "linux-headers-$(uname -r)" build-essential curl \
+            || run sudo apt-get install -y linux-headers-rpi-v8 build-essential curl
+    fi
+    run sudo "$REPO/scripts/build_teletype_hid.sh"
     if [ "$SERVICES" -eq 1 ]; then
-        for unit in teletype-gadget.service grid-macros.service keyboard-forward.service; do
+        for unit in teletype-hid-module.service teletype-gadget.service grid-macros.service keyboard-forward.service; do
             sed -e "s|^User=.*|User=$USER_NAME|" \
                 -e "s|/home/ahab/dualsense-eurorack-midi|$REPO|g" \
                 "$REPO/systemd/$unit" | put "/etc/systemd/system/$unit"
         done
         run sudo systemctl daemon-reload
-        run sudo systemctl enable teletype-gadget.service grid-macros.service keyboard-forward.service
+        run sudo systemctl enable teletype-hid-module.service teletype-gadget.service grid-macros.service keyboard-forward.service
         if [ "${NEED_REBOOT:-0}" -eq 0 ]; then
             run sudo systemctl restart teletype-gadget.service grid-macros.service keyboard-forward.service
         fi

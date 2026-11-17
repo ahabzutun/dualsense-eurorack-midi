@@ -124,6 +124,9 @@ On top of the usual setup this adds:
   with a CDC serial interface (the grid, `/dev/ttyGS0`) and a boot keyboard (`/dev/hidg0`).
 - `grid-macros.service` (`src/grid_macros.py`): grid proxy and macros.
 - `keyboard-forward.service` (`src/keyboard_forward.py`): a USB keyboard on the Pi types into Teletype.
+- a patched gadget keyboard module (`scripts/build_teletype_hid.sh`, installed to
+  `/lib/modules/<kernel>/updates/`) and `teletype-hid-module.service`, which builds it again at boot after a
+  kernel update (needs the kernel headers and internet once; takes about a minute).
 - the `dialout` group for the serial ports.
 
 Cabling: the Pi's USB-C goes through the power/data splitter, with power from the Pi's supply and data to
@@ -139,32 +142,33 @@ sudo scripts/teletype_gadget.sh keyboard   # keyboard only
 sudo scripts/teletype_gadget.sh status
 ```
 
-### Why Teletype should accept this (from its firmware source)
+### What Teletype needs (found on the hardware, Nov 2026)
 
-- **Grid:** for CDC devices, `uhi_cdc_install` (libavr32) accepts any device with a CDC data interface,
-  without checking vendor/product IDs or name strings (those checks are only on the FTDI path for old grids).
-  On connect Teletype sends `0x05` (size query) and waits about 0.5 ms for the answer. It falls back to
-  16×8 if no answer arrives, so a slow answer still gives the right size. The Pi answers it itself.
-- **Grid and keyboard together:** the USB host stack (`uhc.c`) offers each device to every class driver,
-  and Teletype's keyboard and grid handlers don't depend on each other. This combination has probably
-  never been tried, because no real device is both a keyboard and a grid. That is the first thing to test.
+- **Keyboard first, grid second.** `uhi_cdc_install` (libavr32) takes the device only when the *last*
+  interface is the CDC data interface; `teletype_gadget.sh both` links the keyboard first for that reason.
+  Vendor/product IDs and names aren't checked.
+- **The grid's serial port must be open when Teletype connects.** Teletype sends the size query (`0x05`)
+  about 0.5 s after connecting and only takes the grid if it gets an answer. `grid-macros.service` keeps the
+  port open and re-plugs the gadget 2 s after it starts (`teletype_gadget.sh rebind`), so the boot order
+  doesn't matter. The journal says "🔌 Teletype connected the grid" when it worked.
+- **The kernel's gadget keyboard doesn't work with Teletype.** Teletype collects the first key report and
+  then stops. Two things in `usb_f_hid` together: the endpoint interval (4/10 → 1, the Pi's dwc2 otherwise
+  schedules reports in frames Teletype's host doesn't poll) and the zero-length packet after each report
+  (added to the kernel in 2025, removed again). `scripts/build_teletype_hid.sh` patches exactly those lines
+  and refuses to build if a newer kernel source no longer has them.
+- **Grid Control mode** is off after every power-up; the front button toggles it. It draws on columns 8–15.
 - **What Teletype sends the grid:** only `0x05` and whole-quad level maps (`0x1A`, quad x = 0 or 8). Its
   parser stops at the first byte it doesn't know, so the Pi passes it nothing but key events and the size
   answer.
 
-## First test on the hardware
+### Checking it
 
-1. `./install-pi.sh --grid-macros`, reboot, `scripts/teletype_gadget.sh status`: `/dev/ttyGS0` and `/dev/hidg0`
-   are there.
-2. **Grid only**: `sudo scripts/teletype_gadget.sh grid`, grid on the Pi, splitter to Teletype. Teletype
-   should show the grid as connected. Check that Grid Control mode works on the right half, and that the
-   left half shows the macro LEDs.
-3. **Both**: `sudo scripts/teletype_gadget.sh both`, keyboard on the Pi. Type in Teletype while the grid
-   keeps working. If Teletype only takes one of them, use the grid/keyboard modes and a switch on the Pi
-   case that calls the script.
-4. **Macros**: save with a few 16n / EC4 values and a slice, change things, load with different slew settings.
-   Check that the 16n picks up and the EC4 follows.
-5. `journalctl -u grid-macros -f` shows saves, loads and anything that went wrong.
+```bash
+scripts/teletype_gadget.sh status            # /dev/ttyGS0 and /dev/hidg0 there, functions linked
+scripts/build_teletype_hid.sh --check && echo "patched keyboard module installed"
+journalctl -u grid-macros -f                 # grid connects, saves, loads
+journalctl -u keyboard-forward -f            # keyboards found; a ⚠️ line means reports weren't collected
+```
 
 ## Known limits / open points
 

@@ -6,6 +6,9 @@ The keyboard is read with evdev (and grabbed, so it doesn't also type into the P
 becomes an 8-byte boot-keyboard report on /dev/hidg0, the keyboard half of the Pi's USB gadget
 (scripts/teletype_gadget.sh). Teletype reads modifiers from byte 0 and up to six keys from bytes 2–7.
 
+Needs the patched usb_f_hid (scripts/build_teletype_hid.sh): with the kernel's own, Teletype takes the first
+key and then nothing more.
+
 Keyboards can come and go; so can /dev/hidg0 (gadget switched to grid only, or Teletype unplugged).
     python3 src/keyboard_forward.py [--hid /dev/hidg0]
 """
@@ -86,6 +89,48 @@ def is_keyboard(dev, ecodes):
     return ecodes.KEY_A in keys and ecodes.KEY_SPACE in keys and ecodes.KEY_ENTER in keys
 
 
+class HidWriter:
+    """Hands reports to the gadget. Teletype collects one report at a time (every 1 ms with the patched
+    usb_f_hid), so when keys change faster, wait for the previous one instead of dropping this one —
+    a dropped key release would leave the key stuck."""
+
+    def __init__(self, path, timeout=0.1):
+        self.path, self.timeout = path, timeout
+        self.fd = None
+        self.sent = self.waited = self.dropped = 0
+
+    def write(self, report) -> bool:
+        if self.fd is None:
+            try:
+                self.fd = os.open(self.path, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                return False
+        deadline = time.monotonic() + self.timeout
+        waited = False
+        while True:
+            try:
+                os.write(self.fd, report)
+                self.sent += 1
+                self.waited += waited
+                return True
+            except BlockingIOError:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    self.dropped += 1
+                    print("⚠️  Teletype isn't collecting keys (is the keyboard part of the gadget active?)",
+                          flush=True)
+                    return False
+                waited = True
+                select.select([], [self.fd], [], min(left, 0.01))
+            except OSError:
+                try:
+                    os.close(self.fd)
+                except OSError:
+                    pass
+                self.fd = None      # gadget switched or Teletype gone: reopen on the next report
+                return False
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hid", default="/dev/hidg0")
@@ -95,24 +140,10 @@ def main(argv=None):
 
     state = ReportState()
     keyboards = {}              # fd -> device
-    hid = None
     next_scan = 0.0
 
-    def write(report):
-        nonlocal hid
-        if hid is None:
-            try:
-                hid = os.open(args.hid, os.O_WRONLY | os.O_NONBLOCK)
-            except OSError:
-                return
-        try:
-            os.write(hid, report)
-        except OSError:
-            try:
-                os.close(hid)
-            except OSError:
-                pass
-            hid = None          # gadget switched or Teletype gone: reopen on the next report
+    hid = HidWriter(args.hid)
+    write = hid.write
 
     print("⌨️  keyboard forwarder running", flush=True)
     while True:

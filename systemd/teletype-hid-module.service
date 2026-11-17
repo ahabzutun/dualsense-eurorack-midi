@@ -1,0 +1,14 @@
+[Unit]
+Description=Patched gadget keyboard module for Teletype (rebuilt after a kernel update)
+# only does work when the running kernel has no patched usb_f_hid yet; otherwise exits at once
+Before=teletype-gadget.service
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/home/ahab/dualsense-eurorack-midi/scripts/build_teletype_hid.sh
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
