@@ -9,6 +9,8 @@ User=ahab
 Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=/home/ahab/dualsense-eurorack-midi
 ExecStart=/usr/bin/python3 /home/ahab/dualsense-eurorack-midi/src/grid_macros.py
+# Teletype only takes the grid when the Pi reads its first messages: replug once the service listens
+ExecStartPost=+/bin/sh -c 'sleep 2; /home/ahab/dualsense-eurorack-midi/scripts/teletype_gadget.sh rebind'
 Restart=always
 RestartSec=3
 StandardOutput=journal

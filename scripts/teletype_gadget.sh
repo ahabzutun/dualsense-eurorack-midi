@@ -10,6 +10,8 @@
 #   grid      only the grid (serial): what grid-macros.service needs
 #   keyboard  only the keyboard (keyboard-forward.service types into it)
 #   off       unbind (Teletype sees the device unplugged)
+#   rebind    unplug and replug with the functions it has now (grid-macros.service runs this once it
+#             listens: Teletype only takes the grid when the Pi reads its first messages)
 #
 # Switching modes unbinds and rebinds: Teletype sees an unplug and a new device, like swapping cables.
 #
@@ -40,7 +42,18 @@ status() {
 if [ "$MODE" = "status" ]; then status; exit 0; fi
 need_root
 
-case "$MODE" in both|grid|keyboard|off) ;; *) echo "mode: both | grid | keyboard | off | status" >&2; exit 2 ;; esac
+if [ "$MODE" = "rebind" ]; then
+    [ -d "$G" ] || { echo "no gadget yet" >&2; exit 1; }
+    U="$(ls /sys/class/udc | head -n1)"
+    [ -n "$(cat "$G/UDC" 2>/dev/null || true)" ] && { echo "" > "$G/UDC"; sleep 0.3; }
+    echo "$U" > "$G/UDC"
+    sleep 0.3
+    [ -e /dev/hidg0 ] && chgrp input /dev/hidg0 && chmod 0660 /dev/hidg0
+    status
+    exit 0
+fi
+
+case "$MODE" in both|grid|keyboard|off) ;; *) echo "mode: both | grid | keyboard | off | rebind | status" >&2; exit 2 ;; esac
 
 modprobe libcomposite
 if ! ls /sys/class/udc >/dev/null 2>&1 || [ -z "$(ls /sys/class/udc 2>/dev/null)" ]; then
