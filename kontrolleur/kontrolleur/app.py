@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QColorDialog, QComboBox,
                                QWidget)
 
 from . import clients, ssp, store, teletype, theme
+from . import macros as macros_model
 from . import widgets as W
 from .devices import EC4Board, Faderbank, PedalBoard
 from .model import Mapping
@@ -24,7 +25,7 @@ from .stage import Stage
 from .theme import BOLD, HEAVY, SEMIBOLD, REGULAR, Theme
 
 MODES = [("dualsense", "DualSense"), ("faderbank", "16n"), ("pedals", "Pedals"), ("ec4", "EC4"), ("pi", "Routing"), ("er301", "ER-301"),
-         ("teletype", "Teletype")]
+         ("teletype", "Teletype"), ("macros", "Macros")]
 ROUTED = ("faderbank", "pedals", "ec4")
 ROUTE_KEY = {"faderbank": "fader16OnPi", "pedals": "pedalsOnPi", "ec4": "ec4OnPi"}
 ICON = Path(__file__).resolve().parent / "icon.png"
@@ -74,6 +75,9 @@ class Main(QMainWindow):
         self.tt_mon = teletype.Monitor(self._tt_live)
         self._tt_sig = None
         self.tt_dirty = {}                          # scene → edited here, not written to a stick yet
+        self.macros = macros_model.MacrosState()    # Macros tab: grid_macros.json on the Pi
+        self.mac_bank = int(os.environ.get("KONTROLLEUR_MAC_BANK", "1")) - 1
+        self.mac_slot = int(os.environ.get("KONTROLLEUR_MAC_SLOT", "1")) - 1
         self.tt_script = "1"
         try:
             self.tt_scene = int(os.environ.get("KONTROLLEUR_TT_SCENE") or self.s.value("ttScene", -1))
@@ -135,6 +139,7 @@ class Main(QMainWindow):
     def _build_pages(self):
         from .tabs import dualsense, ec4, er301, faderbank, pedals, pi
         from .tabs import teletype as tt_tab
+        from .tabs import macros as macros_tab
         self.tabs = {}
         specs = {
             "dualsense": (dualsense.ControllerDrawing, ["Control", "Combos", "Overview"], dualsense.build_panel),
@@ -144,6 +149,7 @@ class Main(QMainWindow):
             "ec4": (ec4.EC4Drawing, ["Encoder", "Push", "Names"], ec4.build_panel),
             "er301": (er301.ER301Drawing, ["Ports", "Routes", "Pitch & LFO"], er301.build_panel),
             "teletype": (tt_tab.TeletypeDrawing, ["Scene", "Script", "Live"], tt_tab.build_panel),
+            "macros": (macros_tab.MacrosDrawing, ["Slot", "Bank", "Settings"], macros_tab.build_panel),
         }
         for mode, (Drawing, tabs, build) in specs.items():
             page = QWidget()
@@ -263,6 +269,9 @@ class Main(QMainWindow):
         self.up_btn.setText("↑  Send" if ec4 else "↑  Upload")
         self.load_btn.setToolTip("Receive the setups from the EC4 (Ctrl+R)" if ec4 else "Load from the device (Ctrl+R)")
         self.up_btn.setToolTip("Send the setups to the EC4 (Ctrl+S)" if ec4 else "Upload to the device (Ctrl+S)")
+        if self.mode == "macros":
+            self.load_btn.setToolTip("Load the grid macros from the Pi (Ctrl+R)")
+            self.up_btn.setToolTip("Upload names, slots and settings to the Pi (Ctrl+S)")
         if self.mode == "teletype":
             self.load_btn.setText("↓  From stick")
             self.up_btn.setText("↑  To stick")
@@ -334,7 +343,8 @@ class Main(QMainWindow):
         return ((self.synced is not None and self.synced != self.current_sources())
                 or (self.synced_bank is not None and self.synced_bank != self.bank.json)
                 or (self.synced_pedals is not None and self.synced_pedals != self.pedals.json)
-                or (self.synced_ec4 is not None and self.synced_ec4 != self.ec4.fingerprint))
+                or (self.synced_ec4 is not None and self.synced_ec4 != self.ec4.fingerprint)
+                or self.macros.dirty)
 
     def _update_dirty(self):
         if hasattr(self, "dirty_lb"):
@@ -359,8 +369,10 @@ class Main(QMainWindow):
             self.load_ec4_cache()
         elif mode == "pi" and not self.ec4.loaded:
             self.load_ec4_cache(quiet=True)      # names of the EC4 controls patched to Pi functions
-        if mode == "pi" and (not self.ssp.loaded or self.ssp.stale):
+        if mode in ("pi", "macros") and (not self.ssp.loaded or self.ssp.stale):
             self.load_ssp()
+        if mode in ("pi", "macros") and not self.macros.loaded and not self.macros.loading:
+            self.load_macros(quiet=mode == "pi")
         self.inspector.rebuild()
 
     def set_route(self, on_ssh: bool):
@@ -408,9 +420,10 @@ class Main(QMainWindow):
             self.load_ec4_cache()
             self.load_routing(quiet=True)
         else:
-            if self.mode == "pi":
+            if self.mode in ("pi", "macros"):
                 self.load_ec4_cache(quiet=True)
                 self.load_ssp()
+                self.load_macros(quiet=self.mode == "pi")
             self.load_routing(then=self._refresh_devices_quietly if self.mode in ("pi", "er301") else None)
         snap = os.environ.get("KONTROLLEUR_SNAPSHOT")
         if snap:
@@ -980,6 +993,8 @@ class Main(QMainWindow):
             self.receive_ec4()
         elif self.mode == "teletype":
             self.tt_import()
+        elif self.mode == "macros":
+            self.load_macros()
         else:
             self.load_routing()
 
@@ -994,8 +1009,133 @@ class Main(QMainWindow):
             self.send_ec4()
         elif self.mode == "teletype":
             self.tt_write()
+        elif self.mode == "macros":
+            self.upload_macros()
         else:
             self.upload_routing()
+
+    # ── grid macros (grid_macros.json on the Pi, scripts/grid_macros_tool.py) ──
+    def load_macros(self, quiet: bool = False, then: Optional[Callable] = None):
+        st = self.macros
+        if st.loading:
+            return
+        st.loading = True
+        start = st.fingerprint if st.loaded else None
+
+        def fn():
+            if self.offline:
+                p = Path(self.offline) / "grid-macros.json"
+                return json.loads(p.read_text()) if p.exists() else {"ok": False, "error": "no grid-macros.json in the offline folder"}
+            return self.host.macros_export()
+
+        def done(e, err):
+            st.loading = False
+            if err is None and not (e or {}).get("ok"):
+                err = clients.ToolError((e or {}).get("error") or "no answer")
+            if err is not None:
+                msg = str(err)
+                if "grid_macros_tool.py" in msg and ("No such file" in msg or "can't open" in msg):
+                    msg = "the Pi's checkout doesn't have the grid macros yet (git pull on the Pi)"
+                st.error = f"Grid macros: {msg}"
+                if not quiet:
+                    self.set_status("error", f"Could not load the grid macros from {self.host.host}: {msg}")
+            elif st.dirty and start is not None and st.fingerprint != start:
+                self.set_status("warn", "You changed the macros while they were loading: kept your changes.")
+            else:
+                st.apply(e)
+                if quiet:
+                    pass                        # loaded alongside something else: its status stays
+                elif not st.exists:
+                    self.set_status("warn", "The Pi has no grid_macros.json yet: the grid-macros service creates it "
+                                            "on its first start (install-pi.sh --grid-macros).")
+                else:
+                    sv = "service running" if st.service else "the grid-macros service isn't running"
+                    self.set_status("ok", f"Loaded the grid macros from {self.host.host}: {st.used_slots()} slots · {sv}.")
+            self.refresh_all()
+            if then:
+                then()
+
+        self.run(fn, done, busy=not quiet)
+        self.refresh_all()
+
+    def upload_macros(self, force: bool = False):
+        st = self.macros
+        if not st.loaded:
+            self.set_status("error", "Load the grid macros from the Pi first (↓ Load).")
+            return
+        data = json.loads(json.dumps(st.data))
+        sent = st.fingerprint
+        expect = None if force else st.sha
+
+        def fn():
+            if self.offline:
+                return {"ok": True, "sha": "offline", "data": data, "service": st.service}
+            return self.host.macros_install(data, expect)
+
+        def done(r, err):
+            if err is None and (r or {}).get("conflict"):
+                self._macros_conflict()
+                return
+            if err is None and not (r or {}).get("ok"):
+                err = clients.ToolError((r or {}).get("error") or "no answer")
+            if err is not None:
+                self.set_status("error", f"Could not upload the grid macros: {err}")
+                return
+            edited = st.fingerprint != sent
+            st.sha = r.get("sha") or ""
+            st.service = r.get("service")
+            if edited:                      # changed here while uploading: keep those edits as unsaved
+                st.synced = json.dumps(r.get("data") or data, sort_keys=True)
+                self.set_status("warn", "Uploaded the grid macros; what you changed meanwhile isn't on the Pi yet.")
+            else:
+                st.data = macros_model._fill(r.get("data") or data)
+                st.synced = st.fingerprint
+                self.set_status("ok", "Uploaded the grid macros. The grid-macros service picks them up by itself.")
+            self.refresh_all()
+
+        self.run(fn, done)
+
+    def _macros_conflict(self):
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Changed on the Pi")
+        box.setText("The grid macros on the Pi changed since you loaded them.")
+        box.setInformativeText("Probably a slot was saved on the grid. Nothing was uploaded.\n\nLoad shows what's on "
+                               "the Pi now (your changes here are replaced). Upload anyway replaces it with yours — "
+                               "including slots saved on the grid since.")
+        load = box.addButton("Load", QMessageBox.AcceptRole)
+        force = box.addButton("Upload anyway", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.exec()
+        if box.clickedButton() is load:
+            self.macros.synced = None
+            self.load_macros()
+        elif box.clickedButton() is force:
+            self.upload_macros(force=True)
+        else:
+            self.set_status("warn", "Not uploaded: the grid macros on the Pi changed since they were loaded.")
+
+    def macros_audition(self, bank: int, slot: int):
+        """▶ in the Slot panel: the Pi loads the slot as if pressed on the grid (bank / slot 0-based here)."""
+        def fn():
+            if self.offline:
+                return {"ok": True, "bank": bank, "active": {str(bank): slot}}
+            return self.host.macros_audition(bank + 1, slot + 1)
+
+        def done(r, err):
+            if err is None and not (r or {}).get("ok"):
+                err = clients.ToolError((r or {}).get("error") or "no answer")
+            if err is not None:
+                self.set_status("error", f"Slot {bank + 1}.{slot + 1} not loaded: {err}")
+                return
+            sv = dict(self.macros.service or {})
+            sv.update({k: r[k] for k in ("bank", "active", "grid", "teletype") if k in r})
+            self.macros.service = sv
+            g = self.macros.glide(bank, slot)
+            self.set_status("ok", f"Loading slot {bank + 1}.{slot + 1} on the Pi ({macros_model.fmt_secs(g)}).")
+            self.refresh_all()
+
+        self.run(fn, done)
 
     # ── Teletype ──
     def tt_import(self, pick: bool = False):

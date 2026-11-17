@@ -4,6 +4,7 @@ macros, in one JSON file (~/.config/dualsense-eurorack-midi/grid_macros.json). K
 write it like the other files there; the service notices outside changes and reloads.
 
 A saved slot:  {"saved_at": <unix time>, "state": {"<provider>": <what that provider captured>, …}}
+Names (set in Kontrolleur, not needed by the grid): "names" 8 × 7 slot names, "bank_names" 8 bank names.
 """
 import copy
 import json
@@ -39,6 +40,8 @@ def default_data():
         "settings": copy.deepcopy(DEFAULT_SETTINGS),
         "banks": [[None] * SLOTS for _ in range(BANKS)],
         "slew": [[0] * SLOTS for _ in range(BANKS)],
+        "names": [[""] * SLOTS for _ in range(BANKS)],
+        "bank_names": [""] * BANKS,
     }
 
 
@@ -108,7 +111,24 @@ class MacroStore:
                             d["slew"][b][s_] = max(0, min(SLEW_STEPS - 1, int(slew[b][s_])))
                         except (TypeError, ValueError):
                             pass
+        names = raw.get("names")
+        if isinstance(names, list):
+            for b in range(min(BANKS, len(names))):
+                if isinstance(names[b], list):
+                    for s_ in range(min(SLOTS, len(names[b]))):
+                        if isinstance(names[b][s_], str):
+                            d["names"][b][s_] = names[b][s_][:40]
+        bnames = raw.get("bank_names")
+        if isinstance(bnames, list):
+            for b in range(min(BANKS, len(bnames))):
+                if isinstance(bnames[b], str):
+                    d["bank_names"][b] = bnames[b][:40]
         return d
+
+    @classmethod
+    def normalise(cls, raw):
+        """Clean up data from outside (Kontrolleur, a backup): unknown keys dropped, ranges clamped."""
+        return cls._normalise(raw)
 
     # ---- access ----------------------------------------------------------------------------------
     @property
@@ -142,6 +162,9 @@ class MacroStore:
             return float(times[min(step, len(times) - 1)])
         except (TypeError, ValueError, IndexError):
             return 0.0
+
+    def name(self, bank, slot) -> str:
+        return self.data["names"][bank][slot]
 
     def bank_used(self, bank) -> bool:
         return any(s is not None for s in self.data["banks"][bank])

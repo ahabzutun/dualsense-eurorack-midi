@@ -57,9 +57,9 @@ Only what goes through the Pi can be remembered. A knob turned on a module itsel
 
 ## Settings: `~/.config/dualsense-eurorack-midi/grid_macros.json`
 
-Snapshots, slew settings and settings live in one JSON file, next to `controls.py` and `er301_routes.py`.
-The service creates it with the defaults, saves into it, and reloads it when it changes (Kontrolleur can
-write it).
+Snapshots, slew settings, names and settings live in one JSON file, next to `controls.py` and
+`er301_routes.py`. The service creates it with the defaults, saves into it, and reloads it when it changes.
+Kontrolleur's Macros tab edits it (`scripts/grid_macros_tool.py` over SSH); by hand works too.
 
 ```jsonc
 "settings": {
@@ -76,6 +76,28 @@ write it).
   "feedback_sources": ["EC4"]
 }
 ```
+
+## Kontrolleur
+
+The **Macros** tab shows the left half as the grid shows it, with the selected bank's slots underneath.
+
+- **Slot:** name, slew, when it was saved. What it holds in this rig's words: the DualSense state (block,
+  section, slice, freeze, motion), each MIDI value named by its control ("16n Fader 3", "EC4 S1 G2
+  encoder 4") with where it lands (ER-301 port, SSP input of the patch in use). ✕ takes a single value or
+  part out of the slot. Copy / move (a move swaps with what's at the target) / clear.
+  **▶ Load this slot now** makes the Pi load it, as if its load key were pressed.
+- **Bank:** name, its slots, what the bank saves and loads (e.g. a bank of mixer scenes that leaves the
+  slice alone), copy the whole bank.
+- **Settings:** slew times and curve, when the slice / freeze change (start / end), hold time for save,
+  which controllers are remembered / pick up / get values sent back. Backups of everything as a file.
+
+↓ Load / ↑ Upload work like in the other tabs. Upload refuses when the file on the Pi changed since the Load,
+which usually means a slot was saved on the grid; then Load first, or upload anyway. The Pi keeps the last
+10 versions in `~/.config/dualsense-eurorack-midi/backups/`.
+
+**Routing** shows the grid as a controller once the grid macros are on the Pi. Its left half runs into the
+MIDI hub's GRID MACROS input, its right half goes around to Teletype. Its panel lists everything the slots
+touch, and where each value lands.
 
 ## Trying it on a computer
 
@@ -155,4 +177,4 @@ sudo scripts/teletype_gadget.sh status
 - **Fine slice and the left stick**: a loaded fine slice stays until the left stick moves again (unless the
   left group is frozen).
 - **Single instrument**: the DualSense part covers the current instrument (no control switches instruments today).
-- **Kontrolleur** doesn't have a Macros tab yet; `grid_macros.json` is the place to edit for now.
+- **Pedals as macro controls** (load next / previous slot by foot) aren't there yet.

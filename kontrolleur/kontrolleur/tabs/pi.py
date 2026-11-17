@@ -700,7 +700,7 @@ PI_MODS = ("slice", "loop", "extras")
 ENV_OF = {"slice": "pi", "loop": "pi", "extras": "pi", "lfo": "i2c", "er": "i2c", "ssp": "ssp"}
 ER_ROWS = 12           # ER-301 ports listed in its box before "+ N more"
 DEV_HUB = {"dualsense": "script", "16n": "16n", "pedal": "pedal", "ec4": "ec4"}
-HUB_IN = [("script", "DUALSENSE SCRIPT"), ("16n", "16N"), ("pedal", "PEDALS"), ("ec4", "EC4")]
+HUB_IN = [("script", "DUALSENSE SCRIPT"), ("16n", "16N"), ("pedal", "PEDALS"), ("ec4", "EC4"), ("macros", "GRID MACROS")]
 HUB_IN_X = HUB_IN + [("nerdseq", "NERDSEQ"), ("tt_in", "I2C2MIDI")]
 HUB_COLS = [("tt", "TT"), ("ssp", "SSP"), ("nerdseq", "NRD")]
 HUB_BLOCKED = {("tt_in", "tt"), ("nerdseq", "nerdseq")}           # not sent back where it came from
@@ -710,6 +710,7 @@ HUB_OUT_X = HUB_OUT + [("nerdseq", "NERDSEQ", "if plugged in")]
 HUB_STEPS = [
     ("pedal", "pedals ch 1 → DualSense channel", "reads /tmp/dualsense_channel"),
     ("16n", "16n → SSP: fader values rescaled", "the other outputs get them as sent"),
+    ("pickup", "16n held back until it picks up", "after a grid macro load, until the fader passes the value"),
     ("tt", "→ XIAO-TT: CC floods thinned out", "latest value every 10 ms, ch 2 straight"),
     ("er", "ER-301 routes → i2c2midi setup", "config/er301_routes.py, re-read live"),
     ("osc", "OSC tap → OpenMW on the Mac", "UDP, adds no MIDI port"),
@@ -720,7 +721,14 @@ SCRIPT_CARDS = [
     ("clock", "CLOCK", "NerdSEQ clock, else 120 BPM", "times loop quantize"),
     ("hid", "LED · RUMBLE", "back to the DualSense", "channel colour, dots, haptics"),
 ]
-FOLD_KEYS = ["src_" + d for d, _ in SOURCES] + ["pi", "i2c", "er", "tt", "ssp"]
+FOLD_KEYS = ["src_" + d for d, _ in SOURCES] + ["src_grid", "pi", "i2c", "er", "tt", "ssp"]
+GRID_TT = QColor(140, 190, 255)         # Teletype's half of the grid (as in the Macros tab)
+
+
+def grid_on(ctx) -> bool:
+    """The grid goes through the Pi (the grid macros are installed there)."""
+    mc = getattr(ctx, "macros", None)
+    return bool(mc is not None and mc.loaded and mc.exists)
 LEVELS = ("normal", "scripts", "stages")
 LANE_H = 34.0          # room above and below the DualSense script for cables to the hub
 LANE_STEP = 7.0
@@ -1057,6 +1065,11 @@ class PiDrawing(Drawing):
             h = head + 8 if fold else head + rh * max(1, n) + 8
             cards.append((dev, title, y, h, fold))
             y += h + 14
+        if grid_on(ctx):
+            fold = self.folded("src_grid")
+            h = head + 8 if fold else head + rh * 2 + 8
+            cards.append(("grid", "MONOME GRID", y, h, fold))
+            y += h + 14
         size = {"src": (SRC_W, y - 14)}
 
         mode = "fold" if self.folded("pi") else view["level"]
@@ -1136,6 +1149,11 @@ class PiDrawing(Drawing):
             items = by_dev.get(dev, [])
             S["cards"].append((dev, title, r, fold, items))
             ry = r.top() + head
+            if dev == "grid":
+                mid = QPointF(r.right(), r.top() + h / 2)
+                S["grid_jacks"] = {"left": mid, "right": mid} if fold else \
+                    {"left": QPointF(r.right(), ry + rh / 2), "right": QPointF(r.right(), ry + rh * 1.5)}
+                continue
             for pt in items:
                 if fold:
                     S["src_jacks"].append((QPointF(r.right(), r.top() + h / 2), pt))
@@ -1379,6 +1397,9 @@ class PiDrawing(Drawing):
         src = S["g"]["src"]
         D.Text("CONTROLLERS", Theme.font(10, HEAVY, "mono"), Theme.dim, tracking=1.4).paint(p, src.left(), src.top() + 2)
         for dev, title, r, fold, items in S["cards"]:
+            if dev == "grid":
+                self._grid_card(p, S, r, fold)
+                continue
             key = "src_" + dev
             sel = self.sel == key
             path = QPainterPath()
@@ -1428,6 +1449,85 @@ class PiDrawing(Drawing):
                 D.circle(p, jc, 9, col, _op(col, 0.9), 1.2)
                 D.circle(p, jc, 3.5, Theme.bg)
                 ry += rh
+
+    def _grid_card(self, p, S, r: QRectF, fold: bool):
+        """The monome grid: plugged into the Pi; its left half runs the grid macros, its right half goes on to
+        Teletype over the Pi's USB-C (gadget)."""
+        mc = self.ctx.macros
+        sel = self.sel == "src_grid"
+        col = Theme.function
+        path = QPainterPath()
+        path.addRoundedRect(r, 10, 10)
+        if sel:
+            D.glow(p, path, _op(col, 0.6), 10)
+        p.fillPath(path, Theme.bg)
+        D.draw_path(p, path, _op(col, 0.06), Theme.ink if sel else _op(col, 0.6), 2 if sel else 1.2)
+        t = D.Text("MONOME GRID", Theme.font(11, HEAVY, "mono"), Theme.ink, tracking=1.2)
+        t.paint(p, r.left() + 14, r.top() + 9)
+        sv = mc.service or {}
+        sub = f"{mc.used_slots()} macro slots · " + ("on the Pi" if sv.get("grid") else
+                                                     "service running, no grid" if sv else "service not running")
+        D.Text(sub, Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=SRC_W - 70, min_scale=0.8).paint(
+            p, r.left() + 14, r.top() + 11 + t.h)
+        self.hits.add(path, lambda: self.ctx.select("pi_sel", "src_grid"), "The monome grid (Macros tab for the slots)")
+        jl, jr = S["grid_jacks"]["left"], S["grid_jacks"]["right"]
+        if fold:
+            D.circle(p, jl, 11, col, _op(col, 0.9), 1.2)
+            D.circle(p, jl, 4, Theme.bg)
+            return
+        rh = S["rh"]
+        for c, lab, tok, tc in ((jl, "Left 8×8", "MACROS", col), (jr, "Right 8×8", "TELETYPE", GRID_TT)):
+            pill = D.Pill(D.Text(tok, Theme.font(10, BOLD, "mono"), tc), 6, 2, _op(tc, 0.14))
+            lt = D.Text(lab, Theme.font(10.5, SEMIBOLD), _op(Theme.ink, 0.9))
+            lt.paint(p, r.left() + 14, c.y() - lt.h / 2)
+            pill.paint(p, r.right() - 22 - pill.w, c.y() - pill.h / 2)
+            D.circle(p, c, 9, tc, _op(tc, 0.9), 1.2)
+            D.circle(p, c, 3.5, Theme.bg)
+            self.hits.add(QRectF(r.left() + 6, c.y() - rh / 2, r.width() - 12, rh),
+                          (lambda: self.ctx.set_mode("macros")) if tok == "MACROS" else (lambda: self.ctx.set_mode("teletype")),
+                          "The macro slots (Macros tab)" if tok == "MACROS" else "Teletype's scene (Teletype tab)")
+
+    def _grid_cables(self, p, S):
+        if "grid_jacks" not in S:
+            return
+        pi = S["pi"]
+        mc = self.ctx.macros
+        hot = self.sel == "src_grid"
+        al = 0.95 if hot else (0.6 if S["trace"] is None else 0.2)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(7.0)
+        a = S["grid_jacks"]["left"]
+        if pi["mode"] == "fold":
+            pr = pi["r"]
+            path = _curve(a, QPointF(pr.left(), pr.bottom() - S["rh"] * 1.5))
+        else:
+            path = self._lane_path(S, a, "grid", pi["hub_in"]["macros"])
+        on = mc.used_slots() > 0
+        p.strokePath(path, D.pen(_op(Theme.function, al if on else al * 0.5), 1.7 if hot else 1.4, None if on else [3, 3]))
+        self.hits.add(stroker.createStroke(path), lambda: self.ctx.select("pi_sel", "src_grid"),
+                      "Grid macros → MIDI hub: restored values go out through the port Grid_Macros")
+        # the right half: through the Pi's USB-C (gadget) to Teletype — round the outside, into its box
+        b = S["grid_jacks"]["right"]
+        tt = S["g"]["tt"]
+        box = QRectF(S["g"]["src"])
+        for r in S["g"].values():
+            box = box.united(r)
+        yb, xr = box.bottom() + 26, box.right() + 26
+        path = QPainterPath()
+        path.moveTo(b)
+        path.cubicTo(QPointF(b.x() + 40, b.y()), QPointF(b.x() + 40, yb), QPointF(b.x() + 80, yb))
+        path.lineTo(xr - 12, yb)
+        path.quadTo(QPointF(xr, yb), QPointF(xr, yb - 12))
+        ty = tt.center().y()
+        path.lineTo(xr, ty + 12)
+        path.quadTo(QPointF(xr, ty), QPointF(xr - 12, ty))
+        path.lineTo(tt.right(), ty)
+        p.strokePath(path, D.pen(_op(GRID_TT, al), 1.5 if hot else 1.2, [5, 4]))
+        _arrow(p, QPointF(tt.right() + 1, ty), True, _op(GRID_TT, al))
+        lab = D.Text("grid right half · Pi USB-C → Teletype USB", Theme.font(8.5, SEMIBOLD, "mono"), _op(GRID_TT, 0.85))
+        lab.paint(p, b.x() + 90, yb - lab.h - 3)
+        self.hits.add(stroker.createStroke(path), lambda: self.ctx.set_mode("teletype"),
+                      "The grid's right half reaches Teletype through the Pi (Teletype sees a normal 16×8 grid)")
 
     def _sub(self, dev: str) -> str:
         m = self.ctx.mapping
@@ -1598,7 +1698,8 @@ class PiDrawing(Drawing):
         label_w = r.width() - 40 - (len(HUB_COLS) * 26 + 8 if detail else 0)
         for k, label in (HUB_IN_X if detail else HUB_IN):
             c = pi["hub_in"][k]
-            on = k in via or (k == "script" and script_on) or k == "tt_in"
+            on = k in via or (k == "script" and script_on) or k == "tt_in" or \
+                (k == "macros" and grid_on(self.ctx) and self.ctx.macros.used_slots() > 0)
             if k == "tt_in":                          # arrives from the right: the XIAO-TT works both ways
                 lt = D.Text("I2C2MIDI ⇠ XIAO-TT", Theme.font(10, HEAVY, "mono"), module_color("lfo"), max_w=label_w, min_scale=0.7)
                 lt.paint(p, r.left() + 16, c.y() - lt.h / 2)
@@ -1770,7 +1871,7 @@ class PiDrawing(Drawing):
         ar = pi["A"]
         devs = []
         for dev, _t, r, _fold, items in S["cards"]:
-            if any(self._via_hub(pt, pi["mode"]) for pt in items):
+            if any(self._via_hub(pt, pi["mode"]) for pt in items) or dev == "grid":
                 devs.append((dev, r.center().y()))
         mid = ar.center().y()
         top = sorted([d for d in devs if d[1] < mid], key=lambda d: d[1])
@@ -1858,6 +1959,7 @@ class PiDrawing(Drawing):
             p.strokePath(_vcurve(bus, end), D.pen(_op(col, al), 2.4 * min(wf, 1.25)))
 
     def _front_cables(self, p, S):
+        self._grid_cables(p, S)
         pi, used = S["pi"], S["used"]
         mode = pi["mode"]
         stroker = QPainterPathStroker()
@@ -2142,7 +2244,9 @@ DEVICE_HINT = {
 
 def build_panel(ctx, tab: str, col: QVBoxLayout):
     sel = ctx.pi_sel
-    if sel.startswith("src_"):
+    if sel == "src_grid":
+        grid_panel(ctx, col)
+    elif sel.startswith("src_"):
         device_panel(ctx, sel[4:], col)
     elif sel == "mod_ssp":
         ssp_panel(ctx, col)
@@ -2303,6 +2407,55 @@ def add_card(ctx, funcs: List[str], accent: QColor, device: Optional[str] = None
     if kind == "cc" and fcur in M.INPUT_ACTIONS:
         card.add(W.hint("Fires when the value goes to 64 or above (a switch, a push button or a fader passing the middle)."))
     return card
+
+
+def grid_panel(ctx, col: QVBoxLayout):
+    from .. import macros as MC
+    mc = ctx.macros
+    col.addWidget(W.title("Monome grid"))
+    col.addWidget(W.hint("Plugged into the Pi. Its left half runs the grid macros (snapshots of the rig), its right half "
+                         "goes on to Teletype through the Pi's USB-C port: Teletype sees a normal 16×8 grid."))
+    sv = mc.service or {}
+    card = W.Card("Grid macros", Theme.function)
+    card.add(W.row("Slots saved", W.label(f"{mc.used_slots()} of {MC.BANKS * MC.SLOTS}", 12, SEMIBOLD, "mono")))
+    card.add(W.row("Service", W.label("running" if sv else "not running", 12, SEMIBOLD, "mono",
+                                      Theme.special if sv else Theme.trig)))
+    card.add(W.row("Grid", W.label("connected" if sv.get("grid") else "—", 12, SEMIBOLD, "mono", Theme.dim)))
+    card.add(W.row("Teletype (gadget)", W.label("connected" if sv.get("teletype") else "—", 12, SEMIBOLD, "mono", Theme.dim)))
+    card.add(W.hint("Restored values go out through the port Grid_Macros into the MIDI hub, like a controller."))
+    card.add(W.hbox(W.small_button("Open the Macros tab", lambda: ctx.set_mode("macros")), stretch_end=True))
+    col.addWidget(card)
+
+    # everything the slots touch, with where it lands
+    from .. import ssp as S_
+    senders = S_.senders(ctx)
+    seen = {}
+    ds_slots = 0
+    for b in range(MC.BANKS):
+        for s in range(MC.SLOTS):
+            snap = mc.slot(b, s)
+            if snap is None:
+                continue
+            if (snap.get("state") or {}).get("dualsense"):
+                ds_slots += 1
+            for kind, ch, num, _v, src in MC.midi_values(snap):
+                e = seen.setdefault((kind, ch, num), [src, 0])
+                e[1] += 1
+    card = W.Card("What the slots touch", Theme.cv)
+    if not seen and not ds_slots:
+        card.add(W.label("nothing yet", 12, REGULAR, "ui", Theme.dim))
+    if ds_slots:
+        card.add(W.row("DualSense script: slice · freeze · motion", W.label(f"{ds_slots} slots", 11, REGULAR, "mono", Theme.dim)))
+    for (kind, ch, num), (src, n) in sorted(seen.items(), key=lambda x: (x[0][1], x[0][2])):
+        name = MC.value_name(ctx, kind, ch, num, src, senders)
+        dest = MC.destinations(ctx, kind, ch, num)
+        card.add(W.row(name, W.label(f"{n} slot{'s' if n != 1 else ''}", 11, REGULAR, "mono", Theme.dim)))
+        if dest:
+            card.add(W.label("→ " + " · ".join(dest), 10, REGULAR, "mono", Theme.cv, wrap=True))
+    if seen:
+        card.add(W.hint("→ where a value lands: ER-301 routes and inputs of the SSP patch in use. Values without an arrow "
+                        "go to whatever else listens on that channel / CC (NerdSEQ, Teletype via I2M)."))
+    col.addWidget(card)
 
 
 def device_panel(ctx, dev: str, col: QVBoxLayout):

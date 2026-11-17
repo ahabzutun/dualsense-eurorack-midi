@@ -91,6 +91,7 @@ out while they run. Their settings files are re-read while running, so a change 
 | `src/macros/`, `src/grid_macros.py`, `src/grid_macros_sim.py` | grid macros: engine, grid proxy, the service and a simulator for the computer ([docs](docs/grid-macros.md)) |
 | `src/state/snapshot_io.py` | the DualSense script's state for the grid macros (local socket) |
 | `src/keyboard_forward.py`, `scripts/teletype_gadget.sh` | the Pi's USB-C as Teletype's grid + keyboard |
+| `scripts/grid_macros_tool.py` | Kontrolleur's Macros tab ⇄ `grid_macros.json` and the running service (export / install / audition) |
 | `src/osc_out.py`, `src/osc_map.conf` | OSC tap of the hub: mapped MIDI → OpenMW on the Mac (UDP) |
 | `scripts/` | device tools Kontrolleur runs over SSH (or locally on a cable), SSP helpers, `er301_push.py` |
 | `kontrolleur/` | the desktop app ([its own README](kontrolleur/README.md)) |
@@ -186,7 +187,7 @@ port (Kontrolleur's ER-301 tab lists them all and links to each). `scripts/er301
 ## Kontrolleur
 
 The desktop app in `kontrolleur/` (Python + PySide6, macOS and Linux) with one tab per device: DualSense, 16n,
-Pedals, EC4, Routing, ER-301 and Teletype. It loads the current state from the Pi (and from the devices, over SSH or on a
+Pedals, EC4, Routing, ER-301, Teletype and Macros. It loads the current state from the Pi (and from the devices, over SSH or on a
 cable), lets you change it and uploads it. The **Routing** tab draws the whole rig — controllers, the Pi with the
 DualSense script and the hub (*Scripts* and *Stages* open them up), the i2c2midi, ER-301, Teletype and the SSP's
 loaded patch — and traces a single control through all of it, hop by hop. The **Teletype** tab reads the
@@ -239,7 +240,8 @@ The right 8×8 goes on to Teletype unchanged. The Pi's USB-C port appears to Tel
 keyboard, so a keyboard on the Pi types into Teletype without swapping cables.
 
 `./install-pi.sh --grid-macros` sets it up (one reboot); `python3 src/grid_macros_sim.py` tries the macro
-half on a computer. Everything else: [docs/grid-macros.md](docs/grid-macros.md).
+half on a computer. Kontrolleur's **Macros** tab names slots, shows what each holds and where it lands,
+edits and backs them up, and loads a slot on the Pi. Everything else: [docs/grid-macros.md](docs/grid-macros.md).
 
 ## Firmware
 
@@ -302,7 +304,7 @@ aseqdump -p XIAO-TT        # watch what arrives from the i2c2midi
 
 # tests (on the Pi or any computer with the packages)
 python3 test/test_button_router.py && python3 test/test_axis_router.py && python3 test/test_device_inputs.py
-python3 test/test_grid_macros.py
+python3 test/test_grid_macros.py && python3 test/test_kontrolleur_macros.py    # the second needs PySide6
 ```
 
 Kontrolleur: `git pull` in the repository and restart the app (the macOS app and the Linux launcher run the code

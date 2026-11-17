@@ -134,8 +134,19 @@ class MacroEngine:
                 self.log(f"⚠️  macro load: {name} failed: {e}")
         self.active[bank] = slot
         self.loading = (bank, slot, now + duration) if duration > 0 else None
-        self.log(f"▶️  macro {bank + 1}.{slot + 1} loaded ({duration:g} s)")
+        name = self.store.name(bank, slot)
+        self.log(f"▶️  macro {bank + 1}.{slot + 1}{' “' + name + '”' if name else ''} loaded ({duration:g} s)")
         return True
+
+    def load_at(self, bank, slot):
+        """Load a slot of any bank (Kontrolleur's audition, pedals later): the grid switches to that bank."""
+        if not (0 <= bank < BANKS and 0 <= slot < SLOTS):
+            return False
+        if bank != self.bank:
+            self.bank = bank
+            self.save_held.clear()
+            self.save_done.clear()
+        return self.load(slot)
 
     def clear(self, slot):
         self.store.clear_slot(self.bank, slot)

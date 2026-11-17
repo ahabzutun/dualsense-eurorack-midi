@@ -422,10 +422,17 @@ tm, ts = pty.openpty()          # "Teletype": we play Teletype on tm, the servic
 for fd in (gm, tm):
     import tty  # noqa: E402
     tty.setraw(fd)
-store_path = os.path.join(tmpdir, "svc.json")
-proc = subprocess.Popen([sys.executable, os.path.join(SRC, "grid_macros.py"), "--no-midi",
-                         "--grid", os.ttyname(gs), "--teletype", os.ttyname(ts), "--store", store_path],
-                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+cfg_dir = os.path.join(tmpdir, "cfg")
+svc_env = dict(os.environ, DSEM_CONFIG_DIR=cfg_dir, GRID_MACROS_PORT="47931")
+proc = subprocess.Popen([sys.executable, os.path.join(SRC, "grid_macros.py"), "--no-midi", "--control-port", "47931",
+                         "--grid", os.ttyname(gs), "--teletype", os.ttyname(ts)],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=svc_env)
+TOOL = os.path.join(HERE, "..", "scripts", "grid_macros_tool.py")
+
+
+def tool(*args, stdin=""):
+    r = subprocess.run([sys.executable, TOOL, *args], input=stdin, capture_output=True, text=True, env=svc_env)
+    return json.loads([ln for ln in r.stdout.splitlines() if ln.startswith("{")][-1])
 
 
 def read_for(fd, seconds):
@@ -454,6 +461,25 @@ try:
     os.write(tm, mext.level_map(0, 0, [15] * 64) + mext.level_map(8, 0, [3] * 64))
     got = read_for(gm, 0.5)
     check(got == mext.level_map(8, 0, [3] * 64), "service: only Teletype's right quad reaches the grid")
+    # Kontrolleur's tool over the same files and the service's control socket
+    ex = tool("export")
+    check(ex["ok"] and ex["exists"] and ex["service"] and ex["service"]["grid"], "tool: export with the service's state")
+    data = ex["data"]
+    data["names"][2][4] = "drop"
+    data["banks"][2][4] = {"saved_at": 1, "state": {}}
+    data["slew"][2][4] = 9
+    r = tool("install", "--expect", "0000", stdin=json.dumps(data))
+    check(not r["ok"] and r.get("conflict"), "tool: refuses when the file changed since it was loaded")
+    r = tool("install", "--expect", ex["sha"], stdin=json.dumps(data))
+    check(r["ok"] and r["data"]["names"][2][4] == "drop" and r["data"]["slew"][2][4] == 5,
+          "tool: install cleans up (slew clamped) and keeps names")
+    check(any(f.startswith("grid_macros-") for f in os.listdir(os.path.join(cfg_dir, "backups"))), "tool: backup kept")
+    r = tool("audition", "3", "5")
+    check(r["ok"] and r["bank"] == 2 and r["active"].get("2") == 4, "tool: audition loads the slot in the service")
+    got = read_for(gm, 0.4)
+    frame = got[got.rfind(bytes([0x1A, 0, 0])):][:35]
+    check(len(frame) == 35 and mext.unpack_level_map(frame)[2][2 * 8] == 15, "tool: the grid switched to bank 3")
+    check(not tool("audition", "1", "1")["ok"], "tool: auditioning an empty slot says so")
 finally:
     proc.terminate()
     try:

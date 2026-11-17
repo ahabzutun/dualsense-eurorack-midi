@@ -114,6 +114,18 @@ class Host:
         args = "install-controls" + (f" --expect {expect}" if expect else "")
         return last_json(self.remote("er301_routes_tool.py", args, source, timeout=60), "the SSH host")
 
+    # grid_macros_tool.py: the grid macros (grid_macros.json and the grid-macros service)
+    def macros_export(self) -> dict:
+        return last_json(self.remote("grid_macros_tool.py", "export", timeout=60), "the SSH host")
+
+    def macros_install(self, data: dict, expect: Optional[str] = None) -> dict:
+        args = "install" + (f" --expect {expect}" if expect else "")
+        return last_json(self.remote("grid_macros_tool.py", args, json.dumps(data), timeout=60), "the SSH host")
+
+    def macros_audition(self, bank: int, slot: int) -> dict:
+        """1-based, like the grid's labels."""
+        return last_json(self.remote("grid_macros_tool.py", f"audition {bank} {slot}", timeout=30), "the SSH host")
+
 
 # ── background jobs: run in a thread, answer on the GUI thread ──────────────────────────────────
 

@@ -35,6 +35,7 @@ from macros.store import MacroStore  # noqa: E402
 
 STORE_FILE = "grid_macros.json"
 RESCAN = 2.0
+CONTROL_PORT = 47123          # UDP on 127.0.0.1: scripts/grid_macros_tool.py (Kontrolleur) asks / auditions
 
 
 def log(*a):
@@ -221,6 +222,53 @@ class Midi:
                     log(f"⚠️  feedback {src}: {e}")
 
 
+class Control:
+    """Local requests (JSON over UDP), answered from the main loop:
+        {"cmd": "status"}                       → bank, slot loaded last, grid / Teletype connected
+        {"cmd": "load", "bank": b, "slot": s}   → load a slot (the grid switches to that bank)"""
+
+    def __init__(self, port=CONTROL_PORT):
+        self.sock = None
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+            s.setblocking(False)
+            self.sock = s
+        except OSError as e:
+            log(f"⚠️  control socket not available ({e})")
+
+    def poll(self, engine, store, grid, tt):
+        if self.sock is None:
+            return
+        while True:
+            try:
+                data, addr = self.sock.recvfrom(65536)
+            except (BlockingIOError, InterruptedError, OSError):
+                return
+            try:
+                req = json.loads(data.decode())
+                cmd = req.get("cmd")
+                if cmd == "load":
+                    store.reload_if_changed()            # a slot Kontrolleur just uploaded
+                    ok = engine.load_at(int(req["bank"]), int(req["slot"]))
+                    engine.force_redraw()
+                    reply = {"ok": ok, "error": None if ok else "that slot is empty"}
+                elif cmd == "status":
+                    reply = {"ok": True}
+                else:
+                    reply = {"ok": False, "error": f"unknown command {cmd!r}"}
+                reply.update(bank=engine.bank, active={str(b): s for b, s in engine.active.items()},
+                             grid=grid.path if grid.fd is not None else None,
+                             teletype=tt.path if tt.fd is not None else None)
+            except Exception as e:
+                reply = {"ok": False, "error": str(e)}
+            try:
+                self.sock.sendto(json.dumps(reply).encode(), addr)
+            except OSError:
+                pass
+
+
 # ---- service -------------------------------------------------------------------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -228,6 +276,7 @@ def main(argv=None):
     ap.add_argument("--teletype", default="/dev/ttyGS0", help="USB gadget serial towards Teletype")
     ap.add_argument("--store", default=None, help=f"macro file (default: ~/.config/…/{STORE_FILE})")
     ap.add_argument("--no-midi", action="store_true", help="no MIDI (testing the grid side)")
+    ap.add_argument("--control-port", type=int, default=CONTROL_PORT, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     store = MacroStore(args.store or os.path.join(live_config.DIR, STORE_FILE))
@@ -260,6 +309,7 @@ def main(argv=None):
     grid = Link("grid", lambda: find_grid(args.grid))
     tt = Link("Teletype (gadget)", lambda: args.teletype if os.path.exists(args.teletype) else None)
 
+    control = Control(args.control_port)
     tick = 1.0 / max(10, int(settings.get("tick_hz", 50)))
     next_scan = 0.0
     log("🟩 grid macros running")
@@ -293,6 +343,7 @@ def main(argv=None):
                     tt.write(answer)
                     grid.write(to_grid)
 
+            control.poll(engine, store, grid, tt)
             while True:
                 try:
                     port, msg = incoming.get_nowait()
