@@ -67,11 +67,17 @@ def find_grid(explicit=None):
 
 
 class Link:
-    """One serial end that may come and go."""
+    """One serial end that may come and go.
 
-    def __init__(self, name, finder):
+    reopen: seconds to wait before opening again after it went away. The gadget towards Teletype uses 0:
+    its tty can be held open while Teletype is unplugged, and it has to be open when Teletype connects —
+    Teletype sends its size query and first LED frames within ~0.5 s, and with nobody reading them it
+    doesn't take the grid (tested)."""
+
+    def __init__(self, name, finder, reopen=RESCAN):
         self.name = name
         self.finder = finder
+        self.reopen = reopen
         self.fd = None
         self.path = None
         self.next_try = 0.0
@@ -79,14 +85,16 @@ class Link:
     def ensure(self, now):
         if self.fd is not None or now < self.next_try:
             return False
-        self.next_try = now + RESCAN
+        self.next_try = now + max(self.reopen, 0.2)
         path = self.finder()
         if not path:
             return False
         try:
             self.fd = open_raw(path)
+            first = self.path is None
             self.path = path
-            log(f"✅ {self.name}: {path}")
+            if first or self.reopen >= RESCAN:
+                log(f"✅ {self.name}: {path}")
             return True
         except OSError as e:
             log(f"⚠️  {self.name}: {path}: {e}")
@@ -98,9 +106,10 @@ class Link:
                 os.close(self.fd)
             except OSError:
                 pass
-            log(f"❌ {self.name} gone{(': ' + why) if why else ''}")
+            if self.reopen >= RESCAN:
+                log(f"❌ {self.name} gone{(': ' + why) if why else ''}")
         self.fd = None
-        self.next_try = time.monotonic() + RESCAN
+        self.next_try = time.monotonic() + self.reopen
 
     def write(self, data):
         if self.fd is None or not data:
@@ -307,7 +316,7 @@ def main(argv=None):
     splitter.on_teletype_leds = lambda qx, qy, levels: tt_leds.update(levels)
 
     grid = Link("grid", lambda: find_grid(args.grid))
-    tt = Link("Teletype (gadget)", lambda: args.teletype if os.path.exists(args.teletype) else None)
+    tt = Link("Teletype (gadget)", lambda: args.teletype if os.path.exists(args.teletype) else None, reopen=0.0)
 
     control = Control(args.control_port)
     tick = 1.0 / max(10, int(settings.get("tick_hz", 50)))
@@ -342,6 +351,8 @@ def main(argv=None):
                     answer, to_grid = splitter.from_teletype(data)
                     tt.write(answer)
                     grid.write(to_grid)
+                    if answer[:1] == b"\x03":
+                        log("🔌 Teletype connected the grid")
 
             control.poll(engine, store, grid, tt)
             while True:

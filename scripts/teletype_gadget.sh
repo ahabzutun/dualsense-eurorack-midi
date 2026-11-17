@@ -96,8 +96,10 @@ for l in "$G"/configs/c.1/*.*; do
     [ -L "$l" ] && rm "$l"
 done
 
+# Keyboard FIRST: Teletype's CDC driver (libavr32 uhi_cdc_install) only accepts the device when the *last*
+# interface in the configuration is the CDC data interface — tested: grid first = no grid on Teletype.
 case "$MODE" in
-    both)     ln -s "$G/functions/acm.grid" "$G/configs/c.1/"; ln -s "$G/functions/hid.kbd" "$G/configs/c.1/" ;;
+    both)     ln -s "$G/functions/hid.kbd" "$G/configs/c.1/"; ln -s "$G/functions/acm.grid" "$G/configs/c.1/" ;;
     grid)     ln -s "$G/functions/acm.grid" "$G/configs/c.1/" ;;
     keyboard) ln -s "$G/functions/hid.kbd" "$G/configs/c.1/" ;;
     off)      status; exit 0 ;;
