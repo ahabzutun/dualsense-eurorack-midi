@@ -137,7 +137,7 @@ class TeletypeDrawing(GrowingDrawing):
             n = sum(1 for e in mon.log if time.monotonic() - e[0] < 1.0)
             t, c = f"● LIVE · {n} msg/s", Theme.cv
         elif mon.running and mon.connected:
-            t, c = "LIVE · XIAO-TT not plugged in", Theme.trig
+            t, c = "LIVE · no XIAO link on the Pi", Theme.trig
         elif mon.running:
             t, c = "LIVE · connecting …", Theme.dim
         else:
@@ -249,7 +249,7 @@ class TeletypeDrawing(GrowingDrawing):
         mon = ctx.tt_mon
         g = Theme.grow
         f = Theme.font(10, SEMIBOLD, "mono")
-        hdr = D.Text("ARRIVING FROM THE I2C2MIDI · USB → XIAO-TT → PI", Theme.font(10, HEAVY, "mono"), Theme.dim, tracking=1.2)
+        hdr = D.Text("ARRIVING FROM THE I2C2MIDI · USB → XIAO LINK → PI", Theme.font(10, HEAVY, "mono"), Theme.dim, tracking=1.2)
         if not mon.running and not mon.seen:
             return D.Col([hdr, D.Text("Not listening. Panel → Live → Listen shows what the Teletype really sends.",
                                       f, _op(Theme.dim, 0.8))], 6, "leading")

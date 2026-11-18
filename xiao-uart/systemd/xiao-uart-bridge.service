@@ -1,0 +1,13 @@
+[Unit]
+Description=XIAO UART MIDI bridge (Pi UARTs <-> remote XIAOs, ALSA ports XIAO-*)
+After=sound.target
+Before=midi-passthrough.service
+
+[Service]
+User=ahab
+ExecStart=/usr/bin/python3 /home/ahab/xiao-uart/xiao_uart_bridge.py /home/ahab/xiao-uart/links.json
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

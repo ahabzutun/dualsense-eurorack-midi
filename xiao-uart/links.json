@@ -1,0 +1,34 @@
+{
+  "_comment": "One entry per UART link. name = ALSA port name. All enabled links are equal members of the MIDI bus (midi_passthrough.py): whatever is plugged in gets the whole MIDI flow and can send to everyone. baud must match the XIAO firmware (250000). loglady is reserved for Teletype (loglady-teletype.service). Apply changes: sudo systemctl restart xiao-uart-bridge",
+  "links": [
+    {
+      "name": "mysteryman",
+      "device": "/dev/ttyAMA0",
+      "baud": 250000,
+      "enabled": true,
+      "pins": "uart0: GPIO14 TX (pin 8) / GPIO15 RX (pin 10) / GND pin 6"
+    },
+    {
+      "name": "jumpingman",
+      "device": "/dev/ttyAMA3",
+      "baud": 250000,
+      "enabled": true,
+      "pins": "uart3: GPIO4 TX (pin 7) / GPIO5 RX (pin 29) / GND pin 9"
+    },
+    {
+      "name": "nadine",
+      "device": "/dev/ttyAMA4",
+      "baud": 250000,
+      "enabled": true,
+      "pins": "uart4: GPIO8 TX (pin 24) / GPIO9 RX (pin 21) / GND pin 25"
+    },
+    {
+      "name": "loglady",
+      "device": "/dev/ttyAMA5",
+      "baud": 250000,
+      "enabled": false,
+      "pins": "uart5: GPIO12 TX (pin 32) / GPIO13 RX (pin 33) / GND pin 34",
+      "note": "reserved: loglady is the Teletype link (loglady-teletype.service), not a MIDI port"
+    }
+  ]
+}

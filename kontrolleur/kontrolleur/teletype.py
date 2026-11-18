@@ -716,7 +716,7 @@ class Monitor:
                 "-o", "ServerAliveInterval=5"]
         if identity.strip():
             args += ["-o", "IdentitiesOnly=yes", "-i", os.path.expanduser(identity.strip())]
-        args += [host, "python3 -u - --port XIAO-TT"]
+        args += [host, "python3 -u - --port bus"]
         p = QProcess()
         p.setProgram("ssh")
         p.setArguments(args)

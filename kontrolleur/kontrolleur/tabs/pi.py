@@ -588,13 +588,14 @@ def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
             hops.append(("device inputs", f"dualsense_midi.py listens on its own port '{port}': {how}{func_title(pt.func)}."))
             if dm:
                 hops.append(("MIDI hub", f"also gets the raw ch {m.hub_ch(pt.device, dm[0])} {_kind_text(dm[1])} {dm[2]} and passes it to "
-                                         "XIAO-TT and XIAO-SSP; it only does something there if a route or mapping listens."))
+                                         "every XIAO link of the bus; it only does something there if a route or mapping listens."))
 
     # 2 what a Pi function does with it
     if env == "pi":
         if mod == "slice":
             slice_port = next((u for u in m.port_map() if any(r[0] == "dualsense" and r[2] in ER_PI_FUNCS for r in u.refs)), None)
-            to = f" → hub → XIAO-TT → i2c2midi → SC.{slice_port.kind} {slice_port.port}" if slice_port else ""
+            to = (f" → hub → {link_of(ctx, 'i2c') or 'a XIAO link'} → i2c2midi → SC.{slice_port.kind} {slice_port.port}"
+                  if slice_port else "")
             hops.append(("Slice-Selekteur", f"grain slice 0–1023 (block × 128 + section × 16 + slice) → NRPN 3, 14-bit, on ch {ds}"
                                             f" → port DualSense_Controller{to}."))
         elif mod == "loop":
@@ -615,16 +616,19 @@ def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
             hops.append(("MIDI hub", f"pedal ch 1 → ch {ds} (the DualSense channel, read from /tmp/dualsense_channel)."))
             ch = ds
         msg = (ch, k, n)
-        hops.append(("MIDI hub", "sends it to every output: XIAO-TT, XIAO-SSP (and the NerdSEQ, if plugged in)."))
+        hops.append(("MIDI hub", "sends it to every member of the bus: "
+                     + ", ".join(l["name"] for l in xiao_links(ctx)) + " (and the NerdSEQ, if plugged in)."))
     ch, k, n = msg if msg else (None, None, None)
+
+    tt_link = "→ " + (link_of(ctx, "i2c") or "XIAO link")
 
     def tt_hop():
         if k in ("cc", "nrpn") and ch not in TT_STRAIGHT_CHANNELS:
-            hops.append(("→ XIAO-TT", f"CC floods are thinned: only the latest value per CC goes out every {HUB_THIN_MS} ms "
+            hops.append((tt_link, f"CC floods are thinned: only the latest value per CC goes out every {HUB_THIN_MS} ms "
                                       "(keeps the XIAO serial link clear)."))
         else:
             why = f"ch {ch} is never thinned" if ch in TT_STRAIGHT_CHANNELS else "notes are never thinned"
-            hops.append(("→ XIAO-TT", f"straight through ({why}) → USB host port of the i2c2midi."))
+            hops.append((tt_link, f"straight through ({why}) → USB host port of the i2c2midi."))
 
     # 4 where it ends up
     if mod == "lfo":
@@ -649,7 +653,8 @@ def trace_hops(ctx, pt) -> List[Tuple[str, str]]:
                                                + i2c2midi_state(ctx)[1]))
         hops.append(("I2C → ER-301", f"{port} is set over the i2c2midi's own I2C bus (Wire1), straight away."))
     elif mod == "ssp":
-        hops.append(("→ XIAO-SSP", "unchanged → the SSP sees it from its MIDI device XIAO-SSP."))
+        sl = link_of(ctx, "ssp") or "a XIAO link"
+        hops.append((f"→ {sl}", f"the SSP sees it from its MIDI device {sl} (CC floods thinned, like on every link)."))
         for sm, i in pt.extra.get("reach", [])[:6]:
             mch = sm.get("midi_ch")
             listen = (f"the module listens on ch {mch} only" if mch not in (0, None, "", "0")
@@ -684,7 +689,7 @@ def module_output(ctx, key: str, pts=None) -> Tuple[str, bool, QColor]:
 # Groups, each moved by dragging it and folded with its ▾: the controllers · the Raspberry Pi (the
 # DualSense script with the Pi functions + the MIDI hub; SCRIPTS opens up how the two work together) ·
 # the i2c2midi (Teletype expander, with its LFO) · the ER-301 and the Teletype on its I2C bus · the SSP.
-# MIDI for the i2c2midi and the SSP leaves the Pi through the hub (XIAO-TT / XIAO-SSP).
+# MIDI for the i2c2midi and the SSP leaves the Pi through the hub's bus: the named XIAO links, interchangeable.
 
 R_W = 460.0
 ER_W, TT_W = 300.0, 142.0
@@ -709,10 +714,10 @@ HUB_OUT_X = HUB_OUT + [("nerdseq", "NERDSEQ", "if plugged in")]
 # what midi_passthrough does on the way (scripts view)
 HUB_STEPS = [
     ("pedal", "pedals ch 1 → DualSense channel", "reads /tmp/dualsense_channel"),
-    ("16n", "16n → SSP: fader values rescaled", "the other outputs get them as sent"),
     ("pickup", "16n held back until it picks up", "after a grid macro load, until the fader passes the value"),
-    ("tt", "→ XIAO-TT: CC floods thinned out", "latest value every 10 ms, ch 2 straight"),
-    ("er", "ER-301 routes → i2c2midi setup", "config/er301_routes.py, re-read live"),
+    ("bus", "→ XIAO links: CC floods thinned out", "latest value every 10 ms, ch 2 straight"),
+    ("echo", "echo guard: no loops", "what a device sends straight back is dropped"),
+    ("er", "ER-301 routes → every link", "the i2c2midi answers from its own · re-read live"),
     ("osc", "OSC tap → OpenMW on the Mac", "UDP, adds no MIDI port"),
 ]
 # the parts of the DualSense script next to its routers (scripts view)
@@ -721,6 +726,53 @@ SCRIPT_CARDS = [
     ("clock", "CLOCK", "NerdSEQ clock, else 120 BPM", "times loop quantize"),
     ("hid", "LED · RUMBLE", "back to the DualSense", "channel colour, dots, haptics"),
 ]
+# The MIDI bus: the Pi's XIAO links (xiao-uart-bridge, ~/xiao-uart/links.json) are interchangeable members;
+# what is plugged into each is found out live: the SSP lists them as MIDI devices by name, and the i2c2midi
+# answers the ER-301 routing through one of them. loglady is no MIDI link: she is Teletype's grid + keyboard.
+LINKS_DEFAULT = ("mysteryman", "jumpingman", "nadine")
+ROLE_TEXT = {"i2c": "→ i2c2midi", "ssp": "→ SSP", "free": "free"}
+ROLE_DEVICE = {"i2c": "I2C2MIDI", "ssp": "SSP", "free": "—"}
+XIAO_COLOR = QColor(255, 196, 120)          # the XIAO chips (Seeed's orange LED)
+
+
+def xiao_links(ctx) -> List[dict]:
+    """[{"name", "role"}] for the enabled links; role = "i2c" | "ssp" | "free"."""
+    raw = getattr(ctx, "links", None)
+    names = [l["name"] for l in raw if l.get("enabled", True)] if raw else list(LINKS_DEFAULT)
+    st = getattr(ctx, "i2c2midi", None) or {}
+    i2c = (st.get("reply") or {}).get("via") if st.get("state") != "no answer" else None
+    ssp = getattr(ctx, "ssp", None)
+    devs = [str(d.get("name", "")).lower() for d in (ssp.devices() if ssp is not None and ssp.loaded else [])]
+    out = []
+    for n in names:
+        role = "i2c" if n == i2c else ("ssp" if any(d.startswith(n.lower()) for d in devs) else "free")
+        out.append({"name": n, "role": role})
+    return out
+
+
+def link_of(ctx, role: str) -> Optional[str]:
+    return next((l["name"] for l in xiao_links(ctx) if l["role"] == role), None)
+
+
+def role_color(role: str) -> QColor:
+    return module_color("lfo") if role == "i2c" else module_color("ssp") if role == "ssp" else Theme.c("body", 0.6)
+
+
+def hub_outs(links, detail: bool):
+    o = [(l["name"], l["name"].upper(), ROLE_TEXT[l["role"]]) for l in links]
+    return o + ([("nerdseq", "NERDSEQ", "if plugged in")] if detail else [])
+
+
+def hub_ins(links, detail: bool):
+    if not detail:
+        return list(HUB_IN)
+    return HUB_IN + [("nerdseq", "NERDSEQ")] + [("in:" + l["name"], l["name"].upper()) for l in links]
+
+
+def hub_cols(links):
+    return [(l["name"], l["name"][:3].upper()) for l in links] + [("nerdseq", "NRD")]
+
+
 FOLD_KEYS = ["src_" + d for d, _ in SOURCES] + ["src_grid", "pi", "i2c", "er", "tt", "ssp"]
 GRID_TT = QColor(140, 190, 255)         # Teletype's half of the grid (as in the Macros tab)
 
@@ -1051,8 +1103,10 @@ class PiDrawing(Drawing):
         by_dev = {}
         for pt in pts:
             by_dev.setdefault(pt.device, []).append(pt)
+        links = xiao_links(ctx)
         S = {"mods": mods, "pts": pts, "by_dev": by_dev, "used": {pt.jack for pt in pts}, "rh": rh, "rj": rj,
-             "head": head, "step_h": step_h, "jacks": {}, "outs": {}}
+             "head": head, "step_h": step_h, "jacks": {}, "outs": {},
+             "links": links, "link_role": {l["name"]: l["role"] for l in links}}
 
         def mod_h(k):
             return self._mod_h(mods[k][4])
@@ -1076,18 +1130,18 @@ class PiDrawing(Drawing):
         mods_h = sum(mod_h(k) for k in PI_MODS) + 18 * (len(PI_MODS) - 1)
         st = {}                                          # stages: column heights
         if mode == "fold":
-            pw, ph = 296.0, ENV_HEAD + 8 + 4 * rj + rh + 18
+            pw, ph = 296.0, ENV_HEAD + 8 + max(4, len(links)) * rj + rh + 18
             aw = ah = hw = hub_h = col1 = 0.0
         else:
             if mode == "normal":
                 aw, ah, col1 = 16 + MOD_W + 52, 34 + mods_h + 16, 0.0
-                hw, nin, nout, nsteps = HUB_W, len(HUB_IN), len(HUB_OUT), 0
+                hw, nin, nout, nsteps = HUB_W, len(hub_ins(links, False)), len(hub_outs(links, False)), 0
             elif mode == "scripts":
                 rt_h = 44 + 4 * rj + 34
                 col1 = rt_h + len(SCRIPT_CARDS) * (CARD_H + 12)
                 aw = 16 + RT_W + 54 + MOD_W + 52
                 ah = 34 + max(col1, mods_h) + 16 + 26           # + the lane for the channel file
-                hw, nin, nout, nsteps = HUB_WX, len(HUB_IN_X), len(HUB_OUT_X), len(HUB_STEPS)
+                hw, nin, nout, nsteps = HUB_WX, len(hub_ins(links, True)), len(hub_outs(links, True)), len(HUB_STEPS)
             else:
                 c1 = [("evdev", 16), ("devin", 30), ("chan", 16), ("hid", 16), ("clock", 0)]
                 c2 = [("brt", 44), ("frz", 30), ("art", 0)]
@@ -1098,7 +1152,7 @@ class PiDrawing(Drawing):
                 col1 = max(h1, h2, h3)
                 aw = 16 + ST1_W + ST_GAP1 + ST2_W + ST_GAP2 + MOD_W + 60 + ST4_W + 34
                 ah = 34 + col1 + 16 + 26
-                hw, nin, nout, nsteps = HUB_WX, len(HUB_IN_X), len(HUB_OUT_X), len(HUB_STEPS)
+                hw, nin, nout, nsteps = HUB_WX, len(hub_ins(links, True)), len(hub_outs(links, True)), len(HUB_STEPS)
             hub_h = 44 + (16 if nsteps else 0) + rj * nin + (28 + nsteps * step_h if nsteps else 0) + 30 + rj * nout + 10
             pw = 14 + aw + 60 + hw + 16
             ph = ENV_HEAD + 6 + max(ah + 2 * LANE_H, hub_h) + 14
@@ -1167,7 +1221,7 @@ class PiDrawing(Drawing):
         if mode == "fold":
             y0 = pr.top() + ENV_HEAD + 8
             pi["in"] = {d: QPointF(pr.left(), y0 + rj * (k + 0.5)) for k, (d, _t) in enumerate(SOURCES)}
-            pi["out"] = {k: QPointF(pr.right(), y0 + rj * (i + 0.5)) for i, (k, *_r) in enumerate(HUB_OUT)}
+            pi["out"] = {k: QPointF(pr.right(), y0 + rj * (i + 0.5)) for i, (k, *_r) in enumerate(hub_outs(links, False))}
         else:
             body = ph - ENV_HEAD - 6 - 14
             ar = QRectF(pr.left() + 14, pr.top() + ENV_HEAD + 6 + (body - ah) / 2, aw, ah)
@@ -1235,14 +1289,15 @@ class PiDrawing(Drawing):
             hr = QRectF(ar.right() + 60, pr.top() + ENV_HEAD + 6 + (body - hub_h) / 2, hw, hub_h)
             pi["hub"] = hr
             detail = mode != "normal"
-            ins, outs, steps = (HUB_IN, HUB_OUT, []) if not detail else (HUB_IN_X, HUB_OUT_X, HUB_STEPS)
+            ins, outs, steps = (hub_ins(links, False), hub_outs(links, False), []) if not detail else \
+                (hub_ins(links, True), hub_outs(links, True), HUB_STEPS)
             yy = hr.top() + 44
             if detail:
                 pi["matrix_y"] = yy
                 yy += 16
             pi["hub_in"] = {}
             for k, _t in ins:
-                pi["hub_in"][k] = QPointF(hr.right() if k == "tt_in" else hr.left(), yy + rj / 2)
+                pi["hub_in"][k] = QPointF(hr.right() if k.startswith("in:") else hr.left(), yy + rj / 2)
                 yy += rj
             pi["steps"] = {}
             if steps:
@@ -1257,6 +1312,7 @@ class PiDrawing(Drawing):
             for k, *_r in outs:
                 pi["hub_out"][k] = QPointF(hr.right(), yy + rj / 2)
                 yy += rj
+        pi["loglady"] = QPointF(pr.left() + min(190.0, pr.width() * 0.32), pr.bottom())    # Teletype's own XIAO
         S["pi"] = pi
         S["lanes"] = self._lanes(S) if mode != "fold" else {}
         tk = self.sel[6:] if self.sel.startswith("trace:") else None
@@ -1297,6 +1353,7 @@ class PiDrawing(Drawing):
         self._layer(p, "pi", ("pi",), lambda q: self._pi(q, S))
         self._layer(p, "right", ("i2c", "er", "tt", "ssp"), lambda q: self._right(q, S))
         self._front_cables(p, S)
+        self._loglady(p, S)
         self._chrome(p, S)
 
     LAYER_PAD = 30.0          # around a group's box: jacks, labels and glows that stick out
@@ -1379,11 +1436,12 @@ class PiDrawing(Drawing):
                           "The DualSense script")
         ir, sr = S["g"]["i2c"], S["g"]["ssp"]
         lfo_used = sum(1 for j in S["used"] if j[0] == "lfo")
-        self._env(p, ir, "I2C2MIDI", "Teletype expander · gets MIDI over USB (XIAO-TT)" if not self.folded("i2c") else
+        self._env(p, ir, "I2C2MIDI", f"Teletype expander · MIDI over USB from {link_of(self.ctx, 'i2c') or 'a XIAO link'}"
+                  if not self.folded("i2c") else
                   f"LFO · {lfo_used} input{'s' if lfo_used != 1 else ''} patched", module_color("lfo"), "mod_lfo",
                   self.sel == "mod_lfo" and self.folded("i2c"))
         st = self.ctx.ssp
-        sub = "gets MIDI over USB (XIAO-SSP)"
+        sub = f"gets MIDI over USB from {link_of(self.ctx, 'ssp') or 'a XIAO link'}"
         if st.loaded and not st.stale and not st.devices():
             sub = "⚠ no MIDI device plugged in"
         if self.folded("ssp"):
@@ -1452,7 +1510,7 @@ class PiDrawing(Drawing):
 
     def _grid_card(self, p, S, r: QRectF, fold: bool):
         """The monome grid: plugged into the Pi; its left half runs the grid macros, its right half goes on to
-        Teletype over the Pi's USB-C (gadget)."""
+        Teletype through loglady, Teletype's own XIAO on the Pi."""
         mc = self.ctx.macros
         sel = self.sel == "src_grid"
         col = Theme.function
@@ -1506,8 +1564,9 @@ class PiDrawing(Drawing):
         p.strokePath(path, D.pen(_op(Theme.function, al if on else al * 0.5), 1.7 if hot else 1.4, None if on else [3, 3]))
         self.hits.add(stroker.createStroke(path), lambda: self.ctx.select("pi_sel", "src_grid"),
                       "Grid macros → MIDI hub: restored values go out through the port Grid_Macros")
-        # the right half: through the Pi's USB-C (gadget) to Teletype — round the outside, into its box
+        # the right half: through the Pi and loglady to Teletype — round the outside, into its box
         b = S["grid_jacks"]["right"]
+        L = pi.get("loglady")
         tt = S["g"]["tt"]
         box = QRectF(S["g"]["src"])
         for r in S["g"].values():
@@ -1515,7 +1574,11 @@ class PiDrawing(Drawing):
         yb, xr = box.bottom() + 26, box.right() + 26
         path = QPainterPath()
         path.moveTo(b)
-        path.cubicTo(QPointF(b.x() + 40, b.y()), QPointF(b.x() + 40, yb), QPointF(b.x() + 80, yb))
+        if L is not None and L.x() + 120 < xr:
+            path.cubicTo(QPointF(b.x() + 70, b.y()), QPointF(L.x() - 70, L.y() + 30), L)
+            path.cubicTo(QPointF(L.x() + 30, L.y() + 24), QPointF(L.x() + 50, yb), QPointF(L.x() + 100, yb))
+        else:
+            path.cubicTo(QPointF(b.x() + 40, b.y()), QPointF(b.x() + 40, yb), QPointF(b.x() + 80, yb))
         path.lineTo(xr - 12, yb)
         path.quadTo(QPointF(xr, yb), QPointF(xr, yb - 12))
         ty = tt.center().y()
@@ -1524,10 +1587,11 @@ class PiDrawing(Drawing):
         path.lineTo(tt.right(), ty)
         p.strokePath(path, D.pen(_op(GRID_TT, al), 1.5 if hot else 1.2, [5, 4]))
         _arrow(p, QPointF(tt.right() + 1, ty), True, _op(GRID_TT, al))
-        lab = D.Text("grid right half · Pi USB-C → Teletype USB", Theme.font(8.5, SEMIBOLD, "mono"), _op(GRID_TT, 0.85))
-        lab.paint(p, b.x() + 90, yb - lab.h - 3)
+        lab = D.Text("grid right half + keyboard · loglady → Teletype USB", Theme.font(8.5, SEMIBOLD, "mono"),
+                     _op(GRID_TT, 0.85))
+        lab.paint(p, (L.x() + 110) if L is not None and L.x() + 120 < xr else b.x() + 90, yb - lab.h - 3)
         self.hits.add(stroker.createStroke(path), lambda: self.ctx.set_mode("teletype"),
-                      "The grid's right half reaches Teletype through the Pi (Teletype sees a normal 16×8 grid)")
+                      "The grid's right half reaches Teletype through the Pi and loglady (Teletype sees a normal 16×8 grid)")
 
     def _sub(self, dev: str) -> str:
         m = self.ctx.mapping
@@ -1624,9 +1688,9 @@ class PiDrawing(Drawing):
             via = {pt.device for pt in S["pts"]}
             for d, t in SOURCES:
                 self._jack_label(p, pi["in"][d], col, d in via, t, max_w=110)
-            for k, name, to in HUB_OUT:
-                oc = module_color("lfo" if k == "tt" else "ssp")
-                self._jack_label(p, pi["out"][k], oc, True, f"{name} {to}", right=True, max_w=150)
+            for k, name, to in hub_outs(S["links"], False):
+                role = S["link_role"].get(k, "free")
+                self._xiao(p, pi["out"][k], name, to, role_color(role), role != "free", max_w=170)
             inuse = {pt.jack[0] for pt in S["pts"]}
             fn = [MOD_NAME[k].split("-")[0] if k != "extras" else "Extras" for k in PI_MODS if k in inuse]
             text = ("functions in use: " + " · ".join(fn)) if fn else "no Pi function patched"
@@ -1679,41 +1743,45 @@ class PiDrawing(Drawing):
         _opaque(p, path, col, 0.06)
         p.strokePath(path, D.pen(_op(col, 0.7), 1.3))
         self.hits.add(path, lambda: self.ctx.select("pi_sel", "env_pi"), "The MIDI hub")
-        t = D.Text("MIDI HUB", Theme.font(11, HEAVY, "mono"), col, tracking=1.2)
+        t = D.Text("MIDI HUB · BUS", Theme.font(11, HEAVY, "mono"), col, tracking=1.2)
         t.paint(p, r.left() + 16, r.top() + 9)
         D.Text("midi_passthrough.py" + (" · service midi-passthrough" if detail else " on the Pi"),
                Theme.font(9, SEMIBOLD, "mono"), Theme.dim, max_w=r.width() - 30, min_scale=0.7).paint(p, r.left() + 16, r.top() + 11 + t.h)
         pts = S["pts"]
         via = {DEV_HUB[pt.device] for pt in pts if ENV_OF.get(pt.jack[0]) != "pi"}
         script_on = any(o[1] for k, o in S["outs"].items() if k in PI_MODS) or "script" in via
-        cols_x = {k: r.right() - 22 - (len(HUB_COLS) - 1 - i) * 26 for i, (k, _t) in enumerate(HUB_COLS)}
+        links, role = S["links"], S["link_role"]
+        cols = hub_cols(links)
+        cols_x = {k: r.right() - 22 - (len(cols) - 1 - i) * 26 for i, (k, _t) in enumerate(cols)}
         if detail:
             y = pi["matrix_y"]
             D.Text("IN  ·  OUT →", Theme.font(8, HEAVY, "mono"), Theme.dim, tracking=1.0).paint(p, r.left() + 16, y + 1)
-            for k, lab in HUB_COLS:
-                tt = D.Text(lab, Theme.font(8, HEAVY, "mono"), Theme.dim)
+            for k, lab in cols:
+                tt = D.Text(lab, Theme.font(8, HEAVY, "mono"), _op(XIAO_COLOR, 0.95) if k != "nerdseq" else Theme.dim)
                 tt.paint(p, cols_x[k] - tt.w / 2, y + 1)
             self.hits.add(QRectF(r.left() + 8, y - 2, r.width() - 16, 16), None,
                           "Which input reaches which output: ● as it is · ◉ changed on the way (list below) · × not sent back")
-        label_w = r.width() - 40 - (len(HUB_COLS) * 26 + 8 if detail else 0)
-        for k, label in (HUB_IN_X if detail else HUB_IN):
+        label_w = r.width() - 40 - (len(cols) * 26 + 8 if detail else 0)
+        for k, label in hub_ins(links, detail):
             c = pi["hub_in"][k]
-            on = k in via or (k == "script" and script_on) or k == "tt_in" or \
+            on = k in via or (k == "script" and script_on) or (k.startswith("in:") and role.get(k[3:]) != "free") or \
                 (k == "macros" and grid_on(self.ctx) and self.ctx.macros.used_slots() > 0)
-            if k == "tt_in":                          # arrives from the right: the XIAO-TT works both ways
-                lt = D.Text("I2C2MIDI ⇠ XIAO-TT", Theme.font(10, HEAVY, "mono"), module_color("lfo"), max_w=label_w, min_scale=0.7)
+            if k.startswith("in:"):                   # arrives from the right: every XIAO link works both ways
+                rl = role.get(k[3:], "free")
+                lt = D.Text(f"{ROLE_DEVICE[rl]} ⇠ {label}", Theme.font(10, HEAVY, "mono"),
+                            role_color(rl) if rl != "free" else Theme.dim, max_w=label_w, min_scale=0.7)
                 lt.paint(p, r.left() + 16, c.y() - lt.h / 2)
-                _jack(p, c, module_color("lfo"), True, 9)
+                _jack(p, c, role_color(rl), rl != "free", 9)
             else:
                 self._jack_label(p, c, col, on, label + (" · if plugged in" if k == "nerdseq" else ""), max_w=label_w)
             if detail:
-                for ok, _lab in HUB_COLS:
+                for ok, _lab in cols:
                     cx = QPointF(cols_x[ok], c.y())
-                    if (k, ok) in HUB_BLOCKED:
+                    if (k.startswith("in:") and k[3:] == ok) or (k, ok) == ("nerdseq", "nerdseq"):
                         x = D.Text("×", Theme.font(10, HEAVY, "mono"), Theme.dim)
                         x.paint(p, cx.x() - x.w / 2, cx.y() - x.h / 2)
                         continue
-                    changed = k == "pedal" or ok == "tt"
+                    changed = k == "pedal" or ok != "nerdseq"
                     dot = _op(col, 0.85 if on else 0.3)
                     if changed:
                         D.circle(p, cx, 9, None, dot, 1.3)
@@ -1730,9 +1798,54 @@ class PiDrawing(Drawing):
                 D.Text(sub, Theme.font(8.5, SEMIBOLD, "mono"), Theme.dim, max_w=sr.width() - 44, min_scale=0.7).paint(
                     p, sr.left() + 30, sr.top() + 1 + Theme.font(9.5, BOLD, "mono").pixelSize() * 1.3)
         D.Text("OUT", Theme.font(9, HEAVY, "mono"), Theme.dim, tracking=1.2).paint(p, r.left() + 16, pi["hub_out_y0"])
-        for k, name, to in (HUB_OUT_X if detail else HUB_OUT):
-            oc = module_color("lfo" if k == "tt" else "ssp") if k != "nerdseq" else Theme.c("body", 0.6)
-            self._jack_label(p, pi["hub_out"][k], oc, k != "nerdseq", f"{name} {to}", right=True, max_w=r.width() - 40)
+        for k, name, to in hub_outs(links, detail):
+            if k == "nerdseq":
+                self._jack_label(p, pi["hub_out"][k], Theme.c("body", 0.6), False, f"{name} {to}", right=True,
+                                 max_w=r.width() - 40)
+                continue
+            rl = role.get(k, "free")
+            self._xiao(p, pi["hub_out"][k], name, to, role_color(rl), rl != "free", max_w=r.width() - 40)
+            self.hits.add(QRectF(r.left() + 8, pi["hub_out"][k].y() - S["rj"] / 2, r.width() - 16, S["rj"]), None,
+                          f"XIAO link '{k}': " + ({"i2c": "the i2c2midi is plugged into it (it answers the ER-301 routing "
+                                                           "through this link)",
+                                                   "ssp": "the SSP sees it as its MIDI device",
+                                                   "free": "nothing known plugged in — gets the whole bus anyway"}[rl]))
+
+    def _xiao(self, p, c: QPointF, name: str, to: str, col: QColor, on: bool, max_w: float = 200.0):
+        """A XIAO link on the hub's right edge: a chip with its name, where it goes, its jack."""
+        tt = D.Text(to, Theme.font(9, SEMIBOLD, "mono"), col if on else Theme.dim)
+        nt = D.Text(name, Theme.font(9.5, HEAVY, "mono"), _op(Theme.ink, 0.95 if on else 0.6), tracking=0.8,
+                    max_w=max(40.0, max_w - tt.w - 34), min_scale=0.7)
+        chip = D.Pill(nt, 7, 2.5, _op(XIAO_COLOR, 0.17 if on else 0.07), _op(XIAO_COLOR, 0.8 if on else 0.35), 1.1,
+                      radius=4.0)
+        x = c.x() - 16 - tt.w
+        tt.paint(p, x, c.y() - tt.h / 2)
+        chip.paint(p, x - 7 - chip.w, c.y() - chip.h / 2)
+        _jack(p, c, col, on, 11)
+
+    def _loglady(self, p, S):
+        """loglady: Teletype's own XIAO on the Pi (grid right half + the Pi's keyboard), not part of the bus."""
+        c = S["pi"].get("loglady")
+        if c is None:
+            return
+        st = getattr(self.ctx, "loglady", None) or {}
+        known = bool(st)
+        on = bool(st.get("teletype")) if known else True
+        title = D.Text("LOGLADY", Theme.font(9.5, HEAVY, "mono"), Theme.ink, tracking=1.0)
+        sub = D.Text("grid + keyboard → Teletype" + ("" if not known else (" · connected" if on else " · Teletype off")),
+                     Theme.font(8.5, SEMIBOLD, "mono"), GRID_TT if on else Theme.dim)
+        w, h = max(title.w, sub.w) + 34, title.h + sub.h + 10
+        r = QRectF(c.x() - w / 2, c.y() - h / 2, w, h)
+        path = QPainterPath()
+        path.addRoundedRect(r, 6, 6)
+        p.fillPath(path, Theme.bg)
+        D.draw_path(p, path, _op(XIAO_COLOR, 0.16), _op(XIAO_COLOR, 0.85), 1.2)
+        D.circle(p, QPointF(r.left() + 12, r.top() + 5 + title.h / 2), 3.5, GRID_TT if on else Theme.dim)
+        title.paint(p, r.left() + 22, r.top() + 4)
+        sub.paint(p, r.left() + 22, r.top() + 5 + title.h)
+        self.hits.add(path, lambda: self.ctx.set_mode("teletype"),
+                      "loglady: Teletype's exclusive XIAO — the grid's right half and the Pi's keyboard go to Teletype "
+                      "through her (not part of the MIDI bus)")
 
     # ── right: i2c2midi, ER-301, Teletype, SSP ──
     def _right(self, p, S):
@@ -1831,7 +1944,8 @@ class PiDrawing(Drawing):
         if part == "hub_in":
             return via and DEV_HUB.get(T.device) == arg
         if part == "hub_out":
-            return (arg == "tt" and env == "i2c") or (arg == "ssp" and mod == "ssp")
+            rl = S.get("link_role", {}).get(arg)
+            return (rl == "i2c" and env == "i2c") or (rl == "ssp" and mod == "ssp")
         if part == "er":
             return mod == "er"
         if part == "bus":
@@ -1930,16 +2044,34 @@ class PiDrawing(Drawing):
     def _back_cables(self, p, S):
         pi = S["pi"]
         outs = pi["out"] if pi["mode"] == "fold" else pi["hub_out"]
-        for k, target in (("tt", "i2c_in"), ("ssp", "ssp_in")):
-            a, b = outs[k], S[target]
-            col = module_color("lfo" if k == "tt" else "ssp")
-            hot = self.sel == ("mod_lfo" if k == "tt" else "mod_ssp")
+        target = {"i2c": "i2c_in", "ssp": "ssp_in"}
+        for l in S["links"]:
+            k, rl = l["name"], l["role"]
+            if rl not in target or k not in outs:
+                continue
+            a, b = outs[k], S[target[rl]]
+            col = role_color(rl)
+            hot = self.sel == ("mod_lfo" if rl == "i2c" else "mod_ssp")
             al, wf = self._style(S, self._on(S, "hub_out", k), hot, 0.6, 0.95)
             p.strokePath(_curve(a, b, 0.5), D.pen(_op(col, al), 3.2 * min(wf, 1.25)))
+        # the SSP sends into the bus too (detail views): its way back
+        ssp_k = next((l["name"] for l in S["links"] if l["role"] == "ssp"), None)
+        if ssp_k and "in:" + ssp_k in pi.get("hub_in", {}):
+            a, e = S["ssp_in"] + QPointF(0, 9), pi["hub_in"]["in:" + ssp_k]
+            path = QPainterPath()
+            path.moveTo(a)
+            dx = max(50.0, abs(a.x() - e.x()) * 0.45)
+            path.cubicTo(QPointF(a.x() - dx, a.y()), QPointF(e.x() + dx, e.y()), e + QPointF(5, 0))
+            dimc = _op(module_color("ssp"), 0.4 if S["trace"] is None else 0.15)
+            p.strokePath(path, D.pen(dimc, 1.2, [5, 3]))
+            _arrow(p, e + QPointF(3, 0), True, dimc)
         # the way back: what the i2c2midi sends on USB (Teletype I2M on ch 17–32) comes back into the hub
         col = module_color("lfo")
         a = S["i2c_in"] + QPointF(0, 9)
-        end = pi["hub_in"]["tt_in"] if "tt_in" in pi.get("hub_in", {}) else outs["tt"] + QPointF(0, 9)
+        i2c_k = next((l["name"] for l in S["links"] if l["role"] == "i2c"), None)
+        if i2c_k is None:
+            return self._i2c_bus_cables(p, S, col)
+        end = pi["hub_in"]["in:" + i2c_k] if "in:" + i2c_k in pi.get("hub_in", {}) else outs[i2c_k] + QPointF(0, 9)
         path = QPainterPath()
         path.moveTo(a)
         dx = max(50.0, abs(a.x() - end.x()) * 0.45)
@@ -1952,6 +2084,9 @@ class PiDrawing(Drawing):
         S["back_label"] = path.pointAtPercent(0.5)
         S["back_text"] = "← Teletype" + (" ● live" if tt["live"] else (f" · {tt['usb']} send{'s' if tt['usb'] != 1 else ''}"
                                                                          if tt["usb"] else ""))
+        self._i2c_bus_cables(p, S, col)
+
+    def _i2c_bus_cables(self, p, S, col):
         # I2C: i2c2midi → ER-301 and Teletype
         bus = S["i2c_bus"]
         for end, on in ((S["er_i2c"], self._on(S, "bus")), (S["tt_i2c"], tt_summary(self.ctx)["ports"] > 0)):
@@ -2421,7 +2556,7 @@ def grid_panel(ctx, col: QVBoxLayout):
     card.add(W.row("Service", W.label("running" if sv else "not running", 12, SEMIBOLD, "mono",
                                       Theme.special if sv else Theme.trig)))
     card.add(W.row("Grid", W.label("connected" if sv.get("grid") else "—", 12, SEMIBOLD, "mono", Theme.dim)))
-    card.add(W.row("Teletype (gadget)", W.label("connected" if sv.get("teletype") else "—", 12, SEMIBOLD, "mono", Theme.dim)))
+    card.add(W.row("Teletype (loglady)", W.label("connected" if sv.get("teletype") else "—", 12, SEMIBOLD, "mono", Theme.dim)))
     card.add(W.hint("Restored values go out through the port Grid_Macros into the MIDI hub, like a controller."))
     card.add(W.hbox(W.small_button("Open the Macros tab", lambda: ctx.set_mode("macros")), stretch_end=True))
     col.addWidget(card)
@@ -2511,12 +2646,15 @@ PI_SCRIPT_TEXT = [
     "player dots and rumble go back to the controller.",
 ]
 PI_HUB_TEXT = [
-    "Connects the MIDI devices on the Pi: what comes from DualSense_Controller, the 16n, the pedals, the EC4 and "
-    "the NerdSEQ goes to the XIAO-TT (→ i2c2midi), the XIAO-SSP (→ SSP) and the NerdSEQ, never back to where it "
-    "came from. The SSP's own MIDI out isn't routed.",
-    "On the way: pedals on channel 1 move to the DualSense's channel; 16n values for the SSP are rescaled; CC "
-    "floods to the XIAO-TT are thinned out; the ER-301 routes (config/er301_routes.py) are sent to the i2c2midi "
-    "when they change; an OSC tap passes mapped MIDI to OpenMW on the Mac.",
+    "A MIDI bus. Its members are the Pi's XIAO links (mysteryman, jumpingman, nadine — interchangeable, it doesn't "
+    "matter what is plugged into which) and any unknown MIDI device on the Pi. Each member gets everything from "
+    "DualSense_Controller, the 16n, the pedals, the EC4, the grid macros and the other members; what a member sends "
+    "goes to everyone else, never back to itself. The NerdSEQ gets the same, as before.",
+    "On the way: pedals on channel 1 move to the DualSense's channel; CC floods to the links are thinned out; what "
+    "a device echoes straight back is dropped (no loops); the ER-301 routes go to every link and the i2c2midi "
+    "answers from its own; an OSC tap passes mapped MIDI to OpenMW on the Mac.",
+    "loglady, the fourth XIAO, isn't on the bus: she is Teletype's own link (the grid's right half and the Pi's "
+    "keyboard).",
 ]
 
 
@@ -2659,7 +2797,7 @@ def ssp_panel(ctx, col: QVBoxLayout):
 
     if st.loaded and not st.stale and not st.devices():
         col.addWidget(W.label("⚠︎ No MIDI device is plugged into the SSP right now, so nothing from the MIDI hub "
-                              "reaches it (the XIAO bridge from the Pi isn't connected).", 11, REGULAR, "ui", Theme.trig, wrap=True))
+                              "reaches it (no XIAO link from the Pi is plugged in).", 11, REGULAR, "ui", Theme.trig, wrap=True))
     p = st.active
     mods = S.midi_modules(p)
     if p and not mods:

@@ -6,7 +6,8 @@ Send the ER-301 routing (src/config/er301_routes.py) to the i2c2midi and show it
     python3 scripts/er301_push.py --query    only ask what the i2c2midi is using
     python3 scripts/er301_push.py --dry-run  only check the file and print the SysEx
 
-Works while the MIDI hub is running (it opens its own ALSA client on the XIAO-TT port).
+Works while the MIDI hub is running (it opens its own ALSA clients on the XIAO link ports). The links are
+interchangeable, so it sends to all of them and takes the answer from whichever has the i2c2midi.
 """
 import os
 import sys
@@ -14,13 +15,11 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 import er301_config  # noqa: E402
+from xiao_links import is_link_port  # noqa: E402
 
 
-def find_port(ports):
-    for i, name in enumerate(ports):
-        if "XIAO" in name and "XIAO-SSP" not in name:
-            return i, name
-    return None, None
+def find_ports(ports):
+    return [(i, name) for i, name in enumerate(ports) if is_link_port(name)]
 
 
 def main():
@@ -43,28 +42,38 @@ def main():
         msgs = [er301_config.query_message()]
 
     import rtmidi
-    out, inp = rtmidi.MidiOut(), rtmidi.MidiIn()
-    oi, oname = find_port(out.get_ports())
-    ii, _ = find_port(inp.get_ports())
-    if oi is None or ii is None:
-        print("❌ No XIAO-TT MIDI port found (is the XIAO bridge to the i2c2midi plugged in?)")
+    outs_found = find_ports(rtmidi.MidiOut().get_ports())
+    ins_found = find_ports(rtmidi.MidiIn().get_ports())
+    if not outs_found or not ins_found:
+        print("❌ No XIAO link MIDI port found (is xiao-uart-bridge running?)")
         return 1
     replies = []
-    inp.ignore_types(sysex=False, timing=True, active_sense=True)
-    inp.open_port(ii)
-    inp.set_callback(lambda m, _d: replies.append(m[0]))
-    out.open_port(oi)
+    inps, outs = [], []
+    for ii, _ in ins_found:
+        inp = rtmidi.MidiIn()
+        inp.ignore_types(sysex=False, timing=True, active_sense=True)
+        inp.open_port(ii)
+        inp.set_callback(lambda m, _d: replies.append(m[0]))
+        inps.append(inp)
+    for oi, _ in outs_found:
+        out = rtmidi.MidiOut()
+        out.open_port(oi)
+        outs.append(out)
+    oname = ", ".join(n for _, n in outs_found)
 
-    er301_config.send(out, msgs)
+    for out in outs:
+        er301_config.send(out, msgs)
     t0 = time.time()
     reply = None
     while time.time() - t0 < 2.0 and reply is None:
         for m in list(replies):
             reply = er301_config.parse_reply(m) or reply
         time.sleep(0.02)
-    inp.cancel_callback()
-    inp.close_port()
-    out.close_port()
+    for inp in inps:
+        inp.cancel_callback()
+        inp.close_port()
+    for out in outs:
+        out.close_port()
 
     if reply is None:
         print(f"⚠️  Sent to {oname}, but no answer from the i2c2midi within 2 s.")

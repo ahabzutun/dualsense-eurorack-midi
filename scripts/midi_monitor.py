@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Stream what arrives on one MIDI input as JSON lines, for Kontrolleur's live Teletype view.
 
-    python3 midi_monitor.py [--port XIAO-TT] [--seconds N]
+    python3 midi_monitor.py [--port bus|NAME] [--seconds N]
+
+--port bus (default; "XIAO-TT" means the same, for older callers) listens on every XIAO link at once —
+the links are interchangeable, so the i2c2midi may be on any of them. Any other NAME: the first port
+containing it.
 
 Opens its own ALSA subscription to the port (the MIDI hub keeps its own, nothing is taken away from it)
 and prints one line per message:
@@ -33,6 +37,19 @@ def find(ports, name):
     return next((i for i, p in enumerate(ports) if name.lower() in p.lower()), None)
 
 
+BUS_ALIASES = ("bus", "links", "xiao-tt")
+
+
+def find_all(ports, name):
+    """{port name: index} of the ports to listen on."""
+    if name.lower() in BUS_ALIASES:
+        sys.path.insert(0, __file__.rsplit("/", 2)[0] + "/src")
+        from xiao_links import is_link_port
+        return {p: i for i, p in enumerate(ports) if is_link_port(p)}
+    i = find(ports, name)
+    return {} if i is None else {ports[i]: i}
+
+
 def emit(obj) -> bool:
     try:
         sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
@@ -44,13 +61,12 @@ def emit(obj) -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="XIAO-TT")
+    ap.add_argument("--port", default="bus")
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = until stopped)")
     a = ap.parse_args()
     rtmidi = _rtmidi()
     t0 = time.monotonic()
-    inp = None
-    name = None
+    inps = {}                                 # port name -> MidiIn
     last_hb = 0.0
     pending = []
 
@@ -67,23 +83,21 @@ def main():
             if now - last_hb >= 1.0:
                 last_hb = now
                 probe = rtmidi.MidiIn()
-                ports = probe.get_ports()
-                idx = find(ports, a.port)
-                cur = ports[idx] if idx is not None else None
+                want = find_all(probe.get_ports(), a.port)
                 del probe
-                if cur != name:                       # appeared, disappeared or renumbered: reopen
-                    if inp is not None:
-                        try:
-                            inp.close_port()
-                        except Exception:
-                            pass
-                        inp = None
-                    name = cur
-                    if cur is not None:
-                        inp = rtmidi.MidiIn()
-                        inp.ignore_types(sysex=True, timing=True, active_sense=True)
-                        inp.open_port(idx)
-                        inp.set_callback(cb)
+                for p in [p for p in inps if p not in want]:        # disappeared or renumbered
+                    try:
+                        inps.pop(p).close_port()
+                    except Exception:
+                        pass
+                for p, idx in want.items():
+                    if p not in inps:
+                        i = rtmidi.MidiIn()
+                        i.ignore_types(sysex=True, timing=True, active_sense=True)
+                        i.open_port(idx)
+                        i.set_callback(cb)
+                        inps[p] = i
+                name = " + ".join(sorted(inps)) or None
                 if not emit({"hb": True, "port": name, "t": round(now - t0, 3)}):
                     break
             while pending:
@@ -94,9 +108,9 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if inp is not None:
+        for i in inps.values():
             try:
-                inp.close_port()
+                i.close_port()
             except Exception:
                 pass
 

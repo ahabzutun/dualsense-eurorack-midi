@@ -57,6 +57,8 @@ class Main(QMainWindow):
         self.synced = self.synced_bank = self.synced_pedals = self.synced_ec4 = None
         self.pi_sha: dict = {}          # fingerprints of er301_routes.py / controls.py as loaded (export "sha")
         self.i2c2midi: Optional[dict] = None    # the i2c2midi's last answer to the routing (export "i2c2midi")
+        self.links: Optional[list] = None       # the Pi's XIAO links of the MIDI bus (export "links")
+        self.loglady: Optional[dict] = None     # Teletype's own XIAO (export "loglady")
         self._loading: set = set()      # device loads running (never two at once for the same device)
         self._want_full: set = set()    # …and asked for by their tab while a background read ran
         self.bank_cached = self.pedals_cached = None    # when the shown 16n / MPC-20 settings were read
@@ -508,6 +510,8 @@ class Main(QMainWindow):
                 self.mapping.apply(e)
                 self.pi_sha = dict(e.get("sha") or {})
                 self.i2c2midi = e.get("i2c2midi")
+                self.links = e.get("links") or self.links
+                self.loglady = e.get("loglady")
                 self.synced = self.current_sources()
                 self._sync_shared_ec4()
                 if edited_first:
@@ -625,7 +629,7 @@ class Main(QMainWindow):
             elif r.get("hub") is not None:
                 parts.append("Routing sent to the i2c2midi (this Pi's hub doesn't confirm yet: restart it after updating).")
             else:
-                parts.append("Routing saved, but the hub did not confirm (is the XIAO-TT connected?).")
+                parts.append("Routing saved, but the hub did not confirm (is the i2c2midi on a XIAO link?).")
                 kind = "warn"
             if controls_on:
                 if c is not None and c.get("conflict"):

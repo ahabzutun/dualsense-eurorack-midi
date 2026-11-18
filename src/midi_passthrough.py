@@ -1,6 +1,15 @@
 """
 MIDI Passthrough Hub for DualSense Eurorack system
-Routes MIDI between DualSense virtual port, NerdSEQ, and Percussa SSP
+Routes MIDI between the controllers, the NerdSEQ and the MIDI bus.
+
+THE BUS: every XIAO link (mysteryman, jumpingman, nadine … see ~/xiao-uart/links.json) and every MIDI
+device plugged into the Pi that isn't one of the known controllers is a bus member. Members are
+interchangeable — it doesn't matter what is plugged into which link: each one gets the whole MIDI flow
+(controllers + the other members) and what it sends goes to everyone else, never back to itself.
+Echoes (a device sending back what it just received, MIDI thru) are dropped, so two echoing devices
+can't loop. CC / pressure / bend floods to members are thinned (latest value every 10 ms), and the
+ER-301 routing SysEx goes to all members: the i2c2midi answers from wherever it is plugged in.
+Controllers (INPUT_ONLY) only send into the hub. loglady is not MIDI (Teletype grid + keyboard).
 
 FIX: rtmidi MidiIn objects were not having their callbacks cancelled before
      close_port() and del, creating a reference cycle (MidiIn → callback closure
@@ -29,6 +38,8 @@ except Exception as _e:
     print(f"grid macro pickup not loaded: {_e}")
 import time
 import threading
+import collections
+from xiao_links import link_names, client_of
 try:
     import er301_config     # ER-301 routing for the i2c2midi (config/er301_routes.py)
 except Exception as _e:
@@ -36,11 +47,38 @@ except Exception as _e:
     print(f"er301_config not loaded: {_e}")
 
 
+# Controllers: they send into the hub, nothing is sent to them (not bus members).
+INPUT_ONLY = ("16n", "Faderfox", "EC4", "CH345", "DOREMiDi", "DOReMiDi", "MPC-20", "iii grid", "monome",
+              "Midi Through", "DualSense", "RtMidi", "f_midi", MACRO_PORT_NAME)
+
+
+def is_nerdseq_port(port_name):
+    return "NerdSEQ" in port_name or "USB MIDI" in port_name
+
+
+def bus_member(port_name):
+    """'link' for a XIAO link, 'device' for unknown MIDI hardware on the Pi, None otherwise."""
+    client, num = client_of(port_name)
+    if client in link_names():
+        return "link"
+    if num < 128 and not is_nerdseq_port(port_name) and not any(k in port_name for k in INPUT_ONLY):
+        return "device"
+    return None
+
+
+def bus_key(port_name):
+    return "bus:" + client_of(port_name)[0]
+
+
 class MIDIHub:
     def __init__(self):
         self.outputs = {}
         self.inputs = {}
-        self.skip_devices = ["f_midi", "Midi Through", "XIAO-SSP"]  # SSP's own MIDI out is not routed
+        self.skip_devices = ["f_midi", "Midi Through"]
+        # echo guard: what was sent to each bus member lately (a member sending it back = echo, dropped)
+        self.ECHO_WINDOW = 0.25
+        self._recent_sent = {}
+        self._echo_lock = threading.Lock()
         self._out_port_names = {}   # output key -> ALSA port name currently open
         self.running = True
         self.lock = threading.Lock()
@@ -142,23 +180,15 @@ class MIDIHub:
         found_outputs = {}
 
         for i, port_name in enumerate(available):
-            if "XIAO-SSP" in port_name:
-                # XIAO host-to-host bridge -> Percussa SSP (preferred over the gadget port,
-                # survives Pi reboots without the SSP losing its MIDI device)
-                found_outputs['SSP'] = (i, port_name)
-            elif "f_midi" in port_name:
-                if 'SSP' not in found_outputs:   # gadget port only when no XIAO-SSP bridge
-                    found_outputs['SSP'] = (i, port_name)
-            elif "XIAO" in port_name:
-                # Seeed XIAO host-to-host bridge -> i2c2midi USB -> Teletype
-                found_outputs['Teletype'] = (i, port_name)
-            elif "NerdSEQ" in port_name:
+            if "NerdSEQ" in port_name:
                 found_outputs['NerdSEQ'] = (i, port_name)
             elif "USB MIDI" in port_name and 'NerdSEQ' not in found_outputs:
                 # NerdSEQ sometimes enumerates with generic "USB MIDI" name
                 # instead of "XOR NerdSEQ" after reboot. Accept as fallback
                 # only if a proper NerdSEQ port hasn't already been found.
                 found_outputs['NerdSEQ'] = (i, port_name)
+            elif bus_member(port_name):
+                found_outputs[bus_key(port_name)] = (i, port_name)
 
         current_names = set(found_outputs.keys())
         changed = current_names != self._last_output_names
@@ -196,8 +226,8 @@ class MIDIHub:
                         self.outputs[name] = midiout
                         self._out_port_names[name] = port_name
                         print(f"✅ Output connected: {port_name}")
-                        if name == 'Teletype':
-                            self._er301_push_pending = True
+                        if name.startswith('bus:'):
+                            self._er301_push_pending = True    # wherever the i2c2midi is plugged in
                     except Exception as e:
                         print(f"⚠️  Failed to open {port_name}: {e}")
                         del midiout   # don't leak the client on failure either
@@ -261,7 +291,7 @@ class MIDIHub:
 
                     try:
                         midiin.open_port(port_num)
-                        if "XIAO" in port_name and "XIAO-SSP" not in port_name:
+                        if bus_member(port_name):
                             midiin.ignore_types(sysex=False, timing=True, active_sense=True)   # i2c2midi answers
                         midiin.set_callback(self.make_callback(port_name))
                         self.inputs[port_name] = midiin
@@ -331,25 +361,45 @@ class MIDIHub:
         new_status = msg_type | ((target_channel - 1) & 0x0F)
         return [new_status] + list(midi_message[1:])
 
-    def _tt_coalesce(self, msg):
-        """Queue continuous messages for Teletype; return True if queued."""
+    def _note_sent(self, out_name, msg):
+        with self._echo_lock:
+            dq = self._recent_sent.get(out_name)
+            if dq is None:
+                dq = self._recent_sent[out_name] = collections.deque(maxlen=64)
+            dq.append((tuple(msg), time.monotonic()))
+
+    def _is_echo(self, out_name, msg):
+        """True if this bus member just got exactly this message from us (MIDI thru / echo)."""
+        m, t0 = tuple(msg), time.monotonic() - self.ECHO_WINDOW
+        with self._echo_lock:
+            dq = self._recent_sent.get(out_name)
+            if not dq:
+                return False
+            for i, (mm, t) in enumerate(dq):
+                if mm == m and t >= t0:
+                    del dq[i]
+                    return True
+        return False
+
+    def _tt_coalesce(self, out_name, msg):
+        """Queue continuous messages for a bus member; return True if queued."""
         if not self.TT_COALESCE_ENABLED or len(msg) < 2:
             return False
         if (msg[0] & 0x0F) + 1 in self.TT_COALESCE_EXEMPT_CHANNELS:
             return False
         msg_type = msg[0] & 0xF0
         if msg_type == 0xB0 and len(msg) >= 3:
-            key = (msg[0], msg[1])          # per channel + controller
+            key = (out_name, msg[0], msg[1])    # per output, channel + controller
         elif msg_type in (0xD0, 0xE0):
-            key = (msg[0],)                 # per channel
+            key = (out_name, msg[0])            # per output, channel
         else:
             return False
         with self._tt_lock:
-            self._tt_pending[key] = list(msg)
+            self._tt_pending[key] = (out_name, list(msg))
         return True
 
     def tt_flush_loop(self):
-        """Send the latest queued CC/pressure/bend values to Teletype."""
+        """Send the latest queued CC/pressure/bend values to the bus members."""
         while self.running:
             time.sleep(self.TT_FLUSH_INTERVAL)
             with self._tt_lock:
@@ -358,40 +408,43 @@ class MIDIHub:
                 pending = list(self._tt_pending.values())
                 self._tt_pending.clear()
             with self.lock:
-                out = self.outputs.get('Teletype')
-                if out is None:
-                    continue
-                for m in pending:
+                for out_name, m in pending:
+                    out = self.outputs.get(out_name)
+                    if out is None:
+                        continue
                     try:
                         out.send_message(m)
+                        self._note_sent(out_name, m)
                     except Exception as e:
-                        print(f"⚠️  Failed to flush to Teletype: {e}")
-                        break
+                        print(f"⚠️  Failed to flush to {out_name}: {e}")
 
     def make_callback(self, port_name):
         """Create a callback that forwards MIDI to all outputs.
 
         Routing rules:
           NerdSEQ input  → all outputs except NerdSEQ (echo prevention)
-          Teletype input (XIAO) → all outputs except Teletype (echo prevention)
-          Everything else → all outputs (SSP + Teletype + NerdSEQ if present)
-          CC / pressure / pitch bend to Teletype are coalesced (see TT_COALESCE_*)
+          Bus member input → all outputs except itself; echoes of what it just got are dropped
+          Everything else → all outputs (bus members + NerdSEQ if present)
+          CC / pressure / pitch bend to bus members are coalesced (see TT_COALESCE_*)
         """
         is_nerdseq_source = "NerdSEQ" in port_name or "USB MIDI" in port_name
         is_grid_source    = "iii grid" in port_name
         is_pedal_source   = "CH345" in port_name or "DOREMiDi" in port_name
-        is_teletype_source = "XIAO" in port_name and "XIAO-SSP" not in port_name
+        src_bus = bus_key(port_name) if bus_member(port_name) else None
         is_macro_source = MACRO_PORT_NAME in port_name
 
         def callback(message, data):
             try:
                 midi_message, deltatime = message
-                if midi_message and midi_message[0] == 0xF0:      # SysEx (only the XIAO-TT lets it through)
-                    if is_teletype_source and er301_config is not None:
+                if midi_message and midi_message[0] == 0xF0:      # SysEx (only bus members let it through)
+                    if src_bus is not None and er301_config is not None:
                         r = er301_config.parse_reply(midi_message)
                         if r is not None:
+                            r = dict(r, via=client_of(port_name)[0])   # the XIAO link it is plugged into
                             self._er301_reply = (time.time(), r)
-                    return                                         # never forwarded (as before)            
+                    return                                         # never forwarded (as before)
+                if src_bus is not None and self._is_echo(src_bus, midi_message):
+                    return                                         # MIDI thru of what we sent it: no loop
                 if self.pickup is not None:    # grid macros: faders pick up a loaded value first
                     if is_macro_source:
                         self.pickup.note_macro(midi_message)
@@ -432,9 +485,8 @@ class MIDIHub:
                         if is_nerdseq_source and output_name == 'NerdSEQ':
                             continue
 
-                        # Teletype: echo prevention (its own output must not
-                        # loop back into i2c2midi's MIDI-in store)
-                        if is_teletype_source and output_name == 'Teletype':
+                        # bus member: never back to where it came from
+                        if src_bus is not None and output_name == src_bus:
                             continue
 
                         # Grid ch1 block: grid_bridge owns LP Mini MK3 ch1 path.
@@ -467,10 +519,13 @@ class MIDIHub:
                                     print(f"🎚️  [16n→SSP] CC{msg_to_send[1]} {msg_to_send[2]}→{rescaled[2]}")
                                 msg_to_send = rescaled
 
-                            if output_name == 'Teletype' and self._tt_coalesce(msg_to_send):
+                            is_bus_out = output_name.startswith('bus:')
+                            if is_bus_out and self._tt_coalesce(output_name, msg_to_send):
                                 continue
 
                             output.send_message(msg_to_send)
+                            if is_bus_out:
+                                self._note_sent(output_name, msg_to_send)
                         except Exception as e:
                             print(f"⚠️  Failed to send to {output_name}: {e} -- evicting")
                             stale = self.outputs.pop(output_name, None)
@@ -510,16 +565,18 @@ class MIDIHub:
         return changed
 
     def _er301_send(self, msgs) -> bool:
+        """To every bus member: the i2c2midi answers from whichever link it is plugged into; others
+        ignore the SysEx (non-commercial ID 0x7D)."""
         for msg in msgs:
             with self.lock:
-                out = self.outputs.get('Teletype')
-                if out is None:
+                outs = [(n, o) for n, o in self.outputs.items() if n.startswith('bus:')]
+                if not outs:
                     return False
-                try:
-                    out.send_message(msg)
-                except Exception as e:
-                    print(f"⚠️  ER-301 routing send failed: {e}")
-                    return False
+                for n, out in outs:
+                    try:
+                        out.send_message(msg)
+                    except Exception as e:
+                        print(f"⚠️  ER-301 routing send to {n} failed: {e}")
             time.sleep(0.003)
         return True
 
@@ -536,7 +593,7 @@ class MIDIHub:
             self._er301_mtime = m
             self._er301_push_pending = True
             st["tries"] = 0
-        connected = 'Teletype' in self.outputs
+        connected = any(n.startswith('bus:') for n in self.outputs)
 
         # an answer to what was sent last?
         rep = self._er301_reply

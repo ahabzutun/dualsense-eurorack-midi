@@ -107,6 +107,17 @@ def export():
         result.update({"ok": False, "error": str(e)})
     except Exception as e:
         result.update({"ok": False, "error": f"{type(e).__name__}: {e}"})
+    try:                                          # the MIDI bus's XIAO links (xiao-uart-bridge)
+        with open("/home/ahab/xiao-uart/links.json") as f:
+            result["links"] = [{"name": l["name"], "device": l.get("device"), "enabled": l.get("enabled", True)}
+                               for l in json.load(f)["links"] if l.get("enabled", True)]
+    except Exception:
+        pass
+    try:                                          # loglady, Teletype's own XIAO (loglady-teletype)
+        with open("/run/loglady/status.json") as f:
+            result["loglady"] = json.load(f)
+    except Exception:
+        pass
     print(json.dumps(result))
 
 

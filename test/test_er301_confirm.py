@@ -63,7 +63,7 @@ def hub():
     h._er301 = {"state": "unknown", "expected": None, "summary": "", "sent_at": 0.0, "kind": None, "tries": 0,
                 "next": 0.0, "file_mtime": None, "reply": None, "checked": 0.0}
     dev = FakeI2c2midi(h)
-    h.outputs["Teletype"] = dev
+    h.outputs["bus:jumpingman"] = dev
     return h, dev
 
 
