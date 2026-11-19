@@ -71,6 +71,7 @@ class TxGate:
         gpio.set_pull(self.rx, PULL_DOWN)       # unpowered XIAO reads low, and gets no current from us
         gpio.set_pull(self.tx, PULL_DOWN)       # when TX is an input, hold it low too
         self.alive = threading.Event()
+        self.power_ons = []                     # monotonic times the XIAO came (back) up
 
     def poll(self, now):
         if self.gpio.level(self.rx):
@@ -87,6 +88,8 @@ class TxGate:
             self.gpio.set_func(self.tx, self.alt if want else F_INPUT)
             self.log(f"{'🟢' if want else '⚪'} [{self.name}] XIAO "
                      f"{'powered: TX on' if want else 'unpowered: TX off (no back-powering)'}")
+            if want and self.enabled is not None:
+                self.power_ons = [t for t in self.power_ons if now - t < 600] + [now]
             self.enabled = want
         if want:
             self.alive.set()

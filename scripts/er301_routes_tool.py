@@ -113,6 +113,13 @@ def export():
                                for l in json.load(f)["links"] if l.get("enabled", True)]
     except Exception:
         pass
+    try:                                          # per-link USB host health (xiao-uart-bridge)
+        with open("/run/xiao-uart/status.json") as f:
+            st = json.load(f)
+        if time.time() - st.get("t", 0) < 10:
+            result["link_health"] = st["links"]
+    except Exception:
+        pass
     try:                                          # loglady, Teletype's own XIAO (loglady-teletype)
         with open("/run/loglady/status.json") as f:
             result["loglady"] = json.load(f)

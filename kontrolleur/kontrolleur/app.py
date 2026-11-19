@@ -59,6 +59,7 @@ class Main(QMainWindow):
         self.i2c2midi: Optional[dict] = None    # the i2c2midi's last answer to the routing (export "i2c2midi")
         self.links: Optional[list] = None       # the Pi's XIAO links of the MIDI bus (export "links")
         self.loglady: Optional[dict] = None     # Teletype's own XIAO (export "loglady")
+        self.link_health: Optional[dict] = None # per XIAO link: is its USB host answering (export "link_health")
         self._loading: set = set()      # device loads running (never two at once for the same device)
         self._want_full: set = set()    # …and asked for by their tab while a background read ran
         self.bank_cached = self.pedals_cached = None    # when the shown 16n / MPC-20 settings were read
@@ -512,6 +513,7 @@ class Main(QMainWindow):
                 self.i2c2midi = e.get("i2c2midi")
                 self.links = e.get("links") or self.links
                 self.loglady = e.get("loglady")
+                self.link_health = e.get("link_health")
                 self.synced = self.current_sources()
                 self._sync_shared_ec4()
                 if edited_first:

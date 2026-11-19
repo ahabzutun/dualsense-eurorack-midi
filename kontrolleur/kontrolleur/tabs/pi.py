@@ -731,6 +731,16 @@ SCRIPT_CARDS = [
 # answers the ER-301 routing through one of them. loglady is no MIDI link: she is Teletype's grid + keyboard.
 LINKS_DEFAULT = ("mysteryman", "jumpingman", "nadine")
 ROLE_TEXT = {"i2c": "→ i2c2midi", "ssp": "→ SSP", "free": "free"}
+# A link whose USB host isn't setting its XIAO up (from the bridge's heartbeat + power-on count).
+HEALTH_TEXT = {"flapping": "⚠ keeps restarting", "stuck": "⚠ host not answering", "waiting": "… waiting for host"}
+HEALTH_TIP = {
+    "flapping": "keeps restarting because its USB host doesn't set it up. If that host is the SSP: its USB port "
+                "may have crashed (restart the SSP), or unplug and replug the XIAO.",
+    "stuck": "gave up restarting: its USB host never set it up. Restart that host or replug the XIAO.",
+    "waiting": "powered, but its USB host hasn't set it up yet.",
+}
+HEALTH_RED = QColor(255, 105, 90)
+HEALTH_AMBER = QColor(255, 190, 80)
 ROLE_DEVICE = {"i2c": "I2C2MIDI", "ssp": "SSP", "free": "—"}
 XIAO_COLOR = QColor(255, 196, 120)          # the XIAO chips (Seeed's orange LED)
 
@@ -746,8 +756,15 @@ def xiao_links(ctx) -> List[dict]:
     out = []
     for n in names:
         role = "i2c" if n == i2c else ("ssp" if any(d.startswith(n.lower()) for d in devs) else "free")
-        out.append({"name": n, "role": role})
+        health = ((getattr(ctx, "link_health", None) or {}).get(n) or {}).get("state")
+        out.append({"name": n, "role": role, "health": health})
     return out
+
+
+def link_health(links, name: str) -> Optional[str]:
+    """The link's health if it needs attention ("flapping" | "stuck" | "waiting"), else None."""
+    h = next((l.get("health") for l in links if l["name"] == name), None)
+    return h if h in HEALTH_TEXT else None
 
 
 def link_of(ctx, role: str) -> Optional[str]:
@@ -1690,7 +1707,8 @@ class PiDrawing(Drawing):
                 self._jack_label(p, pi["in"][d], col, d in via, t, max_w=110)
             for k, name, to in hub_outs(S["links"], False):
                 role = S["link_role"].get(k, "free")
-                self._xiao(p, pi["out"][k], name, to, role_color(role), role != "free", max_w=170)
+                self._xiao(p, pi["out"][k], name, to, role_color(role), role != "free", max_w=170,
+                           health=link_health(S["links"], k))
             inuse = {pt.jack[0] for pt in S["pts"]}
             fn = [MOD_NAME[k].split("-")[0] if k != "extras" else "Extras" for k in PI_MODS if k in inuse]
             text = ("functions in use: " + " · ".join(fn)) if fn else "no Pi function patched"
@@ -1804,24 +1822,37 @@ class PiDrawing(Drawing):
                                  max_w=r.width() - 40)
                 continue
             rl = role.get(k, "free")
-            self._xiao(p, pi["hub_out"][k], name, to, role_color(rl), rl != "free", max_w=r.width() - 40)
+            self._xiao(p, pi["hub_out"][k], name, to, role_color(rl), rl != "free", max_w=r.width() - 40,
+                       health=link_health(S["links"], k))
             self.hits.add(QRectF(r.left() + 8, pi["hub_out"][k].y() - S["rj"] / 2, r.width() - 16, S["rj"]), None,
                           f"XIAO link '{k}': " + ({"i2c": "the i2c2midi is plugged into it (it answers the ER-301 routing "
                                                            "through this link)",
                                                    "ssp": "the SSP sees it as its MIDI device",
                                                    "free": "nothing known plugged in — gets the whole bus anyway"}[rl]))
 
-    def _xiao(self, p, c: QPointF, name: str, to: str, col: QColor, on: bool, max_w: float = 200.0):
-        """A XIAO link on the hub's right edge: a chip with its name, where it goes, its jack."""
-        tt = D.Text(to, Theme.font(9, SEMIBOLD, "mono"), col if on else Theme.dim)
-        nt = D.Text(name, Theme.font(9.5, HEAVY, "mono"), _op(Theme.ink, 0.95 if on else 0.6), tracking=0.8,
+    def _xiao(self, p, c: QPointF, name: str, to: str, col: QColor, on: bool, max_w: float = 200.0,
+              health: Optional[str] = None):
+        """A XIAO link on the hub's right edge: a chip with its name, where it goes, its jack.
+        health ("flapping" | "stuck" | "waiting"): its USB host isn't setting it up; shown instead of the role."""
+        warn = HEALTH_RED if health in ("flapping", "stuck") else HEALTH_AMBER if health else None
+        if warn is not None:
+            to = HEALTH_TEXT[health]
+        tt = D.Text(to, Theme.font(9, SEMIBOLD, "mono"), warn or (col if on else Theme.dim),
+                    max_w=max(60.0, max_w * 0.62), min_scale=0.7)
+        nt = D.Text(name, Theme.font(9.5, HEAVY, "mono"), _op(Theme.ink, 0.95 if on or warn else 0.6), tracking=0.8,
                     max_w=max(40.0, max_w - tt.w - 34), min_scale=0.7)
-        chip = D.Pill(nt, 7, 2.5, _op(XIAO_COLOR, 0.17 if on else 0.07), _op(XIAO_COLOR, 0.8 if on else 0.35), 1.1,
-                      radius=4.0)
+        edge = warn or XIAO_COLOR
+        chip = D.Pill(nt, 7, 2.5, _op(edge, 0.17 if on or warn else 0.07), _op(edge, 0.8 if on or warn else 0.35),
+                      1.1, radius=4.0)
         x = c.x() - 16 - tt.w
         tt.paint(p, x, c.y() - tt.h / 2)
-        chip.paint(p, x - 7 - chip.w, c.y() - chip.h / 2)
-        _jack(p, c, col, on, 11)
+        cx = x - 7 - chip.w
+        chip.paint(p, cx, c.y() - chip.h / 2)
+        _jack(p, c, warn or col, on or warn is not None, 11)
+        if warn is not None:
+            path = QPainterPath()
+            path.addRect(QRectF(cx, c.y() - chip.h / 2 - 2, c.x() - cx + 12, chip.h + 4))
+            self.hits.add(path, lambda: None, f"{name.lower()}: {HEALTH_TIP[health]}")
 
     def _loglady(self, p, S):
         """loglady: Teletype's own XIAO on the Pi (grid right half + the Pi's keyboard), not part of the bus."""

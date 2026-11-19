@@ -5,6 +5,8 @@ Before=midi-passthrough.service
 
 [Service]
 User=ahab
+RuntimeDirectory=xiao-uart
+RuntimeDirectoryPreserve=yes
 ExecStart=/usr/bin/python3 /home/ahab/xiao-uart/xiao_uart_bridge.py /home/ahab/xiao-uart/links.json
 Restart=always
 RestartSec=2

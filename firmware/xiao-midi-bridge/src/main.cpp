@@ -9,9 +9,14 @@
 //  - SysEx and system common messages pass through (validated)
 //  - visible LED pulse per forwarded packet (the old toggle was invisible for even counts)
 //  - self-recovery: a hardware watchdog resets the board if the loop ever stops for 2 s, and
-//    the board resets itself if its USB host hasn't configured it for 10 s (the "only the
-//    green power LED" state after a host reboot or power dip). On start-up the yellow LED
-//    blinks 3x after a watchdog reset and 2x after a self-reset (also after flashing).
+//    the board resets itself if its USB host hasn't configured it (the "only the green power
+//    LED" state after a host reboot or power dip). That self-reset backs off: after 10 s, then
+//    30 s, then 2 min, then never again until the host configures it or the power goes. It
+//    never fires while the host is mid-setup (address assigned): pulling out of a half-done
+//    enumeration is what crashed the SSP's USB host (dwc2 "irq nobody cared").
+//    On start-up the yellow LED blinks 3x after a watchdog reset and 2x after a self-reset.
+//  - heartbeat to the Pi once a second, as a packet on cable 1 (dropped by any MIDI parser):
+//    1F A5 (80|state) (80|attempts); state bit 0 = configured, 1 = addressed, 2 = gave up.
 #include <Arduino.h>
 #include <MIDIUSB.h>
 
@@ -21,7 +26,9 @@
 
 static const uint32_t BYTE_GAP_US  = 1000;  // 4 bytes take ~350 us at 115200 baud
 static const uint32_t LED_PULSE_MS = 15;
-static const uint32_t USB_UNCONFIGURED_RESET_MS = 10000;
+static const uint32_t RESET_AFTER_MS[] = { 10000, 30000, 120000 };  // per self-reset attempt
+static const uint8_t  MAX_ATTEMPTS = 3;                               // then wait for the host
+static const uint32_t HEARTBEAT_MS = 1000;
 
 static uint8_t  buf[4];
 static uint8_t  buf_n        = 0;
@@ -54,12 +61,59 @@ static inline void wdt_feed() {
   if (!WDT->STATUS.bit.SYNCBUSY) WDT->CLEAR.reg = WDT_CLEAR_CLEAR_KEY;
 }
 
-// Reset if the USB host hasn't configured us for a while (bus reset clears the configuration).
+// Reset if the USB host hasn't configured us for a while (bus reset clears the configuration),
+// with back-off. The attempt count survives NVIC_SystemReset in a RAM spot that neither this
+// sketch (heap ends ~0x20000B00, stack grows down from 0x20008000) nor the UF2 bootloader
+// (low RAM + top-of-RAM stack) touches; magic + check guard it, and any other reset cause
+// (power, flashing, watchdog) starts again from 0.
+struct Persist { uint32_t magic, attempts, check; };
+static volatile Persist &persist = *reinterpret_cast<volatile Persist *>(0x20005F00u);
+static const uint32_t PERSIST_MAGIC = 0x5A1A0B0Fu;
+static uint8_t  attempts  = 0;       // self-resets since the host last configured us
+static bool     gave_up   = false;
 static uint32_t usb_ok_at = 0;
+
+static void persist_store(uint8_t a) {
+  persist.attempts = a; persist.check = ~(uint32_t)a; persist.magic = PERSIST_MAGIC;
+}
+
+static void persist_load() {
+  const bool self_reset = PM->RCAUSE.reg & PM_RCAUSE_SYST;
+  if (self_reset && persist.magic == PERSIST_MAGIC && persist.check == ~persist.attempts &&
+      persist.attempts <= MAX_ATTEMPTS)
+    attempts = (uint8_t)persist.attempts;
+  else
+    attempts = 0;
+  gave_up = attempts >= MAX_ATTEMPTS;
+  persist_store(attempts);
+}
+
+static inline bool usb_addressed() { return USB->DEVICE.DADD.bit.ADDEN; }
+
 static void usb_health() {
   const uint32_t now = millis();
-  if (USBDevice.configured()) { usb_ok_at = now; return; }
-  if (now - usb_ok_at > USB_UNCONFIGURED_RESET_MS) NVIC_SystemReset();
+  if (USBDevice.configured()) {
+    usb_ok_at = now;
+    if (attempts || gave_up) { attempts = 0; gave_up = false; persist_store(0); }
+    return;
+  }
+  if (usb_addressed()) { usb_ok_at = now; return; }   // host is setting us up: leave it alone
+  if (gave_up) return;
+  if (now - usb_ok_at > RESET_AFTER_MS[attempts]) {
+    persist_store(attempts + 1);
+    NVIC_SystemReset();
+  }
+}
+
+static uint32_t hb_at = 0;
+static void heartbeat() {
+  const uint32_t now = millis();
+  if (now - hb_at < HEARTBEAT_MS) return;
+  hb_at = now;
+  const uint8_t st = 0x80 | (USBDevice.configured() ? 1 : 0) | (usb_addressed() ? 2 : 0) |
+                     (gave_up ? 4 : 0);
+  const uint8_t p[4] = { 0x1F, 0xA5, st, (uint8_t)(0x80 | attempts) };
+  Serial1.write(p, 4);
 }
 
 static void show_reset_cause() {
@@ -148,6 +202,7 @@ void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, led_idle);
   show_reset_cause();
+  persist_load();
   Serial1.begin(UART_BAUD);
   // Pull-up on RX (pin stays muxed to the SERCOM; PULLEN + OUT=1 selects pull-up).
   const PinDescription &rxp = g_APinDescription[PIN_SERIAL1_RX];
@@ -160,6 +215,7 @@ void setup() {
 void loop() {
   wdt_feed();
   usb_health();
+  heartbeat();
   usb_to_uart();
   uart_to_usb();
   led_service();
